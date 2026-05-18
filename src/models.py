@@ -77,6 +77,9 @@ class StockQuote(BaseModel):
     exchange: str = "NSE"
     data_timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     is_stale: bool = False
+    # P2-5 / P3-4: liquidity + technical signals
+    avg_daily_value_cr: Optional[float] = None   # 3-month avg daily traded value (₹ Cr)
+    volume_trend_down_days: Optional[str] = None  # "declining" | "stable" | "increasing"
 
 
 class FinancialMetrics(BaseModel):
@@ -93,6 +96,35 @@ class FinancialMetrics(BaseModel):
     current_ratio: Optional[float] = None
     net_debt_ebitda: Optional[float] = None
     ebitda_margin_latest: Optional[float] = None
+
+    # ── P1-3: Working capital metrics (computed from balance sheet + revenue) ──
+    # Debtor Days = Trade Receivables / Annual Revenue × 365
+    debtor_days_latest: Optional[float] = None   # most recent year
+    debtor_days_3y_ago: Optional[float] = None   # 3 years prior — for trend comparison
+    # Inventory Days = Inventory / Annual Revenue × 365 (None for service companies)
+    inventory_days_latest: Optional[float] = None
+
+    # ── P1-4: Earnings quality ──────────────────────────────────────────────
+    # Other income as % of revenue — high % signals weak core-business earnings
+    other_income_pct_revenue: Optional[float] = None
+
+    # ── P1-1: Sector-specific KPIs — financial services ────────────────────
+    # Populated from Screener ratios section; None for non-banking companies.
+    gnpa_pct: Optional[float] = None    # Gross NPA % — banks/NBFCs
+    nnpa_pct: Optional[float] = None    # Net NPA %
+    nim_pct: Optional[float] = None     # Net Interest Margin %
+    roa_pct: Optional[float] = None     # Return on Assets %
+    car_pct: Optional[float] = None     # Capital Adequacy Ratio %
+
+    # ── P2-3: Trend direction signals ──────────────────────────────────────
+    # Trajectory matters as much as the absolute level.
+    # Values: "improving" | "stable" | "deteriorating" | None
+    roce_trend: Optional[str] = None
+    roe_trend: Optional[str] = None
+    ebitda_margin_trend: Optional[str] = None
+    # ── P2-4: EC-02 cyclical normalization ────────────────────────────────
+    ebitda_margin_5y_avg: Optional[float] = None  # 5Y OPM avg; used in DCF for cyclicals
+
     data_flags: List[str] = Field(default_factory=list)
 
 
@@ -109,6 +141,15 @@ class GovernanceData(BaseModel):
     sebi_orders: List[str] = Field(default_factory=list)
     sebi_record_clean: bool = True
     capital_allocation_description: Optional[str] = None
+    # EC-06: set True for MNC subsidiaries and professionally-managed companies
+    # where promoter holding is naturally low (foreign parent holds via FPI/FDI routes
+    # or there is no controlling promoter family).  When True, the promoter_holding >= 40%
+    # gate in Step 0 is waived.  Populated by BSE shareholding parser or governance
+    # enrichment; defaults to False (conservative).
+    is_mnc: bool = False
+    # P3-2: Insider / promoter activity (last 3 months from BSE bulk/block deals)
+    # "buying" = net promoter/insider purchases, "selling" = net sales, "neutral" = mixed
+    insider_net_buying_3m: Optional[str] = None
     data_flags: List[str] = Field(default_factory=list)
 
 
@@ -173,6 +214,9 @@ class MoatAssessment(BaseModel):
     tam_multiple: Optional[float] = None
     working_capital_flag: str
     moat_narrative: str
+    # P3-1: Management quality signals from concall research
+    management_guidance_reliability: Optional[str] = None  # "High" | "Medium" | "Low" | None
+    concall_quality_note: Optional[str] = None             # 1-sentence note or None
     data_flags: List[str] = Field(default_factory=list)
 
 
@@ -284,6 +328,9 @@ class AnalysisState(BaseModel):
     nifty_52w_high: Optional[float] = None
     nifty_decline_pct: Optional[float] = None
     sector_name: Optional[str] = None
+    # P3-3: Conglomerate detection — ITC, L&T-type multi-business companies where
+    # standard DCF undervalues the sum of parts.  Detected by sector classifier.
+    is_conglomerate: bool = False
 
     # Raw fetched data
     quote: Optional[StockQuote] = None

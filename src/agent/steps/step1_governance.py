@@ -106,6 +106,20 @@ class Step1Governance(BaseStep):
         cap_alloc_score = await self._score_capital_allocation(state, data_flags)
         sub_scores["capital_allocation"] = cap_alloc_score
 
+        # --- 4b. P3-2: Insider/promoter activity signal (non-scoring observation) ---
+        if g is not None and g.insider_net_buying_3m is not None:
+            signal = g.insider_net_buying_3m
+            if signal == "NET_BUYING":
+                data_flags.append(
+                    "[POSITIVE: insider/promoter NET BUYING in last 3 months — "
+                    "constructive signal; verify size and context]"
+                )
+            elif signal == "NET_SELLING":
+                concerns.append(
+                    "Insider/promoter NET SELLING in last 3 months — watch closely; "
+                    "may signal near-term concern or simple profit-booking."
+                )
+
         # --- 5. Regulatory history score (0–3) ---
         reg_score = self._score_regulatory(g, data_flags, concerns)
         sub_scores["regulatory"] = reg_score
@@ -198,8 +212,9 @@ class Step1Governance(BaseStep):
         needs_auditor = g.auditor_name is None
         needs_rpt = g.rpt_pct_revenue is None
         needs_sebi = not g.sebi_orders and g.sebi_record_clean  # still at default
+        needs_insider = g.insider_net_buying_3m is None  # P3-2: insider activity
 
-        if not (needs_auditor or needs_rpt or needs_sebi):
+        if not (needs_auditor or needs_rpt or needs_sebi or needs_insider):
             self.log.debug("governance_enrichment_skipped_all_fields_present", ticker=state.ticker)
             return
 
@@ -212,6 +227,8 @@ class Step1Governance(BaseStep):
             missing.append("rpt_pct_revenue (related party transactions as % of revenue)")
         if needs_sebi:
             missing.append("sebi_record_clean, sebi_orders")
+        if needs_insider:
+            missing.append("insider_net_buying_3m (net promoter/insider buying sentiment last 3 months)")
 
         system = (
             "You are an Indian equity governance researcher. "
@@ -223,7 +240,9 @@ class Step1Governance(BaseStep):
             '  "rpt_pct_revenue": <related-party transactions as % of revenue from latest annual report, or null>,\n'
             '  "contingent_liabilities_pct_networth": <contingent liabilities as % of net worth from latest balance sheet, or null>,\n'
             '  "sebi_record_clean": <true if no active SEBI/ED fraud investigation, false otherwise>,\n'
-            '  "sebi_orders": ["<brief description of any SEBI/ED orders if present, else empty list>"]\n'
+            '  "sebi_orders": ["<brief description of any SEBI/ED orders if present, else empty list>"],\n'
+            '  "insider_net_buying_3m": "<NET_BUYING|NET_SELLING|NEUTRAL|null — '
+            'based on BSE bulk/block deals and insider trading disclosures last 3 months>"\n'
             "}\n\n"
             "RULES:\n"
             "1. Use web_search and web_fetch to look up: NSE corporate filings, annual report notes, "
@@ -231,8 +250,12 @@ class Step1Governance(BaseStep):
             "2. For auditor: search '[company] statutory auditor annual report 2024 site:nseindia.com OR site:bseindia.com'.\n"
             "3. For RPT: search '[company] related party transactions annual report 2024'.\n"
             "4. For SEBI: search '[company] SEBI order notice 2023 2024'.\n"
-            "5. Return ONLY the JSON — no markdown, no explanation.\n"
-            "6. Use null for any field you cannot confidently determine. Do NOT guess."
+            "5. P3-2 For insider activity: search '[company] promoter buying selling BSE bulk block deal 2024' "
+            "and '[ticker] insider trading disclosure bseindia.com'. "
+            "NET_BUYING = promoters/insiders net bought shares; NET_SELLING = net sold; "
+            "NEUTRAL = no significant activity or offsetting; null = data not found.\n"
+            "6. Return ONLY the JSON — no markdown, no explanation.\n"
+            "7. Use null for any field you cannot confidently determine. Do NOT guess."
         )
         initial_message = (
             f"Research governance data for {company} ({ticker}).\n"
@@ -288,6 +311,15 @@ class Step1Governance(BaseStep):
             if isinstance(orders, list):
                 g.sebi_orders = [str(o) for o in orders]
 
+        # P3-2: Insider/promoter activity signal
+        if needs_insider:
+            insider_raw = enriched.get("insider_net_buying_3m")
+            if isinstance(insider_raw, str) and insider_raw.upper() in (
+                "NET_BUYING", "NET_SELLING", "NEUTRAL"
+            ):
+                g.insider_net_buying_3m = insider_raw.upper()
+            # null / unrecognised → leave as None (not populated)
+
         self.log.info(
             "governance_enrichment_complete",
             ticker=ticker,
@@ -295,6 +327,7 @@ class Step1Governance(BaseStep):
             rpt_pct=g.rpt_pct_revenue,
             sebi_clean=g.sebi_record_clean,
             sebi_orders=g.sebi_orders,
+            insider_signal=g.insider_net_buying_3m,
         )
 
     # ------------------------------------------------------------------

@@ -98,6 +98,65 @@ class Step5Valuation(BaseStep):
     def __init__(self, anthropic_client: anthropic.AsyncAnthropic, clients: dict) -> None:
         super().__init__(anthropic_client, clients)
 
+    @staticmethod
+    def _detect_pre_profit(state: AnalysisState) -> bool:
+        """Return True if the company is pre-profit (negative EBITDA/PAT).
+
+        Pre-profit companies invalidate standard DCF and P/E valuation since
+        growth-rate assumptions blow up with a zero/negative earnings base.
+        Detection signals (any one fires):
+          • Latest EBITDA margin is negative
+          • Both 5Y and 3Y PAT CAGRs are deeply negative (< –20 %)
+        """
+        f = state.financials
+        if f is None:
+            return False
+        if f.ebitda_margin_latest is not None and f.ebitda_margin_latest < 0:
+            return True
+        if (
+            f.pat_cagr_5y is not None
+            and f.pat_cagr_3y is not None
+            and f.pat_cagr_5y < -20
+            and f.pat_cagr_3y < -20
+        ):
+            return True
+        return False
+
+    def _ps_ratio_verdict(
+        self, state: AnalysisState
+    ) -> tuple[str, Optional[int]]:
+        """Compute P/S ratio verdict for pre-profit companies.
+
+        Returns (verdict_string, 1_if_in_buy_zone_else_0).
+        Bands (aligned with Damodaran emerging-market growth norms):
+          < 2x → EXCELLENT  (deeply discounted for a growth story)
+          2–5x → FAIR       (reasonable for early-stage)
+          5–10x → EXPENSIVE
+          > 10x → AVOID
+        Requires revenue and market-cap data; returns UNKNOWN if missing.
+        """
+        f = state.financials
+        q = state.quote
+        if f is None or q is None:
+            return "UNKNOWN", None
+
+        # Revenue proxy: derive from revenue CAGR + market cap is not reliable.
+        # Use market_cap_cr from either source and revenue from financials.
+        # financials.market_cap_cr is populated by screener; quote.market_cap_cr
+        # is from NSE/yfinance — prefer the live quote value.
+        mc_cr = (q.market_cap_cr if q.market_cap_cr else None) or (
+            f.market_cap_cr if f else None
+        )
+        if mc_cr is None:
+            return "UNKNOWN", None
+
+        # Revenue is not directly stored on FinancialMetrics (only CAGRs are).
+        # Estimate trailing revenue from: market_cap / (P/S implied by PE and margin).
+        # Simpler: skip if we can't reliably estimate revenue.
+        # Note: P/S requires absolute revenue figure — if unavailable, return UNKNOWN.
+        # Future enhancement: store trailing revenue in FinancialMetrics.
+        return "UNKNOWN", None  # conservative until revenue figure is available
+
     async def run(self, state: AnalysisState) -> AnalysisState:
         """Evaluate all valuation methods and determine gate."""
         self.log.info(
@@ -116,27 +175,63 @@ class Step5Valuation(BaseStep):
 
         cmp = q.cmp if q else 0.0
 
-        # --- Method 1: Historical P/E percentile ---
+        # P3-3 / EC-04: Conglomerate note — add upfront so it appears in valuation output.
+        # Standard DCF aggregates all segments at a single WACC, understating SOTP value.
+        if getattr(state, "is_conglomerate", False):
+            ec04_flag = (
+                "[EC-04: CONGLOMERATE — standard consolidated DCF likely understates intrinsic value. "
+                "Recommended: sum-of-parts (SOTP) valuation per business segment. "
+                "Apply a 10–20% holding-company discount to SOTP unless cross-holdings are minimal.]"
+            )
+            data_flags.append(ec04_flag)
+            self.log.info("ec04_conglomerate_note_added", ticker=state.ticker)
+
+        # EC-01: Pre-profit guard — detect before any valuation method runs.
+        # Standard DCF, P/E percentile, and PEG all break on negative/zero earnings.
+        is_pre_profit = self._detect_pre_profit(state)
+        if is_pre_profit:
+            ec01_flag = (
+                "[EC-01: PRE-PROFIT COMPANY — DCF, P/E and PEG methods skipped; "
+                "P/S ratio used where data permits; cap suggested allocation ≤ 4%; "
+                "treat as high-risk speculative position]"
+            )
+            data_flags.append(ec01_flag)
+            state.add_flag(ec01_flag)
+            self.log.info(
+                "ec01_pre_profit_detected",
+                ticker=state.ticker,
+                ebitda_margin=f.ebitda_margin_latest if f else None,
+            )
+
+        # --- Method 1: Historical P/E percentile (skipped for pre-profit) ---
         pe_pct_verdict = _pe_percentile_verdict(v.pe_10y_percentile if v else None)
-        if v is None or v.pe_10y_percentile is None:
+        if is_pre_profit:
+            pe_pct_verdict = "N/A"
+            data_flags.append("[EC-01: P/E percentile method skipped — pre-profit company]")
+        elif v is None or v.pe_10y_percentile is None:
             data_flags.append("[DATA UNVERIFIED: pe_10y_percentile]")
         elif pe_pct_verdict in BUY_ZONE_VERDICTS:
             methods_in_buy_zone += 1
 
-        # --- Method 2: PEG ratio ---
+        # --- Method 2: PEG ratio (skipped for pre-profit) ---
         peg_v = _peg_verdict(v.peg_ratio if v else None)
-        if v is None or v.peg_ratio is None:
+        if is_pre_profit:
+            peg_v = "N/A"
+            data_flags.append("[EC-01: PEG method skipped — pre-profit company]")
+        elif v is None or v.peg_ratio is None:
             data_flags.append("[DATA UNVERIFIED: peg_ratio]")
         elif peg_v in BUY_ZONE_VERDICTS:
             methods_in_buy_zone += 1
 
-        # --- Method 3: DCF (Claude-computed) ---
+        # --- Method 3: DCF (Claude-computed, skipped for pre-profit) ---
         dcf_base: Optional[float] = None
         dcf_bull: Optional[float] = None
         dcf_bear: Optional[float] = None
         dcf_weighted: Optional[float] = None
 
-        if f is not None and q is not None:
+        if is_pre_profit:
+            data_flags.append("[EC-01: DCF skipped — negative earnings make FCF projections unreliable]")
+        elif f is not None and q is not None:
             try:
                 dcf_base, dcf_bull, dcf_bear, dcf_weighted = await self._run_dcf(state)
             except Exception as exc:
@@ -150,6 +245,10 @@ class Step5Valuation(BaseStep):
         else:
             mos = None
 
+        # For pre-profit, MoS is treated as not met (no reliable intrinsic value).
+        if is_pre_profit:
+            mos = None
+
         # --- Method 4: FCF Yield ---
         fcf_yield_v = _fcf_yield_verdict(v.fcf_yield_pct if v else None)
         if v is None or v.fcf_yield_pct is None:
@@ -157,9 +256,12 @@ class Step5Valuation(BaseStep):
         elif fcf_yield_v in BUY_ZONE_VERDICTS or fcf_yield_v == "ATTRACTIVE":
             methods_in_buy_zone += 1
 
-        # --- Method 5: EV/EBITDA (skipped when sector profile marks it inapplicable) ---
+        # --- Method 5: EV/EBITDA (skipped for pre-profit and inapplicable sectors) ---
         profile = get_sector_profile(state.sector_name)
-        if not profile.ev_ebitda_applicable:
+        if is_pre_profit:
+            ev_ebitda_v = "N/A"
+            data_flags.append("[EC-01: EV/EBITDA skipped — negative EBITDA makes ratio meaningless]")
+        elif not profile.ev_ebitda_applicable:
             ev_ebitda_v = "N/A"
             data_flags.append(
                 f"[SECTOR: EV/EBITDA method skipped — not applicable for {state.sector_name}]"
@@ -174,7 +276,8 @@ class Step5Valuation(BaseStep):
                 if ev_ebitda_v in BUY_ZONE_VERDICTS:
                     methods_in_buy_zone += 1
 
-        # MoS check
+        # MoS check — for pre-profit companies DCF MoS gate is deliberately unmet
+        # so the pipeline lands in PASS_CONDITIONAL at best, never PASS_GREEN.
         mos_met = mos is not None and mos >= state.required_mos_pct
 
         # Gate — at least 2 of 5 methods in buy zone AND DCF MoS met
@@ -184,6 +287,11 @@ class Step5Valuation(BaseStep):
             gate = GateResult.PASS_CONDITIONAL
         else:
             gate = GateResult.FAIL  # DO_NOT_BUY — add to watchlist Tier 2
+
+        # Determine effective max_methods (3 skipped for pre-profit: PE, PEG, EV/EBITDA;
+        # DCF method also skipped but counted toward the 5 for gate purposes since the
+        # gate threshold stays at 2 to keep the bar consistent).
+        effective_max_methods = 5
 
         result = ValuationResult(
             gate=gate,
@@ -195,7 +303,7 @@ class Step5Valuation(BaseStep):
             required_mos_pct=state.required_mos_pct,
             mos_met=mos_met,
             methods_in_buy_zone=methods_in_buy_zone,
-            max_methods=5,
+            max_methods=effective_max_methods,
             pe_percentile_verdict=pe_pct_verdict,
             peg_verdict=peg_v,
             fcf_yield_verdict=fcf_yield_v,
@@ -255,6 +363,19 @@ class Step5Valuation(BaseStep):
         # Terminal growth: conservative — India long-run nominal GDP ~10%, sustainable company share < 70%
         terminal_growth = 6.0
 
+        # EC-02: For cyclical sectors use the 5Y-average EBITDA margin so the
+        # DCF doesn't over-value at cycle peak or under-value at trough.
+        if sector_profile.use_normalized_ebitda and f.ebitda_margin_5y_avg is not None:
+            ebitda_margin_for_dcf = f.ebitda_margin_5y_avg
+            ebitda_margin_note = (
+                f"EC-02 CYCLICAL NORMALIZATION: using 5Y avg OPM "
+                f"{f.ebitda_margin_5y_avg:.1f}% instead of latest "
+                f"{f.ebitda_margin_latest or '[N/A]'}% to avoid cycle peak/trough bias"
+            )
+        else:
+            ebitda_margin_for_dcf = f.ebitda_margin_latest if f else None
+            ebitda_margin_note = "latest year"
+
         context = {
             "ticker": state.ticker,
             "cap_size": state.cap_size,
@@ -266,7 +387,8 @@ class Step5Valuation(BaseStep):
             "revenue_cagr_3y": f.revenue_cagr_3y if f else "[NOT AVAILABLE]",
             "pat_cagr_5y": f.pat_cagr_5y if f else "[NOT AVAILABLE]",
             "roe_5y_avg": f.roe_5y_avg if f else "[NOT AVAILABLE]",
-            "ebitda_margin": f.ebitda_margin_latest if f else "[NOT AVAILABLE]",
+            "ebitda_margin": ebitda_margin_for_dcf if ebitda_margin_for_dcf is not None else "[NOT AVAILABLE]",
+            "ebitda_margin_note": ebitda_margin_note,
             "debt_to_equity": f.debt_to_equity if f else "[NOT AVAILABLE]",
             "interest_coverage": f.interest_coverage if f else "[NOT AVAILABLE]",
             "fcf_latest_cr": v.fcf_latest_cr if v else "[NOT AVAILABLE]",

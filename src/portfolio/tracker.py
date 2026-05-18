@@ -1,13 +1,16 @@
-"""Portfolio state management — reads and writes portfolio markdown files."""
+"""Portfolio state management — reads and writes portfolio markdown files.
+
+Tracks actual trade records (holdings, transactions, tax) in the portfolio/
+directory.  Watchlist and rejection data are stored in the SQLite database
+(investor.db) — use ``src.db.repository`` for those queries.
+"""
 from __future__ import annotations
 
-import re
 from datetime import date
 from pathlib import Path
 from typing import List, Optional
 
 from src.logging_config import get_logger
-from src.models import AnalysisState
 
 
 class PortfolioTracker:
@@ -111,71 +114,6 @@ class PortfolioTracker:
             action=action,
             price=price,
             quantity=quantity,
-        )
-
-    # ------------------------------------------------------------------
-    # Watchlist
-    # ------------------------------------------------------------------
-
-    def add_to_watchlist(
-        self,
-        ticker: str,
-        tier: int,
-        analysis_result: Optional[AnalysisState] = None,
-        reason: str = "",
-    ) -> None:
-        """Append a ticker to the appropriate tier watchlist file.
-
-        Format: | Ticker | Date Added | Reason | Pre-Screen Score | Notes |
-        """
-        tier_file = f"tier{tier}.md"
-        path = Path("analysis") / "watchlist" / tier_file
-
-        today = date.today().isoformat()
-        pre_score = (
-            f"{analysis_result.pre_screen.score}/9"
-            if analysis_result and analysis_result.pre_screen
-            else "N/A"
-        )
-        trigger = (
-            analysis_result.termination_reason or reason
-            if analysis_result
-            else reason
-        )
-        row = f"| {ticker} | {today} | {trigger} | {pre_score} | - |"
-        self._append_line(path, row)
-        self.log.info(
-            "watchlist_updated",
-            ticker=ticker,
-            tier=tier,
-            reason=trigger,
-        )
-
-    # ------------------------------------------------------------------
-    # Rejection tracker
-    # ------------------------------------------------------------------
-
-    def add_rejection(
-        self,
-        ticker: str,
-        step: int,
-        reasons: List[str],
-        re_eval_condition: str,
-    ) -> None:
-        """Append a rejection to rejection-tracker.md.
-
-        Format: | Date | Ticker | Step | Reasons | Re-Eval Condition |
-        """
-        path = Path("analysis") / "watchlist" / "rejection-tracker.md"
-        today = date.today().isoformat()
-        reasons_str = "; ".join(reasons)
-        row = f"| {today} | {ticker} | Step {step} | {reasons_str} | {re_eval_condition} |"
-        self._append_line(path, row)
-        self.log.info(
-            "rejection_logged",
-            ticker=ticker,
-            step=step,
-            reasons=reasons,
         )
 
     # ------------------------------------------------------------------

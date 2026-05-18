@@ -67,26 +67,6 @@ def analyze(ticker: str, save: bool) -> None:
     if save and state.formatted_output:
         _save_report(ticker, state)
 
-    _post_pipeline_actions(state)
-
-
-def _post_pipeline_actions(state: AnalysisState) -> None:
-    """Update watchlist / rejection tracker after any pipeline run."""
-    tracker = PortfolioTracker()
-    if state.recommendation_type == "REJECT" and state.terminated_at_step is not None:
-        reasons = [state.termination_reason or "Gate failure"]
-        if state.governance and state.governance.immediate_triggers:
-            reasons.extend(state.governance.immediate_triggers)
-        tracker.add_rejection(
-            ticker=state.ticker,
-            step=state.terminated_at_step,
-            reasons=reasons,
-            re_eval_condition="Review when underlying cause is resolved",
-        )
-    elif state.recommendation_type == "WATCHLIST":
-        tier = int(state.watchlist_tier) if state.watchlist_tier else 2
-        tracker.add_to_watchlist(ticker=state.ticker, tier=tier, analysis_result=state)
-
 
 def _save_report(ticker: str, state: AnalysisState) -> None:
     """Save the formatted report to analysis/reports/."""
@@ -147,14 +127,20 @@ def portfolio() -> None:
 @click.argument("tier", type=click.Choice(["1", "2", "3"]))
 @click.option("--reason", default="", help="Reason for watchlist addition")
 def watchlist(ticker: str, tier: str, reason: str) -> None:
-    """Add TICKER to the specified watchlist TIER.
+    """Show how to add TICKER to the watchlist.
 
-    Example: investor watchlist HDFC 1 --reason "Valuation too expensive now"
+    Watchlist entries are now managed automatically by the analysis pipeline
+    and persisted to the SQLite database (investor.db).
+
+    Run a full analysis instead:  investor analyze TICKER
+    View watchlist alerts:         investor watchlist-alerts
+    View all watchlist tickers:    investor db-recommendations --type WATCHLIST
     """
-    tracker = PortfolioTracker()
-    tracker.add_to_watchlist(ticker=ticker.upper(), tier=int(tier), reason=reason)
     console.print(
-        f"[green]✓ {ticker.upper()} added to Tier {tier} watchlist[/green]"
+        f"[yellow]ℹ Watchlist is now managed automatically by the analysis pipeline.[/yellow]\n"
+        f"Run [bold]investor analyze {ticker.upper()}[/bold] to evaluate and add to watchlist.\n"
+        f"View current watchlist: [bold]investor db-recommendations --type WATCHLIST[/bold]\n"
+        f"Check entry alerts:     [bold]investor watchlist-alerts[/bold]"
     )
 
 
@@ -165,33 +151,58 @@ def watchlist(ticker: str, tier: str, reason: str) -> None:
 
 @cli.command("correction-scan")
 def correction_scan() -> None:
-    """Check current market mode and show Tier-1 watchlist status."""
+    """Check current market mode and show Tier-1 watchlist entry opportunities."""
 
     async def _run() -> tuple:
         from src.agent.mode_detector import detect_mode
         from src.api.nse import NSEClient
+        from src.db.repository import get_watchlist_with_targets
         from src.models import AnalysisState
 
-        state = AnalysisState(ticker="NIFTY")
+        nifty_state = AnalysisState(ticker="NIFTY")
         async with NSEClient() as nse_client:
-            mode = await detect_mode(nse_client, state)
-        return mode, state
+            mode = await detect_mode(nse_client, nifty_state)
+        tier1_rows = await get_watchlist_with_targets(settings.db_path)
+        tier1_rows = [r for r in tier1_rows if (r.get("watchlist_tier") or 99) == 1]
+        return mode, nifty_state, tier1_rows
 
-    mode, state = asyncio.run(_run())
+    mode, nifty_state, tier1_rows = asyncio.run(_run())
 
     console.print(f"\n[bold]Market Mode: {mode.value.upper()}[/bold]")
-    if state.nifty_level:
-        console.print(f"Nifty 50: {state.nifty_level:,.2f}")
-    if state.nifty_52w_high:
-        console.print(f"52W High: {state.nifty_52w_high:,.2f}")
-    if state.nifty_decline_pct:
-        console.print(f"Decline from peak: {state.nifty_decline_pct:.2f}%")
+    if nifty_state.nifty_level:
+        console.print(f"Nifty 50: {nifty_state.nifty_level:,.2f}")
+    if nifty_state.nifty_52w_high:
+        console.print(f"52W High: {nifty_state.nifty_52w_high:,.2f}")
+    if nifty_state.nifty_decline_pct:
+        console.print(f"Decline from peak: {nifty_state.nifty_decline_pct:.2f}%")
 
-    # Show Tier 1 watchlist
-    tier1_path = Path("analysis") / "watchlist" / "tier1.md"
-    if tier1_path.exists():
-        console.print("\n[bold cyan]Tier 1 Watchlist:[/bold cyan]")
-        console.print(tier1_path.read_text(encoding="utf-8"))
+    # Show Tier 1 watchlist from SQLite
+    if tier1_rows:
+        console.print("\n[bold cyan]Tier 1 Watchlist (from DB):[/bold cyan]")
+        t1_table = Table(show_header=True, header_style="bold")
+        t1_table.add_column("Ticker", style="bold", width=12)
+        t1_table.add_column("Company", width=24)
+        t1_table.add_column("Analysis Date", width=13)
+        t1_table.add_column("CMP @ Analysis", justify="right", width=15)
+        t1_table.add_column("Target Buy", justify="right", width=12)
+        t1_table.add_column("Req MoS%", justify="right", width=10)
+        for r in tier1_rows:
+            cmp_val = r.get("cmp_at_analysis")
+            target = r.get("target_buy_price")
+            t1_table.add_row(
+                r.get("ticker", ""),
+                r.get("company_name", "") or "",
+                r.get("analysis_date", ""),
+                f"₹{cmp_val:.2f}" if cmp_val else "—",
+                f"₹{target:.2f}" if target else "—",
+                f"{r.get('required_mos_pct', '')}%",
+            )
+        console.print(t1_table)
+        console.print(
+            "[dim]Run [bold]investor watchlist-alerts[/bold] to compare live prices against targets.[/dim]"
+        )
+    else:
+        console.print("\n[dim]No Tier 1 watchlist entries in database yet.[/dim]")
 
 
 # ---------------------------------------------------------------------------
@@ -226,16 +237,20 @@ def correction_scan() -> None:
 )
 @click.option(
     "--concurrency",
-    default=5,
+    default=None,
     show_default=True,
-    help="Max parallel HTTP requests during pre-screen (keep ≤ 5 for Screener.in)",
+    help=(
+        "Max parallel HTTP requests during pre-screen. "
+        "Defaults to settings.scan_concurrency (8). "
+        "Use 3–5 on a cold scan; 10–15 once the SQLite warm cache is seeded."
+    ),
 )
 def scan(
     index: str,
     top: int,
     min_score: int,
     prescreen_only: bool,
-    concurrency: int,
+    concurrency: int | None,
 ) -> None:
     """Screen a stock universe and surface the best investment opportunities.
 
@@ -374,7 +389,6 @@ def scan(
         if state.formatted_output:
             path = reports_dir / f"{state.ticker}_{today}.md"
             path.write_text(state.formatted_output, encoding="utf-8")
-        _post_pipeline_actions(state)
     if results:
         console.print(f"[dim]Reports saved → {reports_dir}/[/dim]")
 
@@ -537,8 +551,6 @@ def portfolio_review(concurrency: int, save: bool) -> None:
             today = date.today().isoformat()
             path = reports_dir / f"{ticker}_{today}_portfolio_review.md"
             path.write_text(state.formatted_output, encoding="utf-8")
-
-        _post_pipeline_actions(state)
 
     console.print(action_table)
 
@@ -851,6 +863,309 @@ def db_snapshots(ticker: str, data_type: str | None) -> None:
 
     console.print(table)
     console.print(f"\n[dim]{len(rows)} snapshot(s) for {ticker} · {settings.db_path}[/dim]")
+
+
+# ---------------------------------------------------------------------------
+# watchlist-alerts command  (P2-2)
+# ---------------------------------------------------------------------------
+
+
+@cli.command("watchlist-alerts")
+def watchlist_alerts() -> None:
+    """Compare every WATCHLIST ticker's DCF target buy price against live CMP.
+
+    Fetches current prices via Yahoo Finance and flags tickers that have
+    entered (or are close to) their required margin-of-safety zone.
+
+    \b
+    Alert levels:
+      🟢 ENTER ZONE   — CMP ≤ target buy price (MoS met — run full analysis now)
+      🟡 APPROACHING  — CMP within 10 % above target
+      ⚪ MONITORING   — CMP still above target zone
+    """
+    import asyncio as _asyncio
+
+    from src.db.repository import get_watchlist_with_targets
+
+    rows = _asyncio.run(get_watchlist_with_targets(settings.db_path))
+
+    if not rows:
+        console.print(
+            f"[yellow]No WATCHLIST tickers found in {settings.db_path}. "
+            "Run 'investor analyze TICKER' to add stocks to the watchlist.[/yellow]"
+        )
+        return
+
+    async def _fetch_prices(tickers: list[str]) -> dict[str, float | None]:
+        """Fetch live CMP for a list of tickers via YFinance."""
+        from src.api.yfinance_client import YFinanceClient
+
+        async with YFinanceClient() as yf_client:
+            results: dict[str, float | None] = {}
+            for t in tickers:
+                quote = await yf_client.get_stock_quote(t)
+                results[t] = quote.cmp if quote else None
+        return results
+
+    tickers = [r["ticker"] for r in rows]
+    with console.status("[bold green]Fetching live prices...[/bold green]"):
+        live_prices = asyncio.run(_fetch_prices(tickers))
+
+    table = Table(
+        title="Watchlist Alerts — Live CMP vs DCF Target",
+        show_header=True,
+        header_style="bold cyan",
+        show_lines=True,
+    )
+    table.add_column("Ticker", style="bold", width=10)
+    table.add_column("Company", width=22)
+    table.add_column("Tier", justify="center", width=5)
+    table.add_column("Last Analysis", width=12)
+    table.add_column("CMP @ Analysis", justify="right", width=14)
+    table.add_column("Live CMP", justify="right", width=10)
+    table.add_column("Target Buy ₹", justify="right", width=12)
+    table.add_column("Gap %", justify="right", width=8)
+    table.add_column("Status", width=16)
+
+    enter_zone, approaching, monitoring = [], [], []
+
+    for row in rows:
+        ticker = row["ticker"]
+        live_cmp = live_prices.get(ticker)
+        target = row.get("target_buy_price")
+        cmp_at_analysis = row.get("cmp_at_analysis")
+        tier = row.get("watchlist_tier") or "—"
+
+        live_str = f"₹{live_cmp:.2f}" if live_cmp else "[dim]N/A[/dim]"
+        target_str = f"₹{target:.2f}" if target else "—"
+        old_cmp_str = f"₹{cmp_at_analysis:.2f}" if cmp_at_analysis else "—"
+
+        if live_cmp and target:
+            gap_pct = (live_cmp - target) / target * 100
+            gap_str = f"{gap_pct:+.1f}%"
+            if gap_pct <= 0:
+                status = "[green]🟢 ENTER ZONE[/green]"
+                enter_zone.append(ticker)
+            elif gap_pct <= 10:
+                status = "[yellow]🟡 APPROACHING[/yellow]"
+                approaching.append(ticker)
+            else:
+                status = "[dim]⚪ MONITORING[/dim]"
+                monitoring.append(ticker)
+        else:
+            gap_str = "—"
+            status = "[dim]⚪ NO TARGET[/dim]"
+            monitoring.append(ticker)
+
+        table.add_row(
+            ticker,
+            (row.get("company_name") or "")[:22],
+            str(tier),
+            row.get("analysis_date", ""),
+            old_cmp_str,
+            live_str,
+            target_str,
+            gap_str,
+            status,
+        )
+
+    console.print(table)
+
+    summary_parts = []
+    if enter_zone:
+        summary_parts.append(f"[green]{len(enter_zone)} in buy zone: {', '.join(enter_zone)}[/green]")
+    if approaching:
+        summary_parts.append(f"[yellow]{len(approaching)} approaching: {', '.join(approaching)}[/yellow]")
+    if monitoring:
+        summary_parts.append(f"[dim]{len(monitoring)} monitoring[/dim]")
+    console.print("\n" + "  |  ".join(summary_parts))
+
+    if enter_zone:
+        console.print(
+            f"\n[bold green]⚡ Action required:[/bold green] "
+            f"Run full analysis on: {', '.join(f'investor analyze {t}' for t in enter_zone)}"
+        )
+    console.print(
+        f"\n[dim]Prices via Yahoo Finance (~15-20 min delayed). "
+        f"Targets derived from DCF intrinsic at time of last analysis.[/dim]"
+    )
+
+
+# ---------------------------------------------------------------------------
+# surveillance command  (P2-1)
+# ---------------------------------------------------------------------------
+
+
+@cli.command("surveillance")
+@click.option(
+    "--days-since",
+    default=30,
+    show_default=True,
+    help="Flag tickers whose last analysis is older than this many days",
+)
+def surveillance(days_since: int) -> None:
+    """Light-touch surveillance sweep across all tracked BUY and WATCHLIST positions.
+
+    For each ticker in the database with a BUY or WATCHLIST recommendation:
+      1. Fetches live CMP via Yahoo Finance
+      2. Checks price drift since last analysis (big drops may mean thesis change)
+      3. Flags stale analyses (> --days-since days old)
+      4. Highlights watchlist tickers that have entered their buy zone
+
+    This is a quick, zero-LLM scan (~5s for 30 tickers).  When it flags
+    a ticker for re-analysis, run: investor analyze TICKER
+
+    \b
+    Drift alerts:
+      ▲ CMP up > 20 % since analysis  → may no longer offer MoS; re-evaluate
+      ▼ CMP down > 20 % since analysis → possible buying opportunity or thesis break
+    """
+    import asyncio as _asyncio
+    from datetime import datetime as _dt
+
+    from src.db.repository import get_all_tracked_tickers
+
+    rows = _asyncio.run(get_all_tracked_tickers(settings.db_path))
+
+    if not rows:
+        console.print(
+            f"[yellow]No BUY or WATCHLIST tickers found in {settings.db_path}.[/yellow]"
+        )
+        return
+
+    async def _fetch_prices(tickers: list[str]) -> dict[str, float | None]:
+        from src.api.yfinance_client import YFinanceClient
+
+        async with YFinanceClient() as yf_client:
+            out: dict[str, float | None] = {}
+            for t in tickers:
+                quote = await yf_client.get_stock_quote(t)
+                out[t] = quote.cmp if quote else None
+        return out
+
+    tickers = [r["ticker"] for r in rows]
+    with console.status("[bold green]Fetching live prices for surveillance...[/bold green]"):
+        live_prices = asyncio.run(_fetch_prices(tickers))
+
+    today = date.today()
+
+    table = Table(
+        title="Surveillance — All BUY / WATCHLIST Positions",
+        show_header=True,
+        header_style="bold cyan",
+        show_lines=False,
+    )
+    table.add_column("Ticker", style="bold", width=10)
+    table.add_column("Rec", width=10)
+    table.add_column("Last Analysis", width=12)
+    table.add_column("Stale?", justify="center", width=8)
+    table.add_column("CMP @ Analysis", justify="right", width=14)
+    table.add_column("Live CMP", justify="right", width=10)
+    table.add_column("Drift %", justify="right", width=9)
+    table.add_column("Target ₹", justify="right", width=10)
+    table.add_column("Zone?", justify="center", width=8)
+    table.add_column("Action", width=24)
+
+    re_analyse = []
+    enter_zone = []
+
+    for row in rows:
+        ticker = row["ticker"]
+        rec = row.get("recommendation", "")
+        analysis_date_str = row.get("analysis_date", "")
+        cmp_prev = row.get("cmp_at_analysis")
+        target = row.get("target_buy_price")
+        live_cmp = live_prices.get(ticker)
+
+        # Staleness
+        try:
+            analysis_date = _dt.fromisoformat(analysis_date_str).date()
+            age_days = (today - analysis_date).days
+            stale = age_days > days_since
+        except Exception:
+            age_days = 999
+            stale = True
+        stale_str = f"[red]{age_days}d[/red]" if stale else f"[green]{age_days}d[/green]"
+
+        # Price drift
+        drift_str = "—"
+        drift_action = ""
+        if live_cmp and cmp_prev and cmp_prev > 0:
+            drift_pct = (live_cmp - cmp_prev) / cmp_prev * 100
+            drift_str = f"{drift_pct:+.1f}%"
+            if drift_pct > 20:
+                drift_str = f"[yellow]{drift_str}[/yellow]"
+                drift_action = "↑ Re-evaluate MoS"
+            elif drift_pct < -20:
+                drift_str = f"[cyan]{drift_str}[/cyan]"
+                drift_action = "↓ Opportunity / thesis?"
+
+        # Watchlist zone check
+        zone_str = "—"
+        if rec == "WATCHLIST" and live_cmp and target:
+            gap = (live_cmp - target) / target * 100
+            if gap <= 0:
+                zone_str = "[green]✓ IN[/green]"
+                enter_zone.append(ticker)
+            elif gap <= 10:
+                zone_str = "[yellow]~10%[/yellow]"
+            else:
+                zone_str = f"[dim]+{gap:.0f}%[/dim]"
+
+        # Recommended action
+        if stale:
+            action = "[yellow]Re-run analysis (stale)[/yellow]"
+            re_analyse.append(ticker)
+        elif drift_action:
+            action = drift_action
+            re_analyse.append(ticker)
+        elif zone_str.startswith("[green]"):
+            action = "[green]Run full analysis now[/green]"
+        else:
+            action = "[dim]Continue monitoring[/dim]"
+
+        rec_colour = "green" if rec == "BUY" else "yellow"
+        live_str = f"₹{live_cmp:.2f}" if live_cmp else "[dim]N/A[/dim]"
+        prev_str = f"₹{cmp_prev:.2f}" if cmp_prev else "—"
+        target_str = f"₹{target:.2f}" if target else "—"
+
+        table.add_row(
+            ticker,
+            f"[{rec_colour}]{rec}[/{rec_colour}]",
+            analysis_date_str,
+            stale_str,
+            prev_str,
+            live_str,
+            drift_str,
+            target_str,
+            zone_str,
+            action,
+        )
+
+    console.print(table)
+
+    # Summary actions
+    if enter_zone:
+        console.print(
+            f"\n[bold green]🟢 {len(enter_zone)} ticker(s) in buy zone:[/bold green] "
+            + ", ".join(enter_zone)
+        )
+    if re_analyse:
+        unique_reanalyse = list(dict.fromkeys(re_analyse))  # dedupe, preserve order
+        console.print(
+            f"\n[bold yellow]⚡ {len(unique_reanalyse)} ticker(s) need re-analysis:[/bold yellow] "
+            + ", ".join(f"[bold]{t}[/bold]" for t in unique_reanalyse[:10])
+        )
+        console.print(
+            "[dim]Run: " + "  |  ".join(f"investor analyze {t}" for t in unique_reanalyse[:5])
+            + ("[dim]  …" if len(unique_reanalyse) > 5 else "") + "[/dim]"
+        )
+
+    console.print(
+        f"\n[dim]Prices via Yahoo Finance (~15-20 min delayed). "
+        f"Stale threshold: {days_since} days. "
+        f"DB: {settings.db_path}[/dim]"
+    )
 
 
 if __name__ == "__main__":

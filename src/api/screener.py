@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import re
 from typing import Optional
 
@@ -49,17 +50,37 @@ class ScreenerClient(BaseHTTPClient):
         return self._parse_financials(soup, ticker)
 
     async def _fetch_with_rate_limit_handling(self, url: str) -> Optional[httpx.Response]:
-        """Handle 429 rate limiting with a mandatory 90-second wait."""
-        try:
-            resp = await self.get(url)
-            return resp
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 429:
-                self.log.warning("screener_rate_limited", wait_seconds=90)
-                await asyncio.sleep(90)
-                resp = await self.get(url)
-                return resp
-            raise
+        """Fetch with exponential back-off + jitter on Screener.in 429 responses.
+
+        Back-off schedule (base seconds, ±20 % jitter):
+            Attempt 1 → immediate
+            Attempt 2 → ~10 s  (was flat 90 s)
+            Attempt 3 → ~30 s
+            Attempt 4 → ~90 s  (original wait, now only on 3rd retry)
+
+        This recovers 3–8× faster on brief rate-limit windows while still
+        honouring Screener's throttle on sustained hammering.
+        """
+        _BACKOFF_BASE = [10, 30, 90]  # seconds before each retry
+
+        for attempt, base_wait in enumerate(_BACKOFF_BASE):
+            try:
+                return await self.get(url)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 429:
+                    raise
+                jitter = random.uniform(-0.2 * base_wait, 0.2 * base_wait)
+                wait = round(base_wait + jitter, 1)
+                self.log.warning(
+                    "screener_rate_limited",
+                    wait_seconds=wait,
+                    attempt=attempt + 1,
+                    max_attempts=len(_BACKOFF_BASE) + 1,
+                )
+                await asyncio.sleep(wait)
+
+        # Final attempt after all back-off steps exhausted
+        return await self.get(url)
 
     def _parse_financials(
         self, soup: BeautifulSoup, ticker: str
@@ -76,12 +97,33 @@ class ScreenerClient(BaseHTTPClient):
         metrics.update(self._extract_top_ratios(soup))
         if pl_section:
             metrics.update(self._extract_growth_rates(pl_section))
+            metrics.update(self._extract_pl_values(pl_section))   # P1-3 / P1-4
         if ratios_section:
             metrics.update(self._extract_ratios(ratios_section))
         if balance_section:
             metrics.update(self._extract_balance_sheet(balance_section))
         if cashflow_section and pl_section:
             metrics.update(self._extract_cashflow_ratio(cashflow_section, pl_section))
+
+        # P1-3: Working capital — cross-compute debtor/inventory days from
+        # internal keys populated by _extract_pl_values + _extract_balance_sheet
+        sales_vals: list[float] = metrics.pop("_sales_vals", [])
+        receivables_vals: list[float] = metrics.pop("_receivables_vals", [])
+        inventory_vals: list[float] = metrics.pop("_inventory_vals", [])
+
+        if sales_vals and receivables_vals and sales_vals[-1] > 0:
+            metrics["debtor_days_latest"] = round(
+                receivables_vals[-1] / sales_vals[-1] * 365, 1
+            )
+            if len(sales_vals) >= 3 and len(receivables_vals) >= 3 and sales_vals[-3] > 0:
+                metrics["debtor_days_3y_ago"] = round(
+                    receivables_vals[-3] / sales_vals[-3] * 365, 1
+                )
+
+        if sales_vals and inventory_vals and sales_vals[-1] > 0:
+            metrics["inventory_days_latest"] = round(
+                inventory_vals[-1] / sales_vals[-1] * 365, 1
+            )
 
         required = [
             "revenue_cagr_5y", "pat_cagr_5y", "roe_5y_avg",
@@ -105,6 +147,24 @@ class ScreenerClient(BaseHTTPClient):
             current_ratio=metrics.get("current_ratio"),
             net_debt_ebitda=metrics.get("net_debt_ebitda"),
             ebitda_margin_latest=metrics.get("ebitda_margin_latest"),
+            # P1-3: Working capital
+            debtor_days_latest=metrics.get("debtor_days_latest"),
+            debtor_days_3y_ago=metrics.get("debtor_days_3y_ago"),
+            inventory_days_latest=metrics.get("inventory_days_latest"),
+            # P1-4: Earnings quality
+            other_income_pct_revenue=metrics.get("other_income_pct_revenue"),
+            # P1-1: Bank/NBFC sector KPIs
+            gnpa_pct=metrics.get("gnpa_pct"),
+            nnpa_pct=metrics.get("nnpa_pct"),
+            nim_pct=metrics.get("nim_pct"),
+            roa_pct=metrics.get("roa_pct"),
+            car_pct=metrics.get("car_pct"),
+            # P2-3: Trend directions
+            roce_trend=metrics.get("roce_trend"),
+            roe_trend=metrics.get("roe_trend"),
+            ebitda_margin_trend=metrics.get("ebitda_margin_trend"),
+            # P2-4: Cyclical normalization
+            ebitda_margin_5y_avg=metrics.get("ebitda_margin_5y_avg"),
             data_flags=flags,
         )
 
@@ -169,6 +229,56 @@ class ScreenerClient(BaseHTTPClient):
                         result["roe_5y_avg"] = value
         return result
 
+    def _extract_pl_values(self, section: BeautifulSoup) -> dict:
+        """Extract raw P&L values needed for working-capital and earnings-quality metrics.
+
+        Populates (all as internal keys consumed by _parse_financials):
+          ``_sales_vals``         — list of annual Sales figures (oldest → newest)
+          ``other_income_pct_revenue`` — Other Income as % of latest-year revenue
+
+        Screener puts raw annual figures in the ``data-table responsive-text-nowrap``
+        table inside the profit-loss section.  Rows of interest:
+          • Sales+  /  Revenue from Operations
+          • Other Income+
+        """
+        result: dict = {}
+        sales_vals: list[float] = []
+        other_income_vals: list[float] = []
+
+        main_pl = section.find("table", class_=re.compile(r"data-table"))
+        if not main_pl:
+            return result
+
+        for row in main_pl.find_all("tr"):
+            cells = row.find_all("td")
+            if not cells:
+                continue
+            label = cells[0].get_text(strip=True).lower().replace("+", "").strip()
+            vals: list[float] = []
+            for c in cells[1:]:
+                try:
+                    vals.append(float(c.get_text(strip=True).replace(",", "")))
+                except ValueError:
+                    pass
+            if not vals:
+                continue
+
+            if label in ("sales", "revenue from operations", "net sales", "revenue"):
+                sales_vals = vals
+            elif "other income" in label:
+                other_income_vals = vals
+
+        if sales_vals:
+            result["_sales_vals"] = sales_vals  # consumed later in _parse_financials
+
+        # Other income as % of revenue (latest year only)
+        if other_income_vals and sales_vals and sales_vals[-1] > 0:
+            result["other_income_pct_revenue"] = round(
+                abs(other_income_vals[-1]) / sales_vals[-1] * 100, 1
+            )
+
+        return result
+
     def _extract_ratios(self, section: BeautifulSoup) -> dict:
         """Extract ROE, ROCE, and other ratios from the Ratios section."""
         result: dict = {}
@@ -197,6 +307,16 @@ class ScreenerClient(BaseHTTPClient):
                         result["roe_5y_avg"] = sum(valid[-5:]) / 5
                     elif valid:
                         result["roe_5y_avg"] = sum(valid) / len(valid)
+                    # P2-3: trend — recent 2Y vs prior 3Y
+                    if len(valid) >= 5:
+                        recent = sum(valid[-2:]) / 2
+                        prior = sum(valid[-5:-2]) / 3
+                        diff = recent - prior
+                        result["roe_trend"] = (
+                            "improving" if diff > 2.5 else
+                            "deteriorating" if diff < -2.5 else
+                            "stable"
+                        )
 
                 elif "return on capital" in label or "roce" in label:
                     valid = [v for v in float_vals if v is not None]
@@ -204,6 +324,16 @@ class ScreenerClient(BaseHTTPClient):
                         result["roce_5y_avg"] = sum(valid[-5:]) / 5
                     elif valid:
                         result["roce_5y_avg"] = sum(valid) / len(valid)
+                    # P2-3: ROCE trend
+                    if len(valid) >= 5:
+                        recent = sum(valid[-2:]) / 2
+                        prior = sum(valid[-5:-2]) / 3
+                        diff = recent - prior
+                        result["roce_trend"] = (
+                            "improving" if diff > 2.5 else
+                            "deteriorating" if diff < -2.5 else
+                            "stable"
+                        )
 
                 elif "debt / equity" in label or "d/e" in label:
                     if float_vals and float_vals[-1] is not None:
@@ -220,15 +350,58 @@ class ScreenerClient(BaseHTTPClient):
                 elif "ebitda margin" in label or "opm" in label:
                     if float_vals and float_vals[-1] is not None:
                         result["ebitda_margin_latest"] = float_vals[-1]
+                    # P2-3: EBITDA margin trend; P2-4: 5Y avg for cyclical normalization
+                    valid = [v for v in float_vals if v is not None]
+                    if len(valid) >= 5:
+                        result["ebitda_margin_5y_avg"] = round(sum(valid[-5:]) / 5, 1)
+                        recent = sum(valid[-2:]) / 2
+                        prior = sum(valid[-5:-2]) / 3
+                        diff = recent - prior
+                        result["ebitda_margin_trend"] = (
+                            "expanding" if diff > 1.5 else
+                            "compressing" if diff < -1.5 else
+                            "stable"
+                        )
+                    elif valid:
+                        result["ebitda_margin_5y_avg"] = round(sum(valid) / len(valid), 1)
+
+                # ── P1-1: Bank / NBFC sector KPIs ────────────────────────
+                elif "net interest margin" in label or label.strip() in ("nim", "nim %"):
+                    if float_vals and float_vals[-1] is not None:
+                        result["nim_pct"] = float_vals[-1]
+
+                elif "gross npa" in label or label.strip() in ("gnpa %", "gnpa"):
+                    if float_vals and float_vals[-1] is not None:
+                        result["gnpa_pct"] = float_vals[-1]
+
+                elif "net npa" in label or label.strip() in ("nnpa %", "nnpa"):
+                    if float_vals and float_vals[-1] is not None:
+                        result["nnpa_pct"] = float_vals[-1]
+
+                elif "return on asset" in label or label.strip() in ("roa", "roa %"):
+                    if float_vals and float_vals[-1] is not None:
+                        result["roa_pct"] = float_vals[-1]
+
+                elif "capital adequacy" in label or label.strip() in ("car", "car %", "crar %"):
+                    if float_vals and float_vals[-1] is not None:
+                        result["car_pct"] = float_vals[-1]
 
         return result
 
     def _extract_balance_sheet(self, section: BeautifulSoup) -> dict:
-        """Compute D/E from balance sheet data (Borrowings / Equity+Reserves)."""
+        """Extract D/E ratio, trade receivables, and inventory from balance sheet.
+
+        D/E  = Borrowings / (Equity Capital + Reserves)
+        Also stores ``_receivables_vals`` and ``_inventory_vals`` as internal
+        keys (lists of annual values, oldest→newest) so _parse_financials can
+        compute debtor days and inventory days.
+        """
         result: dict = {}
         borrowings: Optional[float] = None
         equity_capital: Optional[float] = None
         reserves: Optional[float] = None
+        receivables_vals: list[float] = []
+        inventory_vals: list[float] = []
 
         main_table = section.find("table", class_="data-table")
         if main_table:
@@ -236,8 +409,8 @@ class ScreenerClient(BaseHTTPClient):
                 cells = row.find_all("td")
                 if not cells:
                     continue
-                label = cells[0].get_text(strip=True).lower()
-                vals = []
+                label = cells[0].get_text(strip=True).lower().replace("+", "").strip()
+                vals: list[float] = []
                 for c in cells[1:]:
                     try:
                         vals.append(float(c.get_text(strip=True).replace(",", "")))
@@ -254,11 +427,25 @@ class ScreenerClient(BaseHTTPClient):
                     equity_capital = latest
                 elif "reserves" in label:
                     reserves = latest
+                # P1-3: Trade receivables (various Screener label forms)
+                elif label in (
+                    "trade receivables", "debtors", "sundry debtors",
+                    "receivables", "trade and other receivables",
+                ):
+                    receivables_vals = vals
+                # P1-3: Inventory
+                elif label in ("inventories", "inventory", "stock"):
+                    inventory_vals = vals
 
         if borrowings is not None and equity_capital is not None and reserves is not None:
             total_equity = equity_capital + reserves
             if total_equity > 0:
                 result["debt_to_equity"] = round(borrowings / total_equity, 2)
+
+        if receivables_vals:
+            result["_receivables_vals"] = receivables_vals  # consumed by _parse_financials
+        if inventory_vals:
+            result["_inventory_vals"] = inventory_vals
 
         return result
 

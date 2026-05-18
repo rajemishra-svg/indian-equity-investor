@@ -122,12 +122,14 @@ async def test_get_financials_returns_none_on_network_error():
 
 @pytest.mark.asyncio
 async def test_get_financials_rate_limit_triggers_wait(monkeypatch):
-    """429 response should trigger a 90-second wait before retry."""
+    """429 response should trigger an exponential back-off wait before retry."""
     sleep_calls = []
 
     async def fake_sleep(seconds):
         sleep_calls.append(seconds)
 
+    # Suppress random jitter so assertions are deterministic
+    monkeypatch.setattr("src.api.screener.random.uniform", lambda a, b: 0.0)
     monkeypatch.setattr("src.api.screener.asyncio.sleep", fake_sleep)
 
     with respx.mock(base_url="https://www.screener.in") as mock:
@@ -142,8 +144,38 @@ async def test_get_financials_rate_limit_triggers_wait(monkeypatch):
         async with ScreenerClient() as client:
             metrics = await client.get_financials("RELIANCE")
 
-    # Sleep was called with 90 seconds
-    assert 90 in sleep_calls
+    # First back-off step is 10 s (jitter zeroed → exactly 10.0)
+    assert len(sleep_calls) == 1
+    assert sleep_calls[0] == 10.0
+    assert metrics is not None
+
+
+@pytest.mark.asyncio
+async def test_get_financials_rate_limit_multiple_retries(monkeypatch):
+    """Three consecutive 429s should walk through the full backoff schedule."""
+    sleep_calls = []
+
+    async def fake_sleep(seconds):
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr("src.api.screener.random.uniform", lambda a, b: 0.0)
+    monkeypatch.setattr("src.api.screener.asyncio.sleep", fake_sleep)
+
+    with respx.mock(base_url="https://www.screener.in") as mock:
+        mock.get("/company/RELIANCE/consolidated/").mock(
+            side_effect=[
+                httpx.Response(429, text="Too Many Requests"),
+                httpx.Response(429, text="Too Many Requests"),
+                httpx.Response(429, text="Too Many Requests"),
+                httpx.Response(200, text=SCREENER_HTML),
+            ]
+        )
+
+        async with ScreenerClient() as client:
+            metrics = await client.get_financials("RELIANCE")
+
+    # Backoff schedule: 10 s, 30 s, 90 s (jitter zeroed)
+    assert sleep_calls == [10.0, 30.0, 90.0]
     assert metrics is not None
 
 

@@ -83,6 +83,14 @@ class Step2Moat(BaseStep):
             "[NOT AVAILABLE].\n"
             "3. After gathering data, return ONLY a valid JSON object — no markdown "
             "code blocks, no explanation outside the JSON.\n\n"
+            "RESEARCH GUIDANCE:\n"
+            "• Market position: search '[company] market share rank segment site:screener.in OR site:moneycontrol.com'\n"
+            "• Moat sources: search '[company] competitive advantage moat durable'\n"
+            "• P3-1 Management quality: search '[company] concall transcript management guidance 2024' "
+            "and '[company] investor presentation capital allocation'. Look for: "
+            "(a) whether management guidance has been consistently met over 2–3 years, "
+            "(b) quality of capital allocation commentary (ROCE targets, acquisition discipline), "
+            "(c) transparency on challenges (not just positives).\n\n"
             "JSON schema:\n"
             "{\n"
             '  "moat_type": "<one of: brand|network_effect|cost_leadership|'
@@ -93,6 +101,9 @@ class Step2Moat(BaseStep):
             '  "tam_multiple": <float or null — TAM / current revenue>,\n'
             '  "working_capital_flag": "<Clean|Stretched|Deteriorating>",\n'
             '  "moat_narrative": "<2-3 sentence narrative explaining the moat>",\n'
+            '  "management_guidance_reliability": "<High|Medium|Low|null — '
+            'High = met guidance in 3+ of last 4 quarters, Low = missed guidance repeatedly>",\n'
+            '  "concall_quality_note": "<1 sentence on management communication quality, or null>",\n'
             '  "data_flags": [<list of [DATA UNVERIFIED] flags for missing items>]\n'
             "}"
         )
@@ -151,6 +162,19 @@ class Step2Moat(BaseStep):
         except ValueError:
             moat_type = MoatType.NONE
 
+        # P3-1: Extract management quality / concall signals
+        mgmt_reliability = data.get("management_guidance_reliability")
+        if isinstance(mgmt_reliability, str) and mgmt_reliability.lower() in (
+            "high", "medium", "low"
+        ):
+            mgmt_reliability = mgmt_reliability.capitalize()
+        else:
+            mgmt_reliability = None
+
+        concall_note = data.get("concall_quality_note")
+        if not isinstance(concall_note, str) or not concall_note.strip():
+            concall_note = None
+
         return MoatAssessment(
             moat_type=moat_type,
             moat_durability=data.get("moat_durability", "Unknown"),
@@ -159,5 +183,7 @@ class Step2Moat(BaseStep):
             tam_multiple=data.get("tam_multiple"),
             working_capital_flag=data.get("working_capital_flag", "[NOT AVAILABLE]"),
             moat_narrative=data.get("moat_narrative", "[NOT AVAILABLE]"),
+            management_guidance_reliability=mgmt_reliability,
+            concall_quality_note=concall_note,
             data_flags=data.get("data_flags", []),
         )

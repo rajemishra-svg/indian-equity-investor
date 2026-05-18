@@ -8,8 +8,8 @@ description: >
   asks about Nifty levels, index corrections, FII/DII flows, or sector tailwinds in the
   Indian context. Use this skill even for loosely phrased requests like "is X a good stock",
   "should I buy Y now", "what's the best defence stock to buy", or "is the market expensive".
-  This skill implements the full 9-step investment framework from the companion reference:
-  long_term_investing_context_v2.md.
+  This skill implements the full 10-step (Step 0–Step 9) investment pipeline defined in
+  src/agent/steps/ and orchestrated by src/agent/pipeline.py.
 compatibility:
   requires:
     - web_search (real-time price, filings, news)
@@ -28,8 +28,10 @@ compatibility:
 
 ## 1. Skill Overview
 
-This skill implements a disciplined, 9-step agentic research workflow for identifying
-high-quality Indian equity investments that can compound at 15%+ CAGR over 5+ years.
+This skill implements a disciplined, 10-step agentic research workflow (Step 0 through
+Step 9) for identifying high-quality Indian equity investments that can compound at
+15%+ CAGR over 5+ years. The pipeline is implemented in `src/agent/steps/` and
+orchestrated by `src/agent/pipeline.py`.
 
 **Operating principle**: Fail fast on hard gates. Never rationalise past a red flag.
 **Data principle**: No hallucinated numbers. Label every estimate as [ESTIMATE]. Label
@@ -46,15 +48,16 @@ deployment posture, and which steps to prioritise.
 MODE DETECTION PROCEDURE
 ─────────────────────────────────────────────────────────────────────
 1. Fetch Nifty 50 current level and 52-week high.
+   Primary: NSEClient.get_nifty_level() → fallback: YFinanceClient (^NSEI)
+   If all sources fail → default to Normal Mode + [MODE UNCONFIRMED] flag.
+
 2. Compute decline from peak: decline% = (peak - current) / peak * 100
 
-   decline% < 5%      → MODE A: Normal Mode
-   5% ≤ decline% < 8% → MODE A: Normal Mode (watchlist refresh alert)
-   8% ≤ decline% < 12%→ MODE B: Correction Mode (Priority 2)
-   12% ≤ decline% < 15%→ MODE B: Correction Mode (Priority 1)
-   decline% ≥ 15%     → MODE B: Correction Mode (MAXIMUM PRIORITY)
+   decline% < 8%       → NORMAL MODE
+   8% ≤ decline% < 15% → CORRECTION MODE
+   decline% ≥ 15%      → MAXIMUM OPPORTUNITY MODE
 
-3. If MODE B: notify user immediately before beginning stock analysis.
+3. If Correction or Maximum Opportunity: notify user immediately.
    Use this exact notification:
 
    ⚠️ CORRECTION ALERT
@@ -63,7 +66,8 @@ MODE DETECTION PROCEDURE
    Fast-recovering sectors: Private Banking → Defence/Cap Goods → Pharma → IT.
    Deploying max 20–25% of available cash per event. Staggered tranches recommended.
 
-4. Store mode in working context. All subsequent steps reference it.
+4. Store mode in AnalysisState.mode. All subsequent steps reference it.
+   MoS thresholds in Step 5 are automatically adjusted by the pipeline.
 ─────────────────────────────────────────────────────────────────────
 ```
 
@@ -155,7 +159,14 @@ to all subsequent outputs. Apply extra scrutiny in Steps 1 and 3.
 - SEBI orders / ED notices (SEBI SCORES portal)
 - Capital allocation history: ROIC on incremental capital, acquisition track record
 
-**Governance data enrichment**: Before scoring, Step 1 runs a focused mini agentic loop (Haiku, ≤ 4 iterations, web_search + web_fetch) to fill any missing fields — auditor name, RPT %, SEBI orders. The loop only fires if any of these three fields are absent from the prefetched shareholding data. Search priority: NSE/BSE filings pages → Annual report Notes to Accounts → SEBI SCORES portal. Output is merged into the GovernanceData object before scoring begins.
+**Governance data enrichment**: Before scoring, Step 1 runs a focused mini agentic loop (Haiku, ≤ 4 iterations, web_search + web_fetch) to fill any missing fields — auditor name, RPT %, SEBI orders, **and insider/promoter transaction activity (last 3 months)**. The loop fires if any of these fields are absent from the prefetched shareholding data. Search priority: BSE bulk/block deal reports → NSE/BSE filings pages → Annual report Notes to Accounts → SEBI SCORES portal. Output is merged into `GovernanceData` before scoring begins.
+
+**Insider/promoter activity signal** (P3-2, non-scoring — enrichment only):
+- Search BSE bulk/block deal disclosures for the last 3 months.
+- Classify net activity as `NET_BUYING`, `NET_SELLING`, or `NEUTRAL`.
+- `NET_BUYING` → append `[POSITIVE: insider/promoter NET BUYING in last 3 months — constructive signal]` to governance flags.
+- `NET_SELLING` → add to concerns list: "Insider/promoter NET SELLING in last 3 months — monitor for thesis change."
+- Does **not** affect governance score; purely informational.
 
 **Scoring logic**:
 ```
@@ -198,6 +209,8 @@ TOTAL                                   /15
 
 **Input required**: Step 1 PASS (Green or Yellow).
 
+**Implementation**: Agentic loop (claude-sonnet-4-6, ≤ 6 iterations, web_search + web_fetch).
+
 **Process**:
 1. Identify the **primary moat type** from: Brand / Network Effect / Cost Leadership /
    Switching Costs / Regulatory Moat / Scale Advantages / IP-Patents.
@@ -207,6 +220,12 @@ TOTAL                                   /15
 4. Check market share trend over 5 years: growing / stable / declining.
 5. Assess TAM: must be ≥ 3× current revenue.
 6. Check working capital: flag if DSO or Inventory Days rose > 20% YoY for 2+ consecutive years.
+7. **Search for concall transcripts** (P3-1): find the last 2 quarterly concall transcripts or
+   earnings call summaries on BSE filings, Screener.in, or Trendlyne. Assess:
+   - Did management guidance match actual reported results?
+   - Is the tone specific and data-driven, or vague and marketing-heavy?
+   - Classify as `management_guidance_reliability: High | Medium | Low`
+   - Summarise in `concall_quality_note`: 1 sentence on tone and track record.
 
 **Output required before Step 3**:
 ```
@@ -217,11 +236,15 @@ MARKET_SHARE_TREND: [Growing / Stable / Declining]
 TAM_MULTIPLE: [Xx current revenue]
 WORKING_CAPITAL_FLAG: [Clean / FLAG: DSO +X% YoY for N years]
 MOAT_NARRATIVE: [2–3 line explanation of competitive advantage]
+MGMT_GUIDANCE_RELIABILITY: [High / Medium / Low / null]
+CONCALL_QUALITY_NOTE: [1 sentence, or null if no transcript found]
 ```
 
-**Edge case — Conglomerate or multi-segment business**:
+**Edge case — Conglomerate or multi-segment business** (EC-04):
 Assess moat per **primary revenue-generating segment** (> 50% of revenue).
 Note other segments separately. Use the weakest moat assessment as the governing score.
+If `state.is_conglomerate` is already flagged by the pipeline classifier, apply SOTP note
+in Step 5 automatically — the EC-04 flag fires before valuation calculations run.
 
 ---
 
@@ -270,6 +293,9 @@ Log as `[SECTOR OVERRIDE: D/E and ICR waived — financial services sector uses 
 - PAT deceleration: if 5Y vs 3Y gap > 10pp → flag margin compression or base effect.
 - EBITDA margin: < 8% → `[WATCH: very thin margin — sector benchmark check required]`; 8–10% → watch flag.
 - ICR data gap: if interest_coverage = None but D/E > 0.1 → `[DATA UNVERIFIED: interest_coverage — company has debt but ICR not available; treat as passing but verify manually]`.
+- **Bank / NBFC KPIs** (P1-1, fires when sector = `financial_services`): Check GNPA trend (last 4 quarters), NIM trend, PCR ≥ 70%, CASA ratio. GNPA rising for 2+ consecutive quarters → add to concerns.
+- **Working capital trend** (P1-3): Check DSO and Inventory Days 3Y trend. DSO rising > 20% YoY for 2+ years → `[WC_DETERIORATION: DSO +X%]`. Applies even when overall financials are clean.
+- **Earnings quality** (P1-4): Check Other Income as % of PBT. If > 20% in 2+ of last 3 years → `[EARNINGS QUALITY: high other income reliance — investigate one-off vs. structural]`.
 
 **Sector adjustment**: Before applying thresholds, read `references/sector-benchmarks.md`
 and apply sector-specific overrides. Log any override explicitly with `[SECTOR OVERRIDE: reason]`.
@@ -286,7 +312,7 @@ and apply sector-specific overrides. Log any override explicitly with `[SECTOR O
 **Input required**: Step 3 PASS.
 
 **Process**:
-1. Identify the **primary sector** from the priority list in long_term_investing_context_v2.md.
+1. Identify the **primary sector** from the priority list in `references/sector-benchmarks.md`.
 2. Classify the tailwind as:
    - **Structural** (multi-decade: demographics, regulation, technology shift) → strongest backing
    - **Policy-driven** (government programme, PLI scheme) → strong, but monitor political risk
@@ -320,6 +346,11 @@ TAILWIND_NARRATIVE: [2–3 lines]
 - Net Debt (latest)
 - Shares outstanding
 
+**Edge cases that fire automatically before valuations run**:
+- **EC-04 (Conglomerate)**: If `state.is_conglomerate` is True (detected by `is_conglomerate()` in `src/sector/classifier.py`), Step 5 prepends: `[EC-04: CONGLOMERATE — standard consolidated DCF likely understates intrinsic value. Recommended: sum-of-parts (SOTP) valuation per business segment. Apply a 10–20% holding-company discount to SOTP unless cross-holdings are minimal.]`
+- **EC-02 (Cyclical normalisation)**: If `sector_profile.use_normalized_ebitda = True`, the DCF uses normalised (mid-cycle) EBITDA margins rather than trailing margins. Flag: `[EC-02: CYCLICAL — using mid-cycle normalised margins for DCF base case]`
+- **EC-01 (Pre-profit)**: If no positive PAT history, Step 5 substitutes revenue-based DCF or P/S ratio. Flag: `[EC-01: PRE-PROFIT — revenue-based valuation applied]`
+
 **Valuation methods** — use minimum two, triangulate:
 
 ```
@@ -345,10 +376,12 @@ METHOD 3: DCF (3 Scenarios)
   - Bear (25% weight): Revenue growth = 5Y historical CAGR × 0.6
   - WACC (risk-adjusted by cap size and sector):
       Large Cap  : 13%  |  Mid Cap: 15%  |  Small Cap: 16.5%
-      +1% premium for cyclical sectors (commodity, infra, real estate, metal, steel, cement)
+      +0.5% for infrastructure/utility; +1.0% for commodities/cyclical sectors
   - Terminal growth: 6% (conservative India long-run sustainable rate; never use > 8%)
   - Intrinsic value = weighted average of 3 scenarios
   - Margin of Safety = (Intrinsic Value - CMP) / Intrinsic Value × 100
+  - `target_buy_price` = intrinsic_weighted × (1 − required_mos_pct/100)
+    → stored in SQLite for watchlist-alerts monitoring
 
 METHOD 4: FCF YIELD (validation check)
   - FCF Yield = FCF per share / CMP × 100
@@ -366,18 +399,20 @@ METHOD 5: EV/EBITDA (sector-agnostic cross-check; skip for financial services)
 **Margin of Safety required by cap size**:
 ```
 Cap Size               Normal Mode    Correction Mode    Maximum Opportunity (>15%)
-Large Cap (Nifty 100)     25%              20%                  15%
-Mid Cap                   35%              30%                  25%
-Small Cap                 45%              40%                  35%
+Large Cap (Nifty 100)     20–30%           15–25%               15%
+Mid Cap                   30–40%           25–35%               25%
+Small Cap                 40–50%           35–45%               35%
 ```
+Note: exact thresholds are set in `src/config.py` and vary by mode. The pipeline sets
+`state.required_mos_pct` automatically based on cap size + market mode.
 
 **Gate**:
-- ≥ 2 of 5 methods in BUY ZONE AND MoS threshold met → PASS GREEN
-- 1 method in BUY ZONE → CONDITIONAL (flag; consider Tranche 1 only)
-- No method in BUY ZONE or MoS not met → DO NOT BUY NOW; add to Tier 2 watchlist
+- ≥ 2 of 5 methods in BUY ZONE AND MoS threshold met → PASS GREEN (WATCHLIST TIER 1)
+- 1 method in BUY ZONE → PASS CONDITIONAL (flag; consider Tranche 1 only)
+- No method in BUY ZONE or MoS not met → WATCHLIST TIER 2 (pipeline continues for peer check)
 
-**On "DO NOT BUY NOW"**: Output a Watchlist Addition record (see output templates).
-Do not proceed to Steps 6–8. Log as `[VALUATION HOLD — TIER 2]`.
+**On Watchlist Tier 2**: Output a Watchlist Addition record (see output templates).
+Log as `[VALUATION HOLD — TIER 2]`. Steps 6–8 still run to populate peer and risk data.
 
 ---
 
@@ -736,8 +771,22 @@ The most common edge cases are handled inline here:
 
 ## 8. Ongoing Surveillance Trigger Rules
 
-After a stock enters the portfolio, the following events trigger an immediate re-run of
-Steps 1 and 3 (governance and financial checks):
+After a stock enters the portfolio or watchlist, the pipeline stores all results in
+`investor.db`. Use the CLI commands for ongoing monitoring:
+
+```bash
+uv run investor watchlist-alerts     # price-vs-target alerts for Tier-1 watchlist
+uv run investor surveillance         # quarterly thesis-check for held positions
+```
+
+**Watchlist alerts** query `get_watchlist_with_targets()` from SQLite and compare current
+price against `target_buy_price` (stored at analysis time). An alert fires when CMP ≤
+target_buy_price.
+
+**Surveillance** queries `get_all_tracked_tickers()` and reruns Steps 1 + 3 for any
+held position to catch governance or financial deterioration.
+
+The following events trigger an immediate re-run of Steps 1 and 3:
 
 ```
 EVENT                                 URGENCY        ACTION
@@ -791,8 +840,8 @@ Read these files when the situation requires deeper reference:
 ## 10. Skill Self-Check (Run Before Every Session)
 
 ```
-□ Is the companion framework (long_term_investing_context_v2.md) accessible?
-□ Are all 5 reference files accessible?
+□ Are all 5 reference files accessible? (data-sources, sector-benchmarks,
+    output-templates, edge-cases, error-recovery)
 □ Is web_search available? (required for real-time data)
 □ Is web_fetch available? (required for NSE/BSE filings)
 □ Is today's date known? (required for data freshness checks and LTCG tax calculations)
@@ -804,7 +853,19 @@ If any prerequisite is missing, notify the user before beginning analysis.
 Do not attempt analysis with broken tooling — partial outputs with hallucinated data
 are worse than no output.
 
+**Automated EC/ER codes** — the following are enforced in code and do not require manual
+intervention; they appear as flags in output automatically:
+
+| Code | What triggers it | Where enforced |
+|------|-----------------|----------------|
+| EC-01 | Pre-profit company (no positive PAT) | Step 5, step5_valuation.py |
+| EC-02 | Cyclical sector (use_normalized_ebitda) | Step 5 DCF, sector profile |
+| EC-04 | Conglomerate detected | pipeline._prefetch_data() + Step 5 |
+| EC-06 | Recently listed (< 5Y data) | Step 0, sector profile |
+| EC-11 | Volume/liquidity too thin | Step 6, step6_technical.py |
+| ER-05 | ≥ 5 data error tags → BUY auto-downgraded | Step 9 output |
+
 ---
 
-*Skill version: 1.0 | Companion framework: long_term_investing_context_v2.md*
+*Skill version: 2.0 | Implementation: src/agent/steps/ + src/agent/pipeline.py*
 *Architecture review: annually or after major market regime change*

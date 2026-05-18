@@ -38,6 +38,21 @@ class Settings(BaseSettings):
     cache_ttl_quote: int = 3600       # 1 hour — prices update intraday
     cache_ttl_financials: int = 86400  # 24 hours — quarterly data
 
+    # --- SQLite warm-cache TTL for prescreen data (hours) ---
+    # Financials and shareholding change at most quarterly; 7 days lets repeated
+    # scans within a week skip Screener entirely for already-seen tickers.
+    # Set to 24 to match the in-memory TTL (conservative); raise to 168 (7 days)
+    # for maximum speed on weekly scans.
+    cache_ttl_db_financials_hours: int = 168   # 7 days — quarterly data
+    cache_ttl_db_governance_hours: int = 168   # 7 days — shareholding pattern
+
+    # --- Scan concurrency ---
+    # Controls the asyncio semaphore in BatchScanner.prescreen_universe().
+    # With SQLite warm cache active most tickers skip Screener entirely, so
+    # higher concurrency is safe on warm runs. For cold first-run scans keep
+    # at 8 or lower to avoid Screener.in 429s. Range: 3 (safe) – 15 (fast+warm).
+    scan_concurrency: int = 8
+
     log_level: str = "INFO"
     log_format: str = "json"  # "json" or "console"
 

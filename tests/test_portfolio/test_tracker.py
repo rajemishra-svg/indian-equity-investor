@@ -134,68 +134,6 @@ def test_add_transaction_action_uppercased(tmp_portfolio):
 
 
 # ---------------------------------------------------------------------------
-# add_rejection
-# ---------------------------------------------------------------------------
-
-def test_add_rejection_writes_to_rejection_tracker(tmp_path):
-    """add_rejection should append to analysis/watchlist/rejection-tracker.md."""
-    (tmp_path / "analysis" / "watchlist").mkdir(parents=True)
-    portfolio_dir = tmp_path / "portfolio"
-    portfolio_dir.mkdir()
-
-    original_cwd = Path.cwd()
-    import os
-    os.chdir(tmp_path)
-    try:
-        tracker = PortfolioTracker(portfolio_dir=portfolio_dir)
-        tracker.add_rejection(
-            ticker="BADCO",
-            step=1,
-            reasons=["promoter_pledging > 10%", "going_concern_qualification"],
-            re_eval_condition="When pledging drops to 0%",
-        )
-    finally:
-        os.chdir(original_cwd)
-
-    rejection_file = tmp_path / "analysis" / "watchlist" / "rejection-tracker.md"
-    assert rejection_file.exists()
-    content = rejection_file.read_text()
-    assert "BADCO" in content
-    assert "Step 1" in content
-    assert "promoter_pledging" in content
-
-
-# ---------------------------------------------------------------------------
-# add_to_watchlist
-# ---------------------------------------------------------------------------
-
-def test_add_to_watchlist_writes_to_correct_tier(tmp_path):
-    """add_to_watchlist should write to the correct tier file."""
-    (tmp_path / "analysis" / "watchlist").mkdir(parents=True)
-    portfolio_dir = tmp_path / "portfolio"
-    portfolio_dir.mkdir()
-
-    import os
-    original_cwd = Path.cwd()
-    os.chdir(tmp_path)
-    try:
-        tracker = PortfolioTracker(portfolio_dir=portfolio_dir)
-        tracker.add_to_watchlist(
-            ticker="WATCHME",
-            tier=2,
-            reason="Valuation not in buy zone",
-        )
-    finally:
-        os.chdir(original_cwd)
-
-    tier2_file = tmp_path / "analysis" / "watchlist" / "tier2.md"
-    assert tier2_file.exists()
-    content = tier2_file.read_text()
-    assert "WATCHME" in content
-    assert "Valuation" in content
-
-
-# ---------------------------------------------------------------------------
 # update_tax_tracker
 # ---------------------------------------------------------------------------
 

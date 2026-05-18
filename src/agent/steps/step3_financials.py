@@ -29,8 +29,11 @@ def _soft_quality_checks(
 
     These do not affect the hurdle score or gate determination, but
     populate the data_flags and concerns lists for analyst review.
+    Covers: CAGR deceleration, EBITDA margin, ICR data quality,
+    P1-3 working capital deterioration, P1-4 earnings quality,
+    P1-1 bank/NBFC sector KPIs.
     """
-    # 3Y CAGR deceleration: a company slowing down significantly is a yellow flag
+    # ── CAGR deceleration ──────────────────────────────────────────────────
     if f.revenue_cagr_5y is not None and f.revenue_cagr_3y is not None:
         decel = f.revenue_cagr_5y - f.revenue_cagr_3y
         if decel > 8:
@@ -49,7 +52,7 @@ def _soft_quality_checks(
                 f"3Y CAGR {f.pat_cagr_3y:.1f}% (Δ {decel:.1f}pp) — margin compression or base effect."
             )
 
-    # EBITDA margin: below 10% is structurally thin for most non-financial sectors
+    # ── EBITDA margin ──────────────────────────────────────────────────────
     if f.ebitda_margin_latest is not None:
         if f.ebitda_margin_latest < 8:
             flag = (
@@ -68,11 +71,141 @@ def _soft_quality_checks(
     else:
         data_flags.append("[DATA UNVERIFIED: ebitda_margin — sector benchmark check skipped]")
 
-    # ICR data quality: None when company has debt = data gap, not debt-free
+    # ── P2-3: ROCE / ROE / EBITDA margin trend direction ──────────────────
+    # Trajectory > absolute level — a company with 20 % ROCE deteriorating to
+    # 14 % is more dangerous than one at 16 % and improving to 18 %.
+    if f.roce_trend == "deteriorating":
+        concerns.append(
+            "ROCE trend DETERIORATING (recent 2Y avg < prior 3Y avg by > 2.5 pp) — "
+            "investigate capital intensity, competition, or pricing pressure."
+        )
+        data_flags.append("[WATCH: ROCE trend deteriorating — step-change in returns on capital]")
+    elif f.roce_trend == "improving":
+        data_flags.append("[POSITIVE: ROCE trend improving — returns on capital expanding]")
+
+    if f.roe_trend == "deteriorating":
+        concerns.append(
+            "ROE trend DETERIORATING — check DuPont components: is leverage driving prior ROE "
+            "or genuine asset efficiency?"
+        )
+    elif f.roe_trend == "improving":
+        data_flags.append("[POSITIVE: ROE trend improving — shareholder returns compounding]")
+
+    if f.ebitda_margin_trend == "compressing":
+        concerns.append(
+            "EBITDA margin COMPRESSING (recent 2Y avg < prior 3Y avg by > 1.5 pp) — "
+            "pricing power may be weakening or input costs rising structurally."
+        )
+        data_flags.append("[WATCH: EBITDA margin trend compressing]")
+    elif f.ebitda_margin_trend == "expanding":
+        data_flags.append("[POSITIVE: EBITDA margin expanding — operating leverage at work]")
+
+    # ── ICR data quality ───────────────────────────────────────────────────
     if f.interest_coverage is None and f.debt_to_equity is not None and f.debt_to_equity > 0.1:
         data_flags.append(
             "[DATA UNVERIFIED: interest_coverage — company has debt but ICR not available; "
             "treated as passing hurdle but verify manually]"
+        )
+
+    # ── P1-3: Working capital deterioration ───────────────────────────────
+    # Rising debtor days = slower collections → receivables stress or channel stuffing.
+    if f.debtor_days_latest is not None and f.debtor_days_3y_ago is not None:
+        if f.debtor_days_3y_ago > 0:
+            debn_chg_pct = (f.debtor_days_latest - f.debtor_days_3y_ago) / f.debtor_days_3y_ago * 100
+            if debn_chg_pct > 30:
+                flag = (
+                    f"[WATCH: Debtor days deteriorating — {f.debtor_days_3y_ago:.0f} → "
+                    f"{f.debtor_days_latest:.0f} days (+{debn_chg_pct:.0f}% in 3Y); "
+                    "verify credit quality and receivables provisioning]"
+                )
+                data_flags.append(flag)
+                concerns.append(
+                    f"Significant working capital stress: debtor days up "
+                    f"{f.debtor_days_3y_ago:.0f} → {f.debtor_days_latest:.0f} days "
+                    f"(+{debn_chg_pct:.0f}%) — possible channel stuffing or collections deterioration."
+                )
+            elif debn_chg_pct > 15:
+                concerns.append(
+                    f"Debtor days creeping up: {f.debtor_days_3y_ago:.0f} → "
+                    f"{f.debtor_days_latest:.0f} days (+{debn_chg_pct:.0f}% in 3Y) — monitor."
+                )
+
+    # Absolute inventory days benchmark (> 120 days = capital locked in stock)
+    if f.inventory_days_latest is not None and f.inventory_days_latest > 120:
+        concerns.append(
+            f"Inventory days elevated at {f.inventory_days_latest:.0f} days — "
+            "high working capital intensity; verify if sector-normal."
+        )
+
+    # ── P1-4: Earnings quality ─────────────────────────────────────────────
+    # Other income > 15 % of revenue = core business generates less than it appears.
+    if f.other_income_pct_revenue is not None:
+        if f.other_income_pct_revenue > 15:
+            flag = (
+                f"[WATCH: Other income = {f.other_income_pct_revenue:.0f}% of revenue — "
+                "headline PAT overstates core-business earnings; verify sustainability]"
+            )
+            data_flags.append(flag)
+            concerns.append(
+                f"Earnings quality concern: other income is {f.other_income_pct_revenue:.0f}% "
+                "of revenue. Check if it is recurring (forex, investments) or one-off."
+            )
+        elif f.other_income_pct_revenue > 8:
+            concerns.append(
+                f"Other income elevated at {f.other_income_pct_revenue:.0f}% of revenue — "
+                "monitor for sustainability."
+            )
+
+    # ── P1-1: Financial sector KPIs (bank / NBFC) ─────────────────────────
+    # These checks only fire when Screener populates the fields (financial_services sector).
+    if f.gnpa_pct is not None:
+        if f.gnpa_pct > 5.0:
+            flag = f"[WATCH: Gross NPA {f.gnpa_pct:.1f}% > 5% — elevated asset quality risk]"
+            data_flags.append(flag)
+            concerns.append(
+                f"Gross NPA high at {f.gnpa_pct:.1f}% — significant credit risk; "
+                "benchmark against sectoral GNPA; prefer < 3% for private banks."
+            )
+        elif f.gnpa_pct > 3.0:
+            concerns.append(
+                f"Gross NPA elevated at {f.gnpa_pct:.1f}% — monitor for provisioning adequacy."
+            )
+
+    if f.nnpa_pct is not None and f.nnpa_pct > 2.0:
+        flag = f"[WATCH: Net NPA {f.nnpa_pct:.1f}% > 2% — under-provisioned loan book]"
+        data_flags.append(flag)
+        concerns.append(
+            f"Net NPA {f.nnpa_pct:.1f}% — provision coverage ratio may be inadequate; verify."
+        )
+
+    if f.nim_pct is not None:
+        if f.nim_pct < 2.5:
+            flag = f"[WATCH: NIM {f.nim_pct:.1f}% < 2.5% — margin compression risk]"
+            data_flags.append(flag)
+            concerns.append(
+                f"NIM compressed at {f.nim_pct:.1f}% — profitability under pressure from "
+                "funding costs; quality banks target > 3% NIM."
+            )
+        elif f.nim_pct < 3.0:
+            concerns.append(
+                f"NIM moderate at {f.nim_pct:.1f}% — acceptable but below premium-quality "
+                "threshold of 3.0%."
+            )
+
+    if f.roa_pct is not None and f.roa_pct < 0.8:
+        flag = f"[WATCH: ROA {f.roa_pct:.1f}% < 0.8% — marginal bank profitability]"
+        data_flags.append(flag)
+        concerns.append(
+            f"ROA low at {f.roa_pct:.1f}% — below the 1.0% threshold for quality banks; "
+            "PSU banks often below this, but private banks should aim for > 1.5%."
+        )
+
+    if f.car_pct is not None and f.car_pct < 12.0:
+        flag = f"[WATCH: CAR {f.car_pct:.1f}% < 12% — capital adequacy near regulatory minimum]"
+        data_flags.append(flag)
+        concerns.append(
+            f"Capital Adequacy Ratio {f.car_pct:.1f}% is close to the RBI minimum of 11.5%; "
+            "limited buffer for credit losses."
         )
 
 

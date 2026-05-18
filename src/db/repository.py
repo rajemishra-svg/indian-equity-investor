@@ -11,7 +11,7 @@ can be imported and called directly by the pipeline::
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any, Optional
 
 import aiosqlite
@@ -110,6 +110,23 @@ async def save_analysis(db_path: str, state: AnalysisState) -> None:
     watchlist_tier = int(state.watchlist_tier) if state.watchlist_tier else None
     conviction = state.conviction.value if state.conviction else None
 
+    # P2-2: Compute DCF-derived target buy price for WATCHLIST entries.
+    # target = DCF intrinsic × (1 - required MoS %) — the price at which the
+    # required safety margin is just met.  Stored so watchlist-alerts can compare
+    # live CMP without re-running the full pipeline.
+    target_buy_price: Optional[float] = None
+    if (
+        state.recommendation_type == "WATCHLIST"
+        and state.valuation
+        and state.valuation.dcf_intrinsic_weighted
+        and state.valuation.required_mos_pct
+    ):
+        target_buy_price = round(
+            state.valuation.dcf_intrinsic_weighted
+            * (1 - state.valuation.required_mos_pct / 100),
+            2,
+        )
+
     async with aiosqlite.connect(db_path) as db:
         await db.execute(
             """
@@ -122,7 +139,7 @@ async def save_analysis(db_path: str, state: AnalysisState) -> None:
                 valuation_gate, valuation_methods_in_buy_zone, mos_pct, required_mos_pct,
                 dcf_intrinsic_weighted,
                 terminated_at_step, termination_reason, recommendation, conviction,
-                watchlist_tier, investment_thesis,
+                watchlist_tier, target_buy_price, investment_thesis,
                 all_data_flags, error_tags
             ) VALUES (
                 ?, ?, ?, ?, ?, ?,
@@ -133,7 +150,7 @@ async def save_analysis(db_path: str, state: AnalysisState) -> None:
                 ?, ?, ?, ?,
                 ?,
                 ?, ?, ?, ?,
-                ?, ?,
+                ?, ?, ?,
                 ?, ?
             )
             """,
@@ -165,6 +182,7 @@ async def save_analysis(db_path: str, state: AnalysisState) -> None:
                 state.recommendation_type,
                 conviction,
                 watchlist_tier,
+                target_buy_price,
                 state.investment_thesis,
                 json.dumps(state.all_data_flags),
                 json.dumps(state.error_tags),
@@ -208,6 +226,65 @@ async def save_snapshot(
 # ---------------------------------------------------------------------------
 # Read operations
 # ---------------------------------------------------------------------------
+
+
+async def get_fresh_snapshot(
+    db_path: str,
+    ticker: str,
+    data_type: str,
+    max_age_hours: int = 24,
+) -> Optional[dict]:
+    """Return the most recent snapshot for ``ticker`` / ``data_type`` if it is
+    fresher than ``max_age_hours``, otherwise ``None``.
+
+    Used by the batch scanner warm-cache layer to avoid redundant Screener
+    requests across scan runs.
+
+    Args:
+        db_path: Path to the SQLite database file.
+        ticker: NSE ticker symbol (case-insensitive).
+        data_type: ``'financials'``, ``'governance'``, ``'quote'``, or ``'valuation'``.
+        max_age_hours: Maximum acceptable age in hours. Default 24 h (matches
+            the in-memory ``cache_ttl_financials``). Use a larger value (e.g.
+            168 = 7 days) for slow-changing quarterly data.
+
+    Returns:
+        Parsed dict from the stored JSON, or ``None`` if no fresh row found.
+    """
+    await init_db(db_path)
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT data_json, created_at
+            FROM data_snapshots
+            WHERE ticker = ?
+              AND data_type = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (ticker.upper(), data_type),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+    if row is None:
+        return None
+
+    # Parse the stored ISO timestamp and compare age
+    raw_ts: str = row["created_at"]  # e.g. "2026-05-18 09:30:00"
+    try:
+        stored_at = datetime.fromisoformat(raw_ts).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None  # unparseable timestamp — treat as stale
+
+    age_hours = (datetime.now(timezone.utc) - stored_at).total_seconds() / 3600
+    if age_hours > max_age_hours:
+        return None  # too old
+
+    try:
+        return json.loads(row["data_json"])
+    except (json.JSONDecodeError, TypeError):
+        return None
 
 
 async def get_latest_analysis(db_path: str, ticker: str) -> Optional[dict]:
@@ -267,6 +344,74 @@ async def list_recommendations(
             ORDER BY analysis_date DESC, mos_pct DESC
             """,
             (recommendation.upper(),),
+        ) as cursor:
+            async for row in cursor:
+                rows.append(_row_to_dict(row))
+    return rows
+
+
+async def get_watchlist_with_targets(db_path: str) -> list[dict]:
+    """Return the latest WATCHLIST analysis for every ticker that has one.
+
+    Includes ``target_buy_price``, ``cmp`` (at time of analysis), ``dcf_intrinsic_weighted``,
+    and ``required_mos_pct``.  Used by ``investor watchlist-alerts`` to compare live
+    CMP against the stored DCF target without re-running the full pipeline.
+    """
+    await init_db(db_path)
+    rows = []
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT
+                ticker, company_name, analysis_date, watchlist_tier,
+                cmp AS cmp_at_analysis,
+                target_buy_price,
+                dcf_intrinsic_weighted,
+                required_mos_pct,
+                mos_pct,
+                sector_name,
+                termination_reason
+            FROM analyses
+            WHERE recommendation = 'WATCHLIST'
+              AND id IN (
+                  SELECT MAX(id) FROM analyses
+                  WHERE recommendation = 'WATCHLIST'
+                  GROUP BY ticker
+              )
+            ORDER BY watchlist_tier ASC, analysis_date DESC
+            """
+        ) as cursor:
+            async for row in cursor:
+                rows.append(_row_to_dict(row))
+    return rows
+
+
+async def get_all_tracked_tickers(db_path: str) -> list[dict]:
+    """Return the latest BUY and WATCHLIST analyses for all tickers.
+
+    Used by the surveillance command to check all positions in one sweep.
+    """
+    await init_db(db_path)
+    rows = []
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT
+                ticker, company_name, analysis_date, recommendation,
+                watchlist_tier, target_buy_price, cmp AS cmp_at_analysis,
+                dcf_intrinsic_weighted, required_mos_pct, mos_pct,
+                governance_score, financial_score, sector_name, conviction
+            FROM analyses
+            WHERE recommendation IN ('BUY', 'WATCHLIST')
+              AND id IN (
+                  SELECT MAX(id) FROM analyses
+                  WHERE recommendation IN ('BUY', 'WATCHLIST')
+                  GROUP BY ticker
+              )
+            ORDER BY recommendation, analysis_date DESC
+            """
         ) as cursor:
             async for row in cursor:
                 rows.append(_row_to_dict(row))

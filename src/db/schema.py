@@ -38,6 +38,9 @@ CREATE TABLE IF NOT EXISTS analyses (
     recommendation TEXT,
     conviction TEXT,
     watchlist_tier INTEGER,
+    -- P2-2: DCF-derived buy target stored at WATCHLIST creation time so
+    -- watchlist-alerts can compare live CMP without re-running the pipeline.
+    target_buy_price REAL,
     investment_thesis TEXT,
 
     -- Audit trail

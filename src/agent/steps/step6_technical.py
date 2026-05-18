@@ -138,7 +138,7 @@ class Step6Technical(BaseStep):
         return state
 
     def _derive_technical_data(self, q) -> TechnicalData:
-        """Derive basic TechnicalData from a StockQuote."""
+        """Derive TechnicalData from a StockQuote, including volume trend (P3-4)."""
         cmp = q.cmp
         low = q.w52_low
         pct_from_low = (
@@ -150,4 +150,6 @@ class Step6Technical(BaseStep):
             w52_low=low,
             pct_from_52w_low=pct_from_low,
             dma_200=q.dma_200,
+            # P3-4: volume trend carried from StockQuote (populated by YFinanceClient)
+            volume_trend_down_days=getattr(q, "volume_trend_down_days", None),
         )

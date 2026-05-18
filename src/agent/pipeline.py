@@ -8,7 +8,6 @@ from pathlib import Path
 import anthropic
 
 from src.agent.mode_detector import detect_mode
-from src.sector.classifier import classify_sector
 from src.agent.steps import (
     Step0PreScreen,
     Step1Governance,
@@ -26,6 +25,7 @@ from src.api.cache import data_cache
 from src.config import settings
 from src.logging_config import get_logger
 from src.models import AnalysisState, GovernanceData
+from src.sector.classifier import classify_sector, is_conglomerate
 
 
 async def _noop(value):
@@ -295,6 +295,18 @@ class InvestmentPipeline:
             ticker=ticker,
             sector=state.sector_name,
         )
+
+        # P3-3: Conglomerate detection — flag for EC-04 sum-of-parts note in Step 5
+        state.is_conglomerate = is_conglomerate(
+            company_name=state.company_name or "",
+            ticker=ticker,
+        )
+        if state.is_conglomerate:
+            state.add_flag(
+                "[EC-04: CONGLOMERATE detected — standard DCF may undervalue; "
+                "sum-of-parts (SOTP) valuation recommended]"
+            )
+            self.log.info("conglomerate_detected", ticker=ticker, company=state.company_name)
 
         self.log.info(
             "prefetch_complete",

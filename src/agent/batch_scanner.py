@@ -21,8 +21,9 @@ from src.agent.steps.step0_prescreen import Step0PreScreen
 from src.api import BSEClient, NSEClient, ScreenerClient, YFinanceClient
 from src.api.cache import data_cache
 from src.config import settings
+from src.db.repository import get_fresh_snapshot, save_snapshot
 from src.logging_config import get_logger
-from src.models import AnalysisState, GateResult, GovernanceData
+from src.models import AnalysisState, FinancialMetrics, GateResult, GovernanceData
 
 log = get_logger("batch_scanner")
 
@@ -107,13 +108,20 @@ class PreScreenSummary:
 class BatchScanner:
     """Screen a stock universe and run full analysis on the best candidates."""
 
-    def __init__(self, concurrency: int = 5) -> None:
+    def __init__(self, concurrency: int | None = None) -> None:
         """
         Args:
             concurrency: Max parallel HTTP requests during the pre-screen phase.
-                         Keep ≤ 5 to avoid triggering Screener.in rate limits.
+                Defaults to ``settings.scan_concurrency`` (8).
+
+                Tuning guide:
+                  - Cold scan (no DB cache): keep ≤ 5 to avoid Screener 429s.
+                  - Warm scan (DB cache seeded): safe to use 10–15; most tickers
+                    skip Screener entirely so the rate-limit risk is much lower.
+                  - Override via ``--concurrency`` CLI flag or
+                    ``SCAN_CONCURRENCY=N`` env var.
         """
-        self._concurrency = concurrency
+        self._concurrency = concurrency if concurrency is not None else settings.scan_concurrency
 
     # ------------------------------------------------------------------
     # Public API
@@ -286,8 +294,16 @@ class BatchScanner:
 
 
 async def _fetch_prescreen_data(state: AnalysisState, clients: dict) -> None:
-    """Fetch quote + financials + shareholding for Step 0 (skips trendlyne)."""
+    """Fetch quote + financials + shareholding for Step 0 (skips trendlyne).
+
+    Three-layer cache for financials and shareholding:
+      1. In-memory DataCache (process-lifetime, TTL 24 h) — fastest
+      2. SQLite warm cache (cross-run, TTL configured via settings) — avoids
+         Screener requests on repeated scans within the same week
+      3. Live HTTP fetch (Screener / BSE / YFinance) — writes to both caches
+    """
     ticker = state.ticker
+    today = __import__("datetime").date.today().isoformat()
 
     cached_q = data_cache.get(data_cache.quote_key(ticker))
     cached_f = data_cache.get(data_cache.financials_key(ticker))
@@ -308,18 +324,48 @@ async def _fetch_prescreen_data(state: AnalysisState, clients: dict) -> None:
         return result
 
     async def _financials() -> object:
+        # 1. In-memory hit
         if cached_f is not None:
             return cached_f
+
+        # 2. SQLite warm-cache hit (cross-run)
+        raw = await _db_get_snapshot("financials", settings.cache_ttl_db_financials_hours)
+        if raw is not None:
+            try:
+                result = FinancialMetrics.model_validate(raw)
+                data_cache.set(data_cache.financials_key(ticker), result, settings.cache_ttl_financials)
+                log.debug("prescreen_financials_db_cache_hit", ticker=ticker)
+                return result
+            except Exception:
+                pass  # corrupt snapshot — fall through to live fetch
+
+        # 3. Live fetch
         screener = clients.get("screener")
         if screener is None:
             return None
         result = await screener.get_financials(ticker)
-        data_cache.set(data_cache.financials_key(ticker), result, settings.cache_ttl_financials)
+        if result is not None:
+            data_cache.set(data_cache.financials_key(ticker), result, settings.cache_ttl_financials)
+            await _db_save_snapshot("financials", result.model_dump(), "screener")
         return result
 
     async def _shareholding() -> object:
+        # 1. In-memory hit
         if cached_s is not None:
             return cached_s
+
+        # 2. SQLite warm-cache hit (cross-run)
+        raw = await _db_get_snapshot("governance", settings.cache_ttl_db_governance_hours)
+        if raw is not None:
+            try:
+                result = GovernanceData.model_validate(raw)
+                data_cache.set(data_cache.shareholding_key(ticker), result, settings.cache_ttl_financials)
+                log.debug("prescreen_governance_db_cache_hit", ticker=ticker)
+                return result
+            except Exception:
+                pass  # corrupt snapshot — fall through to live fetch
+
+        # 3. Live fetch
         bse = clients.get("bse")
         result = await bse.get_shareholding(ticker) if bse is not None else None
         if result is None:
@@ -329,7 +375,27 @@ async def _fetch_prescreen_data(state: AnalysisState, clients: dict) -> None:
                 result = await screener.get_shareholding(ticker)
         if result is not None:
             data_cache.set(data_cache.shareholding_key(ticker), result, settings.cache_ttl_financials)
+            await _db_save_snapshot("governance", result.model_dump(), "bse_or_screener")
         return result
+
+    # --- SQLite helpers (close over ticker / today / db_path) ---------------
+
+    async def _db_get_snapshot(data_type: str, max_age_hours: int) -> object:
+        try:
+            return await get_fresh_snapshot(
+                settings.db_path, ticker, data_type, max_age_hours
+            )
+        except Exception as exc:
+            log.debug("db_snapshot_read_error", ticker=ticker, data_type=data_type, error=str(exc))
+            return None
+
+    async def _db_save_snapshot(data_type: str, data: dict, source: str) -> None:
+        try:
+            await save_snapshot(settings.db_path, ticker, today, data_type, data, source)
+        except Exception as exc:
+            log.debug("db_snapshot_write_error", ticker=ticker, data_type=data_type, error=str(exc))
+
+    # -------------------------------------------------------------------------
 
     quote, financials, shareholding = await asyncio.gather(
         _quote(), _financials(), _shareholding(), return_exceptions=True

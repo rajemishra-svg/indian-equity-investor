@@ -69,6 +69,38 @@ _COMMODITY_KEYWORDS = frozenset({
     "commodity",
 })
 
+# ---------------------------------------------------------------------------
+# Conglomerate detection (EC-03: sum-of-parts note in Step 5)
+# ---------------------------------------------------------------------------
+
+# Well-known Indian conglomerates / holding companies where standard single-business
+# DCF meaningfully undervalues the entity — analyst should use SOTP instead.
+_CONGLOMERATE_NAMES = frozenset({
+    # Tata Group
+    "tata sons", "tata investment",
+    # Birla / Aditya Birla
+    "aditya birla", "grasim",
+    # Bajaj
+    "bajaj holdings", "bajaj finserv",
+    # Mahindra
+    "mahindra & mahindra", "m&m",
+    # Reliance
+    "reliance industries",
+    # ITC (diversified: cigarettes, hotels, FMCG, agri, paper)
+    "itc limited", "itc ltd",
+    # L&T (engineering + financial services + defence)
+    # Note: avoid matching "l&t finance" (already financial_services) by checking full name
+    "larsen & toubro limited", "larsen & toubro ltd",
+    # Vedanta (multi-metal conglomerate)
+    "vedanta limited", "vedanta ltd",
+    # Siemens India (industrial conglomerate)
+    "siemens india",
+    # JSW Holdings
+    "jsw holdings",
+    # Other holding/investment companies
+    "holding", "investments limited", "investments ltd",
+})
+
 # Moat narrative keywords for financial sector (used after Step 2)
 _FINANCIAL_MOAT_KEYWORDS = frozenset({
     "bank", "nbfc", "insurance", "lending", "loan", "deposit",
@@ -133,3 +165,23 @@ def classify_sector(
         return "recently_listed"
 
     return "default"
+
+
+def is_conglomerate(company_name: str, ticker: str = "") -> bool:
+    """Return True if the company is a known Indian conglomerate / holding entity.
+
+    Conglomerates operate across multiple unrelated business segments.  Standard
+    single-business DCF systematically undervalues them because:
+      • Each segment has a different cost of capital
+      • Hidden NAV in listed subsidiaries is ignored by consolidated P&L DCF
+    The EC-04 flag in Step 5 prompts the analyst to apply SOTP valuation instead.
+
+    Args:
+        company_name: Full company name.
+        ticker: NSE ticker (used as fallback).
+
+    Returns:
+        True if the entity matches a known conglomerate pattern.
+    """
+    name = (company_name or ticker or "").lower()
+    return any(kw in name for kw in _CONGLOMERATE_NAMES)

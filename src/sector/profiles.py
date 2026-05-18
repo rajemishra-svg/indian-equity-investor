@@ -52,6 +52,11 @@ class SectorProfile:
     # Extra PE band for financial sector (price-to-book more relevant)
     pb_band_excellent: Optional[float] = None   # e.g. 1.5 for banks
 
+    # ── EC-02: Cyclical EBITDA normalization ──────────────────────────────
+    # When True, Step 5 DCF uses the 5Y average EBITDA margin (from Screener)
+    # instead of the latest year to avoid over- or under-valuing at cycle peaks/troughs.
+    use_normalized_ebitda: bool = False
+
     # ── Capital allocation prompt context ─────────────────────────────────
     capital_allocation_note: str = ""
 
@@ -173,6 +178,7 @@ SECTOR_PROFILES: dict[str, SectorProfile] = {
         min_cfo_np_pct=60.0,
         hard_trigger_cfo_np_min=40.0,
         wacc_adjustment=1.0,         # higher risk premium for commodity exposure
+        use_normalized_ebitda=True,  # EC-02: use 5Y avg EBITDA margin in DCF
         capital_allocation_note=(
             "NOTE: This is a commodity/cyclical company. Revenue and PAT CAGRs are distorted "
             "by commodity price cycles. Evaluate on through-cycle average ROCE, balance sheet "

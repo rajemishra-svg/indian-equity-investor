@@ -43,6 +43,25 @@ class Step9Output(BaseStep):
         if not state.recommendation_type:
             state.recommendation_type = "BUY"
 
+        # ER-05: Auto-downgrade BUY → WATCHLIST when ≥5 data-error tags have
+        # accumulated across the pipeline.  A BUY decision backed by this many
+        # unverified data points cannot be trusted; human verification is
+        # required before committing capital.
+        if state.recommendation_type == "BUY" and len(state.error_tags) >= 5:
+            state.recommendation_type = "WATCHLIST"
+            state.watchlist_tier = 1  # passed all gates — data quality is the only blocker
+            flag = (
+                f"[ER-05: AUTO-DOWNGRADE — {len(state.error_tags)} data errors accumulated "
+                f"({', '.join(state.error_tags)}); manual data verification required before BUY]"
+            )
+            state.add_flag(flag)
+            self.log.warning(
+                "er05_auto_downgrade",
+                ticker=state.ticker,
+                error_count=len(state.error_tags),
+                error_tags=state.error_tags,
+            )
+
         # Set conviction and allocation
         self._set_conviction(state)
 
@@ -121,6 +140,13 @@ class Step9Output(BaseStep):
         else:
             state.conviction = ConvictionLevel.LOW
             state.suggested_allocation_pct = 2.0
+
+        # EC-01: Pre-profit companies carry structurally higher risk.
+        # Cap suggested allocation at 4 % regardless of conviction score to
+        # prevent oversized positions in companies without proven earnings.
+        is_pre_profit = any("EC-01" in flag for flag in state.all_data_flags)
+        if is_pre_profit and state.suggested_allocation_pct and state.suggested_allocation_pct > 4.0:
+            state.suggested_allocation_pct = 4.0
 
     def _build_tranches(self, state: AnalysisState) -> None:
         """Build tranche plan from technical signals."""

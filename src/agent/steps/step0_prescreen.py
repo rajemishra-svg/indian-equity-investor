@@ -131,12 +131,26 @@ class Step0PreScreen(BaseStep):
         )
 
         # ------------------------------------------------------------------
-        # 8. Promoter holding
+        # 8. Promoter holding — waived for MNCs and professionally-managed companies
+        #    (EC-06).  For such companies the controlling shareholder (foreign parent,
+        #    diversified institutional base) holds via FPI/FDI routes and is NOT
+        #    classified as "promoter" in Indian filings, so a low promoter holding %
+        #    is structurally expected and should NOT penalise the screen.
         # ------------------------------------------------------------------
+        promoter_holding_threshold = profile.min_promoter_holding
+        if g is not None and g.is_mnc:
+            promoter_holding_threshold = None  # waive entirely
+            mnc_flag = (
+                "[EC-06: MNC/professionally-managed — promoter holding >= 40% gate waived; "
+                "verify controlling shareholder structure before investing]"
+            )
+            conditional_exceptions.append(mnc_flag)
+            state.add_flag(mnc_flag)
+
         _eval(
             "promoter_holding >= 40",
             g.promoter_holding_pct if g else None,
-            profile.min_promoter_holding,
+            promoter_holding_threshold,
         )
 
         # ------------------------------------------------------------------
@@ -156,6 +170,21 @@ class Step0PreScreen(BaseStep):
                 failed_metrics.append("promoter_pledging < 10")
 
         score = sum(metric_scores.values())
+
+        # ------------------------------------------------------------------
+        # EC-11: Liquidity guard (non-scoring, soft flag only)
+        # Stocks trading < ₹5 Cr/day on average cannot be entered or exited
+        # without meaningful market impact — flag but don't fail the gate.
+        # ------------------------------------------------------------------
+        avg_val = q.avg_daily_value_cr if q else None
+        if avg_val is not None and avg_val < 5.0 and mc is not None and mc < 10_000:
+            liq_flag = (
+                f"[EC-11: LOW LIQUIDITY — avg daily traded value ₹{avg_val:.1f} Cr "
+                f"< ₹5 Cr threshold; position sizing must be ≤ 1-day-volume × 10%; "
+                "spread cost may erode returns for small positions]"
+            )
+            data_flags.append(liq_flag)
+            state.add_flag(liq_flag)
 
         # Gate determination
         if score >= 7:
