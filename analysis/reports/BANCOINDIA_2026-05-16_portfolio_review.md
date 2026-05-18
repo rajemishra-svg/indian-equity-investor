@@ -1,0 +1,10 @@
+══════════════════════════════════════════════════════════════════════════
+                           REJECTION LOG
+══════════════════════════════════════════════════════════════════════════
+TICKER          : BANCOINDIA
+REPORT DATE     : 2026-05-16 15:41 IST
+TERMINATED AT   : Step 3
+REASON          : Financials FAILED: score 6/7, triggers=['CFO/Net Profit 3Y avg < 50% (45.1%)']
+DATA FLAGS      : [MODE UNCONFIRMED — NIFTY DATA UNAVAILABLE], [stock_quote via Yahoo Finance — ~15 min delayed], [valuation_data via Yahoo Finance — PE/PB only, no historical percentiles], [DATA UNVERIFIED: promoter_pledging < 10], [PLEDGING UNKNOWN — manual verification required], [DATA UNVERIFIED: auditor_name — manual verification required], [DATA UNVERIFIED: rpt_pct_revenue], [capital_allocation assessed from financial metrics — no explicit description], [DATA UNVERIFIED] Precise domestic market share % for engine cooling and gaskets not publicly disclosed, [DATA UNVERIFIED] TAM for Indian automotive thermal management / sealing market — specific figure not available, [DATA UNVERIFIED] EBITDA margin latest quarter not available from provided data, [DATA UNVERIFIED] Detailed working capital days (debtor days, inventory days) not verified from latest balance sheet, [DATA UNVERIFIED] Interest coverage ratio not available, [DATA UNVERIFIED] NRF Europe revenue contribution split not confirmed from latest annual report, [DATA UNVERIFIED: ebitda_margin — sector benchmark check skipped], [DATA UNVERIFIED: interest_coverage — company has debt but ICR not available; treated as passing hurdle but verify manually]
+RE-EVAL WHEN    : Hard trigger(s) resolved: CFO/Net Profit 3Y avg < 50% (45.1%) — re-evaluate after 2 clean annual reports
+══════════════════════════════════════════════════════════════════════════

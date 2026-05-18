@@ -1,0 +1,959 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Indian Equity Investor — Architecture Diagrams</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --border: #2d3148;
+      --accent: #4f8ef7;
+      --accent2: #34d399;
+      --text: #e2e8f0;
+      --muted: #8892a4;
+      --warn: #f59e0b;
+      --danger: #ef4444;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+      line-height: 1.6;
+      padding: 2rem 1rem;
+    }
+
+    header {
+      max-width: 1200px;
+      margin: 0 auto 2.5rem;
+      padding-bottom: 1.5rem;
+      border-bottom: 1px solid var(--border);
+    }
+    header h1 { font-size: 1.75rem; font-weight: 700; color: var(--text); }
+    header p { color: var(--muted); margin-top: 0.4rem; font-size: 0.95rem; }
+
+    nav {
+      max-width: 1200px;
+      margin: 0 auto 2.5rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+    nav a {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--accent);
+      padding: 0.35rem 0.9rem;
+      border-radius: 6px;
+      text-decoration: none;
+      font-size: 0.85rem;
+      transition: background 0.15s;
+    }
+    nav a:hover { background: var(--border); }
+
+    .diagram-card {
+      max-width: 1200px;
+      margin: 0 auto 3rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+
+    .card-header {
+      padding: 1rem 1.5rem;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+    }
+    .card-header-left h2 { font-size: 1.1rem; font-weight: 600; }
+    .card-header-left p { font-size: 0.82rem; color: var(--muted); margin-top: 0.2rem; }
+
+    .btn-group { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+    button {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.4rem 0.9rem;
+      border-radius: 6px;
+      border: 1px solid transparent;
+      font-size: 0.82rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+    button:hover { opacity: 0.85; }
+    .btn-svg { background: #1e3a5f; border-color: var(--accent); color: var(--accent); }
+    .btn-png { background: #14432a; border-color: var(--accent2); color: var(--accent2); }
+
+    .diagram-body {
+      padding: 2rem;
+      display: flex;
+      justify-content: center;
+      overflow-x: auto;
+      background: #12151f;
+    }
+    .diagram-body .mermaid { max-width: 100%; }
+
+    .diagram-body svg {
+      display: block;
+      margin: auto;
+    }
+
+    /* Mermaid theme overrides */
+    .mermaid svg { background: transparent !important; }
+
+    footer {
+      max-width: 1200px;
+      margin: 1rem auto 0;
+      color: var(--muted);
+      font-size: 0.8rem;
+      text-align: center;
+      padding-top: 1.5rem;
+      border-top: 1px solid var(--border);
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Indian Equity Investor — Architecture Diagrams</h1>
+  <p>Visual reference for the 9-step AI-powered investment analysis pipeline · NSE/BSE · Python + Claude</p>
+</header>
+
+<nav>
+  <a href="#arch">1 · System Architecture</a>
+  <a href="#pipeline">2 · Pipeline Sequence</a>
+  <a href="#dataflow">3 · Data Flow</a>
+  <a href="#api">4 · API Client Fallbacks</a>
+  <a href="#gate">5 · Gate Decision Flow</a>
+  <a href="#state">6 · AnalysisState Lifecycle</a>
+  <a href="#conviction">7 · Conviction Scoring</a>
+</nav>
+
+<!-- ═══════════════════════════════════════════════
+     DIAGRAM 1 — SYSTEM ARCHITECTURE
+════════════════════════════════════════════════════ -->
+<div class="diagram-card" id="arch">
+  <div class="card-header">
+    <div class="card-header-left">
+      <h2>1 · System Architecture</h2>
+      <p>High-level component layout — CLI, pipeline, steps, API clients, external data sources, and Claude API</p>
+    </div>
+    <div class="btn-group">
+      <button class="btn-svg" onclick="downloadSVG('arch')">⬇ SVG</button>
+      <button class="btn-png" onclick="downloadPNG('arch')">⬇ PNG</button>
+    </div>
+  </div>
+  <div class="diagram-body">
+    <div class="mermaid" id="arch-diagram">
+graph TB
+    subgraph CLI["🖥  CLI Layer  ·  src/main.py"]
+        A["investor analyze TICKER"]
+        B["investor scan --index NIFTY 500"]
+        C["investor portfolio / watchlist"]
+    end
+
+    subgraph Core["⚙  Core Engine  ·  src/agent/"]
+        D["InvestmentPipeline\npipeline.py"]
+        E["BatchScanner\nbatch_scanner.py"]
+        F["ModeDetector\nmode_detector.py"]
+        G["DataCache\napi/cache.py"]
+    end
+
+    subgraph Steps["🔬  9-Step Analysis  ·  src/agent/steps/"]
+        direction LR
+        S0["Step 0\nPre-Screen\ndeterministic"]
+        S1["Step 1\nGovernance\nHaiku + deterministic"]
+        S2["Step 2\nMoat\nSonnet agentic"]
+        S3["Step 3\nFinancials\ndeterministic"]
+        S4["Step 4\nTailwinds\nHaiku"]
+        S5["Step 5\nValuation\nHaiku DCF"]
+        S6["Step 6\nTechnical\ndeterministic"]
+        S7["Step 7\nPeers\nSonnet agentic"]
+        S8["Step 8\nPremortem\nHaiku"]
+        S9["Step 9\nOutput\nHaiku + format"]
+    end
+
+    subgraph Clients["🌐  API Clients  ·  src/api/"]
+        N["NSEClient\nnse.py"]
+        SC["ScreenerClient\nscreener.py"]
+        BS["BSEClient\nbse.py"]
+        TR["TrendlyneClient\ntrendlyne.py"]
+        YF["YFinanceClient\nyfinance_client.py\n(fallback)"]
+    end
+
+    subgraph Ext["☁  External Sources"]
+        NSEapi["NSE JSON API\narchives CSV"]
+        SCRN["Screener.in"]
+        BSEfil["BSE Filings"]
+        TL["Trendlyne"]
+        YFin["Yahoo Finance\n(~15 min delay)"]
+        ClaudeAPI["Anthropic\nClaude API"]
+    end
+
+    A --> D
+    B --> E
+    C --> D
+    E --> D
+    D --> F
+    D --> G
+    D --> S0
+
+    S0 --> S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> S7 --> S8 --> S9
+
+    S1 --> ClaudeAPI
+    S2 --> ClaudeAPI
+    S4 --> ClaudeAPI
+    S5 --> ClaudeAPI
+    S7 --> ClaudeAPI
+    S8 --> ClaudeAPI
+    S9 --> ClaudeAPI
+
+    G --> N & SC & BS & TR
+    N -->|"403 fallback"| YF
+    TR -->|"blocked fallback"| YF
+
+    N --> NSEapi
+    SC --> SCRN
+    BS --> BSEfil
+    TR --> TL
+    YF --> YFin
+
+    classDef hard fill:#3b1f1f,stroke:#ef4444,color:#fca5a5
+    classDef claude fill:#1e3a5f,stroke:#4f8ef7,color:#93c5fd
+    classDef det fill:#1a2d1f,stroke:#34d399,color:#6ee7b7
+    classDef ext fill:#1f1f2e,stroke:#6366f1,color:#a5b4fc
+
+    class S0,S3,S6 det
+    class S1,S2,S4,S5,S7,S8,S9 claude
+    class ClaudeAPI ext
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     DIAGRAM 2 — PIPELINE SEQUENCE
+════════════════════════════════════════════════════ -->
+<div class="diagram-card" id="pipeline">
+  <div class="card-header">
+    <div class="card-header-left">
+      <h2>2 · Pipeline Sequence Diagram</h2>
+      <p>End-to-end execution flow — prefetch, step gates, Claude calls, early termination conditions</p>
+    </div>
+    <div class="btn-group">
+      <button class="btn-svg" onclick="downloadSVG('pipeline')">⬇ SVG</button>
+      <button class="btn-png" onclick="downloadPNG('pipeline')">⬇ PNG</button>
+    </div>
+  </div>
+  <div class="diagram-body">
+    <div class="mermaid" id="pipeline-diagram">
+sequenceDiagram
+    autonumber
+    actor User
+    participant CLI
+    participant Pipeline
+    participant Cache as DataCache
+    participant NSE as NSE/Screener/BSE
+    participant S013 as Steps 0·1·3 (Hard Gates)
+    participant S2479 as Steps 2·4·7·8·9 (Claude Calls)
+    participant S56 as Steps 5·6 (Valuation·Technical)
+    participant Claude as Claude API (Haiku / Sonnet)
+
+    User->>CLI: investor analyze RELIANCE
+    CLI->>Pipeline: analyze("RELIANCE")
+
+    Pipeline->>NSE: detect_mode() — Nifty 52W level
+    NSE-->>Pipeline: mode = Normal | Correction | MaxOpportunity
+
+    Pipeline->>Cache: _prefetch_data()
+    Cache->>NSE: quote · financials · governance · valuation
+    NSE-->>Cache: StockQuote · FinancialMetrics · GovernanceData · ValuationData
+    Cache-->>Pipeline: all data cached (TTL 1h / 24h)
+
+    Pipeline->>S013: Step 0 — PreScreen (9 metrics, deterministic)
+    S013-->>Pipeline: score X/9
+
+    alt score < 5
+        Pipeline->>S2479: Step 9 — REJECTION_LOG output
+        S2479-->>Pipeline: formatted rejection
+        Pipeline-->>CLI: AnalysisState (REJECT)
+    end
+
+    Pipeline->>S2479: Step 1 — Governance (5 sub-factors)
+    Note over S2479,Claude: _enrich_governance_data() — only if auditor/RPT/SEBI missing
+    loop ≤ 4 iterations (Haiku · web_search · web_fetch)
+        S2479->>Claude: search NSE filings · annual report · SEBI SCORES
+        Claude-->>S2479: tool_result or end_turn
+        Note over Claude: force synthesis turn if cap hit mid-tool-use
+    end
+    S2479->>Claude: capital_allocation_score [Haiku · JSON · 256 tok]
+    Claude-->>S2479: {"score": N}
+    S2479-->>Pipeline: governance_score X/15
+
+    alt score < 9 OR immediate trigger
+        Pipeline->>S2479: Step 9 — REJECTION_LOG
+        Pipeline-->>CLI: AnalysisState (GOVERNANCE REJECT)
+    end
+
+    Pipeline->>S2479: Step 2 — Moat (agentic loop ≤6 iter)
+    loop ≤ 6 iterations (Sonnet · web_search · web_fetch)
+        S2479->>Claude: web_search · web_fetch [Sonnet · 4096 tok]
+        Claude-->>S2479: tool_result or end_turn
+        Note over Claude: force synthesis turn if cap hit mid-tool-use
+    end
+    S2479-->>Pipeline: moat_type · durability · narrative
+
+    Pipeline->>S013: Step 3 — Financials (7 hurdles, deterministic)
+    S013-->>Pipeline: score X/7 · hard_triggers[]
+
+    alt hard trigger OR score < 5
+        Pipeline->>S2479: Step 9 — REJECTION_LOG
+        Pipeline-->>CLI: AnalysisState (FINANCIAL REJECT)
+    end
+
+    Pipeline->>S2479: Step 4 — Tailwinds [Haiku · 600 tok]
+    S2479->>Claude: sector_context JSON
+    Claude-->>S2479: sector · tailwind_type · cycle_position
+
+    Pipeline->>S56: Step 5 — Valuation (5 methods)
+    S56->>Claude: DCF_compute [Haiku · 3 scenarios · 600 tok]
+    Claude-->>S56: base · bull · bear · weighted intrinsic
+    S56-->>Pipeline: methods_in_buy_zone · margin_of_safety · gate
+
+    alt 0 methods in buy zone
+        Note over Pipeline: WATCHLIST Tier 2 — pipeline CONTINUES
+    end
+
+    Pipeline->>S56: Step 6 — Technical (5 signals, deterministic)
+    S56-->>Pipeline: signals_met · GREEN|AMBER|RED · tranche prices
+
+    Pipeline->>S2479: Step 7 — Peers (agentic loop ≤8 iter)
+    loop ≤ 8 iterations
+        S2479->>Claude: web_search · web_fetch [Sonnet · 4096 tok]
+        Claude-->>S2479: peer data or end_turn
+    end
+    S2479-->>Pipeline: peer_table · quality_rank · valuation_rank
+
+    Pipeline->>S2479: Step 8 — Premortem [Haiku · 600 tok]
+    S2479->>Claude: all_state_context JSON
+    Claude-->>S2479: primary · secondary · tertiary risks
+
+    Pipeline->>S2479: Step 9 — Output [Haiku thesis 512 tok + deterministic format]
+    S2479->>Claude: thesis_context
+    Claude-->>S2479: 3-4 sentence investment thesis
+    S2479-->>Pipeline: formatted_report (BUY | WATCHLIST | REJECT)
+
+    Pipeline-->>CLI: AnalysisState
+    CLI-->>User: Formatted Report
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     DIAGRAM 3 — DATA FLOW
+════════════════════════════════════════════════════ -->
+<div class="diagram-card" id="dataflow">
+  <div class="card-header">
+    <div class="card-header-left">
+      <h2>3 · Data Flow Diagram</h2>
+      <p>How raw API data is transformed into AnalysisState fields across each step</p>
+    </div>
+    <div class="btn-group">
+      <button class="btn-svg" onclick="downloadSVG('dataflow')">⬇ SVG</button>
+      <button class="btn-png" onclick="downloadPNG('dataflow')">⬇ PNG</button>
+    </div>
+  </div>
+  <div class="diagram-body">
+    <div class="mermaid" id="dataflow-diagram">
+flowchart TD
+    subgraph Ingest["Data Ingestion — _prefetch_data()"]
+        NSE_Q["NSE quote endpoint\n/api/quote-equity"] -->|StockQuote| SQ["state.quote\ncmp · w52h · w52l\ndma_200 · market_cap_cr"]
+        SCRN["Screener.in\n/company/TICKER/consolidated"] -->|FinancialMetrics| FM["state.financials\nrevenue_cagr_5y · pat_cagr_5y\nroe_5y_avg · roce_5y_avg\ndebt_to_equity · cfo_net_profit_3y_avg"]
+        NSE_SH["NSE shareholding\n/api/corporate-shareholding-pattern\n(primary — uses existing session)"] -->|GovernanceData| GD
+        BSE_SH["BSE shareholding\n(2nd fallback)"] -->|GovernanceData if NSE fails| GD
+        SCRN_SH["Screener.in shareholding\n(3rd fallback)"] -->|GovernanceData if BSE fails| GD
+        GD["state.governance_data\npromoter_holding_pct\npromoter_pledging_pct\npledging_trend (8Q)"]
+        TL_GOV["Trendlyne governance\n/fundamentals/governance/TICKER\nenrichment — auditor · pledging"] -->|"merge if auditor\nor holding missing"| GD
+        TL["Trendlyne\n/fundamentals/TICKER"] -->|ValuationData| VD["state.valuation_data\npe_10y_percentile · peg_ratio\nfcf_yield_pct · ev_ebitda_current\nfcf_latest_cr · net_debt_cr"]
+    end
+
+    subgraph Step0["Step 0 — Pre-Screen"]
+        SQ & FM & GD --> PS["state.pre_screen\nPreScreenResult\nscore · gate · metric_scores\nfailed_metrics · data_flags"]
+    end
+
+    subgraph Step1["Step 1 — Governance"]
+        GD --> Enrich["_enrich_governance_data()\nHaiku agentic loop ≤4 iter\nweb_search · web_fetch\nauditor · RPT · SEBI orders"]
+        Enrich -->|merged fields| GD2["GovernanceData\n(enriched)"]
+        GD2 --> Gov["state.governance\nGovernanceResult\nscore /15 · gate\nimmediate_triggers · concerns"]
+        Claude1["Claude Haiku\ncapital allocation score"] --> Gov
+    end
+
+    subgraph Step2["Step 2 — Moat"]
+        Gov --> Moat["state.moat\nMoatResult\nmoat_type · moat_durability\nmarket_position · tam_multiple\nmoat_narrative"]
+        Claude2["Claude Sonnet\nagentic web research"] --> Moat
+    end
+
+    subgraph Step3["Step 3 — Financials"]
+        FM & Moat --> FinGate["state.financial_gate\nFinancialGateResult\nscore /7 · gate\nhard_triggers_fired\nhurdles_met · sector_overrides"]
+    end
+
+    subgraph Step4["Step 4 — Tailwinds"]
+        Moat & FinGate --> TW["state.tailwind\nTailwindResult\nsector · tailwind_type\ncycle_position · growth_runway_years\nheadwind_flags"]
+        Claude4["Claude Haiku\nsector analysis"] --> TW
+    end
+
+    subgraph Step5["Step 5 — Valuation"]
+        VD & FM & SQ & TW --> Val["state.valuation\nValuationResult\ndcf_intrinsic_base/bull/bear/weighted\nmargin_of_safety_pct · mos_met\nmethods_in_buy_zone /5\npe_percentile_verdict · peg_verdict\nfcf_yield_verdict · ev_ebitda_verdict"]
+        Claude5["Claude Haiku\nDCF 3-scenario"] --> Val
+    end
+
+    subgraph Step6["Step 6 — Technical"]
+        SQ --> Tech["state.technical\nTechnicalSignal\nsignals_met /5\nentry_guidance GREEN|AMBER|RED\ntranche_1/2/3_price"]
+    end
+
+    subgraph Step7["Step 7 — Peers"]
+        Val & Tech & Moat --> Peer["state.peers\nPeerResult\npeer_table · quality_rank\nvaluation_rank · peer_switch_ticker"]
+        Claude7["Claude Sonnet\nagentic peer research"] --> Peer
+    end
+
+    subgraph Step8["Step 8 — Premortem"]
+        Peer & Val & Gov & FinGate --> PM["state.premortem\nPremortemResult\nprimary_risk · secondary_risk\ntertiary_risk · structural_flag"]
+        Claude8["Claude Haiku\nrisk analysis"] --> PM
+    end
+
+    subgraph Step9["Step 9 — Output"]
+        PM & Peer & Val & Tech & TW & FinGate & Gov & Moat & PS --> Out["state.recommendation_type\nBUY | WATCHLIST | REJECT\n\nstate.conviction HIGH|MED|LOW\nstate.formatted_report\n\nWrites to portfolio/ files"]
+        Claude9["Claude Haiku\ninvestment thesis"] --> Out
+    end
+
+    classDef source fill:#1a1d2e,stroke:#6366f1,color:#a5b4fc
+    classDef stateField fill:#1a2d1f,stroke:#34d399,color:#6ee7b7
+    classDef claudeNode fill:#1e3a5f,stroke:#4f8ef7,color:#93c5fd
+
+    class NSE_Q,SCRN,NSE_SH,BSE_SH,SCRN_SH,TL_GOV,TL source
+    class SQ,FM,GD,GD2,VD stateField
+    class Enrich,Claude1,Claude2,Claude4,Claude5,Claude7,Claude8,Claude9 claudeNode
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     DIAGRAM 4 — API CLIENT FALLBACKS
+════════════════════════════════════════════════════ -->
+<div class="diagram-card" id="api">
+  <div class="card-header">
+    <div class="card-header-left">
+      <h2>4 · API Client Fallback Architecture</h2>
+      <p>Three-layer resilience — primary sources, automatic fallbacks, last-resort hardcoded data</p>
+    </div>
+    <div class="btn-group">
+      <button class="btn-svg" onclick="downloadSVG('api')">⬇ SVG</button>
+      <button class="btn-png" onclick="downloadPNG('api')">⬇ PNG</button>
+    </div>
+  </div>
+  <div class="diagram-body">
+    <div class="mermaid" id="api-diagram">
+flowchart TD
+    subgraph Quote["Stock Quote"]
+        Q1["NSEClient\n/api/quote-equity?symbol=X\nRequires session cookies"] -->|"✓ Success"| QR["StockQuote\nis_stale=False"]
+        Q1 -->|"✗ 403 / timeout"| Q2["YFinanceClient\nTICKER.NS via yfinance lib\nAsync wrapper via executor"]
+        Q2 -->|"✓ Success"| QR2["StockQuote\nis_stale=True\n(~15 min delay)"]
+        Q2 -->|"✗ Fail"| QN["quote = None\ndownstream steps\nuse [NOT AVAILABLE]"]
+    end
+
+    subgraph Index["Index Constituents (scan mode)"]
+        I1["NSEClient\n/api/equity-stockIndices\n?index=NIFTY 500"] -->|"✓ Success"| IR["list of tickers\n(live, authoritative)"]
+        I1 -->|"✗ 403"| I2["NSE Archives CSV\narchives.nseindia.com\n/content/indices/*.csv\nNo browser cookies needed"]
+        I2 -->|"✓ Success"| IR2["list of tickers\n(updated monthly)"]
+        I2 -->|"✗ Network fail"| I3["NIFTY50_FALLBACK\nhardcoded 50 tickers\n(last resort for dev/CI)"]
+        I3 --> IR3["list of tickers\n(static snapshot)"]
+    end
+
+    subgraph Valuation["Valuation Data"]
+        V1["TrendlyneClient\n/get-fundamentals\nPE percentile · PEG · FCF yield"] -->|"✓ Success"| VR["ValuationData\nfull set of metrics"]
+        V1 -->|"✗ Blocked / rate-limit"| V2["YFinanceClient\nyf.Ticker.info\nPE · PB · PEG available\nHistorical percentile NOT available"]
+        V2 -->|"✓ Partial"| VR2["ValuationData\npartial — missing percentile\n[DATA UNVERIFIED] flags set"]
+        V2 -->|"✗ Fail"| VN["valuation_data = None\nStep 5 uses [NOT AVAILABLE]"]
+    end
+
+    subgraph Financials["Financials"]
+        F1["ScreenerClient\nscreener.in/company/X"] -->|"✓ Success"| FR["FinancialMetrics\nfull 5Y/3Y data"]
+        F1 -->|"✗ Rate-limit / 404"| FN["financials = None\n[DATA UNVERIFIED: all_financials]\nStep 3 terminates pipeline"]
+    end
+
+    subgraph Shareholding["Shareholding — 4-layer chain"]
+        G1["NSEClient\n/api/corporate-shareholding-pattern\nuses existing session cookies\n(primary)"] -->|"✓ holding + pledging\n8-quarter trend"| GR["GovernanceData\nholding% · pledging%\n8Q trend · direction"]
+        G1 -->|"✗ 403 / empty"| G2["BSEClient\nbseindia.com shareholding\n(2nd fallback)"]
+        G2 -->|"✓ Partial"| GR
+        G2 -->|"✗ Scrip-code fail"| G3["ScreenerClient\nscreener.in shareholding\n(3rd fallback)"]
+        G3 -->|"✓ Basic"| GR
+        G3 -->|"✗ Fail"| GN["governance_data = empty\n[PLEDGING UNKNOWN]\nall sub-scores default to 1/3"]
+        GR --> G4["TrendlyneClient\n/fundamentals/governance/TICKER\n(auditor + pledging enrichment)"]
+        G4 -->|"auditor or holding missing"| GE["GovernanceData merged\nauditor_name · promoter_holding_pct\nstale flags removed"]
+        G4 -->|"fields already present\nor 404"| GR2["GovernanceData unchanged\nskip enrichment call"]
+    end
+
+    subgraph Cache["DataCache (Singleton)"]
+        CA["TTL-based in-memory cache\nquote · valuation TTL = 1 hour\nfinancials · shareholding TTL = 24 hours\nPrevents redundant fetches in batch scans"]
+    end
+
+    Quote & Index & Valuation & Financials & Shareholding --> CA
+
+    classDef primary fill:#1e3a5f,stroke:#4f8ef7,color:#93c5fd
+    classDef fallback fill:#2d2514,stroke:#f59e0b,color:#fcd34d
+    classDef fail fill:#2d1515,stroke:#ef4444,color:#fca5a5
+    classDef success fill:#142d20,stroke:#34d399,color:#6ee7b7
+    classDef cache fill:#1f1f2e,stroke:#818cf8,color:#c7d2fe
+
+    class Q1,I1,V1,F1,G1 primary
+    class Q2,I2,I3,V2,G2,G3,G4 fallback
+    class QN,FN,GN,VN fail
+    class QR,QR2,IR,IR2,IR3,VR,VR2,FR,GR,GE,GR2 success
+    class CA cache
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     DIAGRAM 5 — GATE DECISION FLOW
+════════════════════════════════════════════════════ -->
+<div class="diagram-card" id="gate">
+  <div class="card-header">
+    <div class="card-header-left">
+      <h2>5 · Gate Decision Flow</h2>
+      <p>Hard gates, conditional passes, watchlist routing, and peer-switch logic</p>
+    </div>
+    <div class="btn-group">
+      <button class="btn-svg" onclick="downloadSVG('gate')">⬇ SVG</button>
+      <button class="btn-png" onclick="downloadPNG('gate')">⬇ PNG</button>
+    </div>
+  </div>
+  <div class="diagram-body">
+    <div class="mermaid" id="gate-diagram">
+flowchart TD
+    Start(["🚀 investor analyze TICKER"])
+    MD["Mode Detection\nNifty 52W drop\nNormal · Correction · MaxOpp"]
+    PF["Prefetch Data\nquote · financials\ngovernance · valuation"]
+
+    Start --> MD --> PF --> S0
+
+    S0{"Step 0\nPre-Screen\nScore /9"}
+    S0 -->|"score ≥ 7\nPASS GREEN"| S1
+    S0 -->|"score 5–6\nCONDITIONAL"| S1_c["Step 1\n⚠ conditional flag set"]
+    S0 -->|"score < 5\nFAIL"| R0
+
+    S1{"Step 1\nGovernance\nScore /15"}
+    S1_c --> S1
+
+    S1 -->|"score ≥ 12\nPASS GREEN"| S2
+    S1 -->|"score 9–11\nPASS YELLOW"| S2_w["Step 2\n⚠ heightened scrutiny"]
+    S1 -->|"score < 9\nOR\nImmediate trigger"| R1
+    S1 -->|"Pledging > 10%\nSEBI fraud\nRPT > 20%\nAuditor resign\nGoing concern"| R1
+
+    S2["Step 2\nMoat Research\nSonnet agentic ≤6 iter"]
+    S2_w --> S2
+    S2 --> S3
+
+    S3{"Step 3\nFinancials\nScore /7"}
+    S3 -->|"score ≥ 7\nno hard triggers\nPASS GREEN"| S4
+    S3 -->|"score 5–6\nno hard triggers\nCONDITIONAL"| S4
+    S3 -->|"score < 5\nOR\nCFO/NP < 50%\nD/E > 3.0\nICR < 3x"| R3
+
+    S4["Step 4\nTailwinds\nHaiku"]
+    S4 --> S5
+
+    S5{"Step 5\nValuation\n5 methods"}
+    S5 -->|"≥ 2 methods\nin buy zone\n+ MoS met"| S6_g["Step 6\nGREEN — proceed to buy"]
+    S5 -->|"1 method\nin buy zone"| S6_c["Step 6\nCONDITIONAL — Tranche 1 only"]
+    S5 -->|"0 methods\nin buy zone"| W2["WATCHLIST Tier 2\npipeline continues\nstep9 = WATCHLIST output"]
+
+    S6_g & S6_c --> S6
+    W2 --> S6
+
+    S6["Step 6\nTechnical Signals\n/5 deterministic"]
+    S6 -->|"≥ 3/5 signals\nGREEN"| S7_g["Step 7\nEntry timing confirmed"]
+    S6 -->|"1-2/5 signals\nAMBER"| S7_a["Step 7\nReduce Tranche 1 size"]
+    S6 -->|"0/5 signals\nRED"| S7_r["Step 7\nDefer entry — set alert"]
+
+    S7_g & S7_a & S7_r --> S7
+
+    S7{"Step 7\nPeer Benchmark\nSonnet agentic ≤8 iter"}
+    S7 -->|"Target top-quartile quality\nbottom-half valuation\nPASS"| S8
+    S7 -->|"Peer scores higher quality\nAND lower valuation"| PS["PEER SWITCH\nRestart Step 0\nwith dominant peer"]
+    S7 -->|"Target top quality\ntop valuation\nCONDITIONAL"| S8_w["Step 8\n⚠ valuation premium noted"]
+
+    S8["Step 8\nPremortem\nHaiku"]
+    S8_w --> S8
+    S8 -->|"Primary risk STRUCTURAL\n+ UNHEDGEABLE"| S9_warn["Step 9\n⚠ DO NOT RECOMMEND flag"]
+    S8 -->|"Risks CYCLICAL\nor MANAGEABLE"| S9
+
+    S9["Step 9\nOutput\nHaiku + format"]
+    S9_warn --> S9
+    S9 --> BUY(["✅ BUY\n+ Tranche plan\n+ Exit strategy"])
+    S9 --> WATCH(["👁 WATCHLIST\nTier 1 / 2 / 3\n+ Alert prices"])
+
+    R0["Step 9\nREJECTION_LOG"] --> REJ(["❌ REJECT\n+ Re-evaluate condition"])
+    R1["Step 9\nREJECTION_LOG\nGOVERNANCE REJECT"] --> REJ
+    R3["Step 9\nREJECTION_LOG\nFINANCIAL REJECT"] --> REJ
+
+    classDef hardReject fill:#2d1515,stroke:#ef4444,color:#fca5a5
+    classDef pass fill:#142d20,stroke:#34d399,color:#6ee7b7
+    classDef conditional fill:#2d2514,stroke:#f59e0b,color:#fcd34d
+    classDef output fill:#1e3a5f,stroke:#4f8ef7,color:#93c5fd
+    classDef step fill:#1a1d2e,stroke:#6366f1,color:#c7d2fe
+
+    class R0,R1,R3,REJ hardReject
+    class BUY,S6_g,S7_g pass
+    class W2,WATCH,S6_c,S6_r conditional
+    class S9,S9_warn output
+    class S2,S4,S7,S8 step
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     DIAGRAM 6 — ANALYSIS STATE LIFECYCLE
+════════════════════════════════════════════════════ -->
+<div class="diagram-card" id="state">
+  <div class="card-header">
+    <div class="card-header-left">
+      <h2>6 · AnalysisState Lifecycle</h2>
+      <p>The single mutable object passed through every step — fields populated, flags raised, termination conditions</p>
+    </div>
+    <div class="btn-group">
+      <button class="btn-svg" onclick="downloadSVG('state')">⬇ SVG</button>
+      <button class="btn-png" onclick="downloadPNG('state')">⬇ PNG</button>
+    </div>
+  </div>
+  <div class="diagram-body">
+    <div class="mermaid" id="state-diagram">
+stateDiagram-v2
+    [*] --> Initialised: InvestmentPipeline.analyze(ticker)
+
+    state Initialised {
+        note right of Initialised
+            ticker, company_name
+            mode (Normal/Correction/MaxOpp)
+            cap_size (large/mid/small)
+            required_mos_pct (25/35/45%)
+        end note
+    }
+
+    Initialised --> DataPrefetched: _prefetch_data()
+
+    state DataPrefetched {
+        note right of DataPrefetched
+            state.quote → StockQuote
+            state.financials → FinancialMetrics
+            state.governance_data → GovernanceData
+            state.valuation_data → ValuationData
+        end note
+    }
+
+    DataPrefetched --> PreScreened: Step 0
+
+    state PreScreened {
+        note right of PreScreened
+            state.pre_screen → PreScreenResult
+            score /9 · gate · failed_metrics
+        end note
+    }
+
+    PreScreened --> TERMINATED_0: score < 5
+    PreScreened --> Governed: score ≥ 5
+
+    state Governed {
+        note right of Governed
+            state.governance → GovernanceResult
+            score /15 · immediate_triggers
+            capital_allocation_score (Claude)
+        end note
+    }
+
+    Governed --> TERMINATED_1: score < 9 or trigger
+    Governed --> MoatAssessed: score ≥ 9
+
+    state MoatAssessed {
+        note right of MoatAssessed
+            state.moat → MoatResult
+            moat_type · durability · narrative
+            market_position · tam_multiple
+        end note
+    }
+
+    MoatAssessed --> FinancialGated: Step 3
+
+    state FinancialGated {
+        note right of FinancialGated
+            state.financial_gate → FinancialGateResult
+            score /7 · hard_triggers_fired
+            sector_overrides (banks/NBFCs)
+        end note
+    }
+
+    FinancialGated --> TERMINATED_3: score < 5 or hard trigger
+    FinancialGated --> TailwindAssessed: score ≥ 5
+
+    state TailwindAssessed {
+        note right of TailwindAssessed
+            state.tailwind → TailwindResult
+            sector · tailwind_type
+            cycle_position · growth_runway_years
+        end note
+    }
+
+    TailwindAssessed --> ValuationGated: Step 5
+
+    state ValuationGated {
+        note right of ValuationGated
+            state.valuation → ValuationResult
+            5 methods · methods_in_buy_zone
+            dcf_intrinsic_weighted
+            margin_of_safety_pct · mos_met
+        end note
+    }
+
+    ValuationGated --> WATCHLIST: 0 methods in buy zone
+    ValuationGated --> TechnicalConfirmed: ≥ 1 method in buy zone
+
+    WATCHLIST --> TechnicalConfirmed: pipeline continues
+
+    state TechnicalConfirmed {
+        note right of TechnicalConfirmed
+            state.technical → TechnicalSignal
+            signals_met /5
+            entry_guidance GREEN|AMBER|RED
+            tranche_1/2/3_price
+        end note
+    }
+
+    TechnicalConfirmed --> PeerBenchmarked: Step 7
+
+    state PeerBenchmarked {
+        note right of PeerBenchmarked
+            state.peers → PeerResult
+            peer_table · quality_rank
+            valuation_rank
+        end note
+    }
+
+    PeerBenchmarked --> Premortemed: no peer dominance
+    PeerBenchmarked --> PEER_SWITCH: dominant peer detected
+
+    state Premortemed {
+        note right of Premortemed
+            state.premortem → PremortemResult
+            primary/secondary/tertiary risks
+            structural_flag
+        end note
+    }
+
+    Premortemed --> OutputGenerated: Step 9
+
+    state OutputGenerated {
+        note right of OutputGenerated
+            state.recommendation_type BUY|WATCHLIST|REJECT
+            state.conviction HIGH|MEDIUM|LOW
+            state.formatted_report
+            state.all_data_flags
+        end note
+    }
+
+    OutputGenerated --> [*]: report delivered
+
+    TERMINATED_0 --> OutputGenerated: Step 9 REJECTION_LOG
+    TERMINATED_1 --> OutputGenerated: Step 9 REJECTION_LOG
+    TERMINATED_3 --> OutputGenerated: Step 9 REJECTION_LOG
+    PEER_SWITCH --> [*]: restart with new ticker
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     DIAGRAM 7 — CONVICTION SCORING
+════════════════════════════════════════════════════ -->
+<div class="diagram-card" id="conviction">
+  <div class="card-header">
+    <div class="card-header-left">
+      <h2>7 · Conviction Scoring Model</h2>
+      <p>How governance, financials, valuation, moat quality, and technical signals combine into High / Medium / Low conviction</p>
+    </div>
+    <div class="btn-group">
+      <button class="btn-svg" onclick="downloadSVG('conviction')">⬇ SVG</button>
+      <button class="btn-png" onclick="downloadPNG('conviction')">⬇ PNG</button>
+    </div>
+  </div>
+  <div class="diagram-body">
+    <div class="mermaid" id="conviction-diagram">
+flowchart LR
+    subgraph Inputs["Score Components"]
+        G["Governance\nscore /15\n÷ 15 → 0.0–1.0"]
+        F["Financials\nscore /7\n÷ 7 → 0.0–1.0"]
+        V["Valuation\nmethods_in_zone /5\n÷ 5 → 0.0–1.0"]
+        M["Moat Quality\nHigh=1.0\nMedium=0.70\nLow=0.35\nNone≤0.40"]
+        T["Technical\nsignals_met /5\n× 0.1 → bonus"]
+    end
+
+    subgraph Weights["Weighted Average"]
+        W1["governance × 0.30"]
+        W2["financials × 0.25"]
+        W3["valuation × 0.20"]
+        W4["moat × 0.15"]
+        W5["technical bonus"]
+    end
+
+    subgraph Adjustments["Penalties & Caps"]
+        P1["Late-cycle tailwind\n−0.03 from tech bonus"]
+        P2["CONDITIONAL pass flags\n−0.05 per flag"]
+        P3["moat_type = none\ncap moat score ≤ 0.40"]
+    end
+
+    subgraph Output["Conviction Band"]
+        H["HIGH\n≥ 0.72\nMax alloc 8–10% portfolio"]
+        Med["MEDIUM\n0.55–0.71\nMax alloc 5–7% portfolio"]
+        L["LOW\n< 0.55\nMax alloc 3–4% portfolio"]
+    end
+
+    G --> W1
+    F --> W2
+    V --> W3
+    M --> W4
+    T --> W5
+
+    W1 & W2 & W3 & W4 & W5 --> Avg["Weighted\nAverage\n0.0–1.0"]
+
+    P1 & P2 & P3 --> Avg
+
+    Avg -->|"≥ 0.72"| H
+    Avg -->|"0.55–0.71"| Med
+    Avg -->|"< 0.55"| L
+
+    subgraph StopLoss["Cap-Size Stop-Loss"]
+        SL1["Large Cap\nstop = CMP × 0.82\n(18% below)"]
+        SL2["Mid Cap\nstop = CMP × 0.75\n(25% below)"]
+        SL3["Small Cap\nstop = CMP × 0.70\n(30% below)"]
+    end
+
+    H & Med & L --> StopLoss
+
+    classDef score fill:#1e3a5f,stroke:#4f8ef7,color:#93c5fd
+    classDef weight fill:#1a2d1f,stroke:#34d399,color:#6ee7b7
+    classDef penalty fill:#2d2514,stroke:#f59e0b,color:#fcd34d
+    classDef out fill:#142d20,stroke:#34d399,color:#a7f3d0
+
+    class G,F,V,M,T score
+    class W1,W2,W3,W4,W5 weight
+    class P1,P2,P3 penalty
+    class H,Med,L out
+    </div>
+  </div>
+</div>
+
+<footer>
+  Indian Equity Investor · 9-step pipeline · Claude Sonnet + Haiku · NSE/BSE ·
+  Diagrams rendered with <a href="https://mermaid.js.org" style="color:var(--accent)">Mermaid.js</a>
+</footer>
+
+<script>
+  // Initialise Mermaid with a dark theme that matches the page
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'dark',
+    themeVariables: {
+      background: '#12151f',
+      mainBkg: '#1a1d27',
+      nodeBorder: '#4f8ef7',
+      clusterBkg: '#1a1d27',
+      titleColor: '#e2e8f0',
+      edgeLabelBackground: '#1a1d27',
+      lineColor: '#4f8ef7',
+      primaryColor: '#1e3a5f',
+      primaryTextColor: '#e2e8f0',
+      primaryBorderColor: '#4f8ef7',
+      secondaryColor: '#142d20',
+      tertiaryColor: '#2d2514',
+      fontFamily: 'Inter, Segoe UI, system-ui, sans-serif',
+      fontSize: '13px',
+    },
+    flowchart: { curve: 'basis', padding: 20 },
+    sequence: { actorMargin: 80, width: 180 },
+  });
+
+  // ─── Download helpers ────────────────────────────────────────────────────────
+
+  function getSVGElement(sectionId) {
+    const container = document.getElementById(sectionId + '-diagram');
+    return container ? container.querySelector('svg') : null;
+  }
+
+  function downloadSVG(sectionId) {
+    const svg = getSVGElement(sectionId);
+    if (!svg) { alert('Diagram not yet rendered — wait a moment and try again.'); return; }
+    const clone = svg.cloneNode(true);
+    // Embed font so standalone SVG renders correctly
+    clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+    const serializer = new XMLSerializer();
+    const svgStr = '<?xml version="1.0" encoding="UTF-8"?>\n' + serializer.serializeToString(clone);
+    const blob = new Blob([svgStr], { type: 'image/svg+xml;charset=utf-8' });
+    triggerDownload(URL.createObjectURL(blob), sectionId + '-diagram.svg');
+  }
+
+  function downloadPNG(sectionId) {
+    const svg = getSVGElement(sectionId);
+    if (!svg) { alert('Diagram not yet rendered — wait a moment and try again.'); return; }
+
+    const scale = 2; // retina
+    const bbox = svg.getBoundingClientRect();
+    const w = Math.ceil(bbox.width) * scale;
+    const h = Math.ceil(bbox.height) * scale;
+
+    const clone = svg.cloneNode(true);
+    clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+    clone.setAttribute('width', w);
+    clone.setAttribute('height', h);
+
+    // Add a dark background rect so PNG doesn't come out transparent
+    const bg = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    bg.setAttribute('width', '100%');
+    bg.setAttribute('height', '100%');
+    bg.setAttribute('fill', '#12151f');
+    clone.insertBefore(bg, clone.firstChild);
+
+    const svgStr = new XMLSerializer().serializeToString(clone);
+    const dataURL = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgStr)));
+
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.scale(scale, scale);
+      ctx.drawImage(img, 0, 0, bbox.width, bbox.height);
+      triggerDownload(canvas.toDataURL('image/png'), sectionId + '-diagram.png');
+    };
+    img.onerror = () => alert('PNG export failed — try SVG instead.');
+    img.src = dataURL;
+  }
+
+  function triggerDownload(url, filename) {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+</script>
+</body>
+</html>

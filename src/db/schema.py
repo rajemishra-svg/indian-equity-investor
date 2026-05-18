@@ -1,0 +1,66 @@
+"""SQLite schema definition and database initialisation."""
+from __future__ import annotations
+
+CREATE_TABLES_SQL = """
+CREATE TABLE IF NOT EXISTS analyses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker TEXT NOT NULL,
+    company_name TEXT,
+    analysis_date TEXT NOT NULL,       -- ISO date YYYY-MM-DD
+    market_mode TEXT,
+    sector_name TEXT,
+    cap_size TEXT,
+    cmp REAL,
+    market_cap_cr REAL,
+
+    -- Step gate results
+    pre_screen_score INTEGER,
+    pre_screen_max INTEGER DEFAULT 9,
+    pre_screen_gate TEXT,
+    governance_score INTEGER,
+    governance_max INTEGER DEFAULT 15,
+    governance_gate TEXT,
+    governance_sub_scores TEXT,        -- JSON {"pledging":2,"audit":2,...}
+    governance_triggers TEXT,          -- JSON array of immediate trigger names
+    financial_score INTEGER,
+    financial_max INTEGER DEFAULT 7,
+    financial_gate TEXT,
+    financial_triggers TEXT,           -- JSON array of hard trigger descriptions
+    valuation_gate TEXT,
+    valuation_methods_in_buy_zone INTEGER,
+    mos_pct REAL,
+    required_mos_pct REAL,
+    dcf_intrinsic_weighted REAL,
+
+    -- Final outcome
+    terminated_at_step INTEGER,
+    termination_reason TEXT,
+    recommendation TEXT,
+    conviction TEXT,
+    watchlist_tier INTEGER,
+    investment_thesis TEXT,
+
+    -- Audit trail
+    all_data_flags TEXT,               -- JSON array
+    error_tags TEXT,                   -- JSON array
+
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(ticker, analysis_date)      -- one result per ticker per day (last-write wins)
+);
+
+CREATE TABLE IF NOT EXISTS data_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker TEXT NOT NULL,
+    snapshot_date TEXT NOT NULL,       -- ISO date
+    data_type TEXT NOT NULL,           -- 'quote' | 'financials' | 'governance' | 'valuation'
+    source TEXT,                       -- 'nse' | 'screener' | 'yfinance' | etc.
+    data_json TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(ticker, snapshot_date, data_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_analyses_ticker ON analyses(ticker);
+CREATE INDEX IF NOT EXISTS idx_analyses_date ON analyses(analysis_date);
+CREATE INDEX IF NOT EXISTS idx_analyses_recommendation ON analyses(recommendation);
+CREATE INDEX IF NOT EXISTS idx_snapshots_ticker_date ON data_snapshots(ticker, snapshot_date);
+"""

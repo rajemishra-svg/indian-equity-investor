@@ -1,0 +1,8 @@
+══════════════════════════════════════════════════════════════════════════
+                    WATCHLIST ADDITION — TIER 2
+══════════════════════════════════════════════════════════════════════════
+TICKER          : EICHERMOT
+REPORT DATE     : 2026-05-15 16:07 IST
+REASON          : Valuation not in buy zone: 0 methods in zone, MoS 17.6% vs required 25.0%
+REVIEW TRIGGER  : Re-evaluate when CMP drops to MoS target or fundamentals deteriorate
+══════════════════════════════════════════════════════════════════════════

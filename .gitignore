@@ -1,0 +1,36 @@
+# API keys and secrets
+.env
+.env.local
+.env.production
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Raw data cache — can be re-fetched
+data/raw/
+data/processed/
+
+# OS artefacts
+.DS_Store
+**/.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs (optional — remove if you want to track these)
+logs/
+
+# Personal notes not for version control
+*.private.md
