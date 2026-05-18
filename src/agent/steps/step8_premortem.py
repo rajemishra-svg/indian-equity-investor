@@ -140,10 +140,11 @@ class Step8Premortem(BaseStep):
                 f"trend={gd.pledging_trend_direction}"
             )
 
-        # Moat signals
+        # Moat signals — use short narrative to save tokens (full narrative not needed for risk analysis)
         if state.moat:
             parts.append(f"Moat: {state.moat.moat_type.value} ({state.moat.moat_durability})")
-            parts.append(f"Business: {state.moat.moat_narrative}")
+            moat_ctx = state.moat.moat_narrative_short or state.moat.moat_narrative
+            parts.append(f"Business: {moat_ctx}")
             parts.append(f"Working capital: {state.moat.working_capital_flag}")
 
         # Tailwind / sector signals

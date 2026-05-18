@@ -1,0 +1,17 @@
+{
+  "last_updated": "2026-05-18",
+  "source": "NSE India — Nifty 50 constituents as of 2026-05-18",
+  "staleness_warning_days": 90,
+  "symbols": [
+    "RELIANCE", "TCS", "HDFCBANK", "BHARTIARTL", "ICICIBANK",
+    "INFOSYS", "SBIN", "HINDUNILVR", "ITC", "KOTAKBANK",
+    "LT", "AXISBANK", "ASIANPAINT", "MARUTI", "SUNPHARMA",
+    "TATAMOTORS", "NTPC", "ONGC", "TECHM", "BAJFINANCE",
+    "WIPRO", "HCLTECH", "ADANIENT", "ULTRACEMCO", "POWERGRID",
+    "TATASTEEL", "JSWSTEEL", "TITAN", "BAJAJFINSV", "NESTLEIND",
+    "DIVISLAB", "DRREDDY", "CIPLA", "EICHERMOT", "BPCL",
+    "COALINDIA", "GRASIM", "HINDALCO", "M&M", "SBILIFE",
+    "APOLLOHOSP", "ADANIPORTS", "BAJAJ-AUTO", "BRITANNIA", "HDFCLIFE",
+    "INDUSINDBK", "LTIM", "TATACONSUM", "UPL", "VEDL"
+  ]
+}

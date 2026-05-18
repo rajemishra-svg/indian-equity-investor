@@ -241,8 +241,8 @@ class Step1Governance(BaseStep):
             '  "contingent_liabilities_pct_networth": <contingent liabilities as % of net worth from latest balance sheet, or null>,\n'
             '  "sebi_record_clean": <true if no active SEBI/ED fraud investigation, false otherwise>,\n'
             '  "sebi_orders": ["<brief description of any SEBI/ED orders if present, else empty list>"],\n'
-            '  "insider_net_buying_3m": "<NET_BUYING|NET_SELLING|NEUTRAL|null — '
-            'based on BSE bulk/block deals and insider trading disclosures last 3 months>"\n'
+            '  "insider_net_buying_3m": null\n'
+            "  // ^ Use exactly: \"NET_BUYING\", \"NET_SELLING\", \"NEUTRAL\", or JSON null (no quotes around null)\n"
             "}\n\n"
             "RULES:\n"
             "1. Use web_search and web_fetch to look up: NSE corporate filings, annual report notes, "
@@ -314,11 +314,14 @@ class Step1Governance(BaseStep):
         # P3-2: Insider/promoter activity signal
         if needs_insider:
             insider_raw = enriched.get("insider_net_buying_3m")
+            # Coerce string "null" (common LLM mistake) to Python None
+            if isinstance(insider_raw, str) and insider_raw.lower() == "null":
+                insider_raw = None
             if isinstance(insider_raw, str) and insider_raw.upper() in (
                 "NET_BUYING", "NET_SELLING", "NEUTRAL"
             ):
                 g.insider_net_buying_3m = insider_raw.upper()
-            # null / unrecognised → leave as None (not populated)
+            # JSON null or unrecognised → leave as None (not populated)
 
         self.log.info(
             "governance_enrichment_complete",
@@ -434,8 +437,7 @@ class Step1Governance(BaseStep):
             "1 = mixed record. 0 = poor/value-destructive. "
             "Use your knowledge of the company combined with the provided data."
             f"{sector_note} "
-            "Return ONLY valid JSON: {\"score\": <int 0-3>, \"rationale\": \"<one sentence>\"}. "
-            "No markdown code blocks, no explanation outside the JSON."
+            'Return JSON only: {"score": <int 0-3>, "rationale": "<one sentence>"}'
         )
         message = f"Company: {state.ticker}\n{context}"
         try:

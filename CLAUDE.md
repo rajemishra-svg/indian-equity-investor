@@ -76,9 +76,9 @@ CLI (src/main.py)
   │         │    │    └─ ScreenerClient.get_shareholding() (fallback)
   │         │    └─ TrendlyneClient.get_valuation_data() src/api/trendlyne.py
   │         │         └─ YFinanceClient (fallback if Trendlyne blocked)
-  │         │    └─ classify_sector() → state.sector_name  src/sector/classifier.py
+  │         │    └─ classify_sector_with_confidence() → state.sector_name, sector_confidence  src/sector/classifier.py
   │         │    └─ is_conglomerate() → state.is_conglomerate  src/sector/classifier.py
-  │         │    └─ save_snapshot() × 4 (non-fatal)   src/db/repository.py
+  │         │    └─ _save_snap() × 4 (ER-07 on ≥3 failures)   src/db/repository.py
   │         ├─ Step0…Step9.run(state)                 src/agent/steps/
   │         │    └─ BaseStep._call_claude() / _agentic_loop()
   │         └─ save_analysis() (non-fatal)             src/db/repository.py
@@ -92,7 +92,7 @@ CLI (src/main.py)
   │         │         ├─ get_fresh_snapshot() ← SQLite warm cache (7-day TTL)
   │         │         ├─ _fetch_prescreen_data()       (quote + financials + shareholding)
   │         │         └─ Step0PreScreen.run()          (deterministic, no Claude)
-  │         ├─ Phase 3: InvestmentPipeline.analyze()   (sequential, top N candidates only)
+  │         ├─ Phase 3: InvestmentPipeline.analyze()   (concurrent asyncio.gather + Semaphore(3), top N candidates only)
   │         └─ Phase 4: rank_results()                 (BUY→conviction→MoS→governance)
   │
   ├─ investor watchlist-alerts
@@ -109,6 +109,8 @@ CLI (src/main.py)
 ```
 
 `AnalysisState` (`src/models.py`) is the single mutable object passed through every step. It accumulates raw data, step results, flags, errors, and the final recommendation. When `state.is_terminated` is true, all steps except Step9 are skipped.
+
+`MoatAssessment` carries a `moat_narrative_short` field (`Optional[str]`) — the first sentence of `moat_narrative`, truncated to 120 characters. Steps 8 and 9 use this field instead of the full narrative to reduce prompt size.
 
 ### Step model-routing and loop strategy
 
@@ -135,6 +137,10 @@ All steps inherit from `BaseStep`. Two helpers:
 - `_agentic_loop(system, initial_message, tools, model, max_tokens, max_iterations)` — iterates until `stop_reason == "end_turn"` or tool calls exhaust `max_iterations`. Dispatches tools via `execute_tool()` in `src/agent/tools.py`.
 
 Every `_call_claude` / `_agentic_loop` call logs `input_tokens`, `output_tokens`, `elapsed_seconds`.
+
+Both `_call_claude` and `_agentic_loop` wrap `claude.messages.create` in a tenacity retry decorator (3 attempts, exponential 5–60s backoff) covering `RateLimitError` and transient `APIStatusError`.
+
+`_agentic_loop` sets `self._last_loop_hit_max = True` and logs a warning when max iterations are hit; callers check this flag to add the ER-06 error tag.
 
 ### Hard gates and termination
 
@@ -167,6 +173,8 @@ On termination: `state.terminated_at_step` and `state.termination_reason` are se
 | ER-03 | Trendlyne valuation failed (before YFinance fallback) |
 | ER-04 | All shareholding sources failed (NSE + BSE + Screener) |
 | ER-05 | ≥ 5 accumulated errors → BUY auto-downgraded to WATCHLIST |
+| ER-06 | Agentic loop hit max iterations (moat or peer research incomplete) |
+| ER-07 | ≥ 3 of 4 raw data snapshots failed to save to SQLite |
 | ER-08 | Both NSE and YFinance Nifty50 failed → mode defaults to NORMAL |
 
 **Data flags** (`state.all_data_flags`) are quality annotations — `[DATA UNVERIFIED]`, `[ESTIMATE]`, `[SECTOR OVERRIDE]`, `[EC-XX]`, `[ER-XX]`, `[POSITIVE]` etc. — that appear verbatim in the final report.
@@ -179,6 +187,8 @@ Every analysis is assigned a `sector_name` before Step 0 runs. Sector-specific t
 
 Also exposes `is_conglomerate(company_name, ticker)` — checks against `_CONGLOMERATE_NAMES` (Tata, Birla, Bajaj Holdings, Mahindra, Reliance, ITC, L&T, Vedanta, JSW Holdings, generic "holding company" patterns).
 
+`classify_sector_with_confidence()` returns a `(sector_name, confidence)` tuple. Confidence is 1.0 for company-name match, 0.7 for moat-narrative-only match, 0.9 for recently-listed, 0.5 for default fallback. When confidence < 0.7, the pipeline adds `[SECTOR AMBIGUOUS: classified as 'X' with low confidence (NN%); verify sector manually]` to state flags.
+
 **Profiles** (`src/sector/profiles.py`): seven `SectorProfile` dataclasses, each overriding threshold fields:
 
 | Profile | Key overrides |
@@ -188,16 +198,19 @@ Also exposes `is_conglomerate(company_name, ticker)` — checks against `_CONGLO
 | `defence_govt` | CFO/NP min 40% (hurdle), 25% (hard trigger); revenue/PAT CAGR min 8/10% |
 | `infrastructure_utility` | D/E max 3.0, hard trigger 5.0; ICR min 3.0; WACC +0.5% |
 | `capital_goods` | CFO/NP min 55% (hurdle), 35% (hard trigger) |
-| `commodities_cyclical` | Revenue/PAT CAGR min 8/10%; WACC +1.0%; `use_normalized_ebitda=True` |
+| `commodities_cyclical` | Revenue/PAT CAGR min 8/10%; WACC +1.0%; `use_normalized_ebitda=True`; `exit_mult_1x=1.10, exit_mult_2x=1.30, exit_mult_3x=1.70, tranche_t2_discount=0.12, tranche_t3_discount=0.22` |
 | `recently_listed` | 5Y revenue/PAT/ROE/ROCE all `None` (waived — insufficient history) |
 
-**Pipeline integration**: `classify_sector()` and `is_conglomerate()` are called in `_prefetch_data()`. All sector overrides are logged with `[SECTOR OVERRIDE: ...]`. Conglomerate detection logs `[EC-04: CONGLOMERATE detected — SOTP recommended]`.
+**Pipeline integration**: `classify_sector_with_confidence()` and `is_conglomerate()` are called in `_prefetch_data()`. All sector overrides are logged with `[SECTOR OVERRIDE: ...]`. Conglomerate detection logs `[EC-04: CONGLOMERATE detected — SOTP recommended]`.
+
+`SectorProfile` now carries exit multipliers (`exit_mult_1x/2x/3x`) and optional tranche discount overrides (`tranche_t2_discount`, `tranche_t3_discount`). Step 9 reads these to emit sector-appropriate entry tranches and exit targets. `commodities_cyclical` uses tighter exit targets (1.10×/1.30×/1.70× vs default 1.15×/1.50×/2.00×) and wider tranche gaps (12%/22% vs 8%/15%) to account for higher volatility.
 
 **Step integration**:
 - **Step 0**: all 9 pre-screen metrics use `profile.*` thresholds; `None` = auto-pass; EC-06 waives promoter holding for MNCs; EC-11 flags low liquidity
 - **Step 1**: `profile.capital_allocation_note` injected into capital allocation prompt; P3-2 insider activity signal enriched and flagged
 - **Step 3**: all 7 hurdles and 3 hard triggers use `profile.*` thresholds; P1-1 bank KPIs, P1-3 WC deterioration, P1-4 earnings quality, P2-3 trend direction all evaluated as soft flags
-- **Step 5**: `wacc += profile.wacc_adjustment`; EV/EBITDA skipped when `not profile.ev_ebitda_applicable`; EC-01 skips earnings-based methods; EC-02 normalises EBITDA; EC-04 adds SOTP note
+- **Step 5**: `wacc += profile.wacc_adjustment`; EV/EBITDA skipped when `not profile.ev_ebitda_applicable`; EC-01 skips earnings-based methods; EC-02 normalises EBITDA; EC-04 adds SOTP note; sector-aware exit multipliers are stored in SectorProfile and used by Step 9
+- **Steps 8 and 9**: use `moat.moat_narrative_short` (first sentence of moat narrative, max 120 chars) to keep downstream prompts compact and within token budget.
 
 ### Enrichment Features (P1–P3)
 
@@ -235,8 +248,8 @@ WACC is risk-adjusted: 13% large-cap stable, 15% mid-cap, 16.5% small-cap, +1% f
 The scanner's two-phase design exists to control Claude API cost:
 
 - **Phase 2 (pre-screen)** runs Step 0 only — purely deterministic, zero LLM calls. All 500 tickers in an index can be pre-screened for the cost of HTTP requests alone. Concurrency is capped by `asyncio.Semaphore(concurrency)` (default 8). **SQLite warm cache**: `get_fresh_snapshot()` is checked before any HTTP call; data fresher than 7 days skips Screener entirely, making repeated weekly scans near-free.
-- **Phase 3 (full pipeline)** runs sequentially — one `InvestmentPipeline.analyze()` call per candidate, each managing its own HTTP client sessions. The `DataCache` singleton means any data already fetched in Phase 2 is reused here at no extra HTTP cost.
-- **Fallback universe**: NSE JSON API → NSE archives CSV → `NIFTY50_FALLBACK` (hardcoded 50 tickers).
+- **Phase 3 (full pipeline)** runs concurrently — asyncio.gather with a Semaphore(3) cap, each candidate in its own `InvestmentPipeline` instance. The `DataCache` singleton means any data already fetched in Phase 2 is reused here at no extra HTTP cost.
+- **Fallback universe**: NSE JSON API → NSE archives CSV → `config/nifty50_fallback.json` (50 tickers, staleness warning after 90 days).
 - **Ranking** (`rank_results()`): BUY > WATCHLIST > PEER_SWITCH > REJECT, then by conviction HIGH > MEDIUM > LOW, then MoS% descending, then governance score descending.
 
 ### API clients (`src/api/`)
@@ -245,9 +258,13 @@ All clients except `YFinanceClient` extend `BaseHTTPClient` which provides `http
 
 **NSE quirk**: must visit the homepage first to establish session cookies — `_establish_session()` is called automatically on first API request. NSE aggressively blocks bots with 403s in non-browser environments.
 
+**ScreenerClient** uses a module-level `asyncio.Semaphore(2)` (`_SCREENER_SEMAPHORE`) shared across all instances to prevent thundering-herd requests to Screener.in during batch scans.
+
+**Security**: Web content fetched via `tools.py` is always sanitized before being sent to Claude: BeautifulSoup strips all HTML tags (including `<script>`, `<style>`, `<noscript>`), and a regex pass removes prompt-injection patterns ("ignore all previous instructions", "act as", "system prompt:", etc.). Raw HTML is never forwarded to the LLM.
+
 **YFinanceClient** (`src/api/yfinance_client.py`): wraps the synchronous `yfinance` library in `run_in_executor()` calls. Provides `get_stock_quote()` (with `avg_daily_value_cr` and `volume_trend_down_days`), `get_valuation_data()` (with `pe_10y_percentile` via `_compute_pe_percentile()`), and `get_nifty50()`. NSE tickers map to Yahoo Finance by appending `.NS`. Data is ~15–20 min delayed — marked `is_stale=True`. Has a no-op async context manager.
 
-**DataCache** (`src/api/cache.py`): module-level singleton with TTL-based invalidation. TTLs: quote/valuation = 1 hour, financials/shareholding = 24 hours. `None` is never cached.
+**DataCache** (`src/api/cache.py`): module-level singleton with TTL-based invalidation. TTLs: quote/valuation = 1 hour, financials/shareholding = 24 hours, Nifty mode = 15 minutes (via `nifty_key()`). `None` is never cached. `mode_detector.py` maintains a module-level copy of the same data for zero-overhead in-process hits; `reset_mode_cache()` invalidates both layers (used in tests).
 
 ### SQLite Datastore (`src/db/`)
 
@@ -285,6 +302,21 @@ max_tokens       = 4096   # agentic loops
 max_tokens_mini  = 256    # tiny JSON (capital allocation score)
 max_tokens_short = 600    # DCF / tailwind / premortem JSON
 max_tokens_thesis= 512    # narrative thesis
+
+# WACC (used by Step 5 — overrideable via .env)
+wacc_large_cap       = 13.0   # %
+wacc_mid_cap         = 15.0   # %
+wacc_small_cap       = 16.5   # %
+wacc_terminal_growth = 6.0    # %
+
+# Tranche entry discounts (overrideable; sector profile may override further)
+tranche_t2_discount  = 0.08   # 8% below CMP
+tranche_t3_discount  = 0.15   # 15% below CMP
+
+# Stop-loss levels (used by Step 9 exit strategy)
+stop_loss_large_cap  = 0.82   # 18% below buy price
+stop_loss_mid_cap    = 0.75   # 25% below buy price
+stop_loss_small_cap  = 0.70   # 30% below buy price
 ```
 
 ---
@@ -314,7 +346,7 @@ If Nifty data unavailable, defaults to Normal + adds `[MODE UNCONFIRMED]` flag.
 
 **Watchlist tiers**: Tier 1 = all steps passed + valuation in buy zone (max 15). Tier 2 = Steps 1–5 passed, valuation not attractive (max 30). Tier 3 = Steps 1–3 passed, research pending. All tiers persisted to `investor.db` — no markdown files.
 
-**Tranche plan** (always in BUY output): T1 40% @ CMP, T2 35% @ CMP×0.92, T3 25% @ CMP×0.85.
+**Tranche plan** (always in BUY output): T1 40% @ CMP, T2 35% @ CMP×(1−tranche_t2_discount), T3 25% @ CMP×(1−tranche_t3_discount). Default discounts: 8%/15%. Sector profiles (e.g., `commodities_cyclical`) override these. Stop-loss thresholds: large-cap 18%, mid-cap 25%, small-cap 30% — all configurable via settings.
 
 **Tax**: LTCG 12.5% on gains > ₹1.25L after 1 year; STCG 20% under 1 year. After any trade, update all four files in `portfolio/`.
 
@@ -332,4 +364,4 @@ Read situationally — these are AI context documents, not application code:
 | `edge-cases.md` | When any edge-case flag fires — full taxonomy including EC-07 through EC-15 not yet in code |
 | `error-recovery.md` | When a data fetch fails or sources conflict |
 
-Note: EC-01, EC-02, EC-04, EC-06, EC-11, and ER-01 through ER-05/ER-08 are **fully implemented in code** and fire automatically. The `skill/references/edge-cases.md` file covers all 15 EC codes including those not yet automated (EC-07 turnaround, EC-08 correction entry, EC-09 peer dominance, EC-10 PSU, EC-12 export-oriented, EC-13 post-acquisition, EC-14 regulatory overhang, EC-15 holding company).
+Note: EC-01, EC-02, EC-04, EC-06, EC-11, and ER-01 through ER-08 are **fully implemented in code** and fire automatically. The `skill/references/edge-cases.md` file covers all 15 EC codes including those not yet automated (EC-07 turnaround, EC-08 correction entry, EC-09 peer dominance, EC-10 PSU, EC-12 export-oriented, EC-13 post-acquisition, EC-14 regulatory overhang, EC-15 holding company).

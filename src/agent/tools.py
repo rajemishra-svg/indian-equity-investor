@@ -166,6 +166,30 @@ async def execute_tool(tool_name: str, tool_input: dict[str, Any], clients: dict
         return f"[ERROR executing {tool_name}: {exc}]"
 
 
+def _sanitize_web_text(text: str, max_chars: int = 3500) -> str:
+    """Strip prompt-injection patterns from external web content before sending to Claude.
+
+    External pages can embed adversarial instructions like "Ignore previous instructions…".
+    This function strips the most dangerous patterns and caps length to reduce token cost.
+    """
+    import re as _re
+    # Strip common prompt-injection openers (case-insensitive)
+    _INJECTION_PATTERNS = [
+        r"ignore (all |your )?(previous|prior|above) instructions?",
+        r"disregard (all |your )?(previous|prior|above) instructions?",
+        r"you are now ",
+        r"act as ",
+        r"new instructions?:",
+        r"system prompt:",
+        r"<\|im_start\|>",
+        r"<\|im_end\|>",
+    ]
+    cleaned = text
+    for pat in _INJECTION_PATTERNS:
+        cleaned = _re.sub(pat, "[REDACTED]", cleaned, flags=_re.IGNORECASE)
+    return cleaned[:max_chars]
+
+
 async def _web_search(query: str) -> str:
     """Perform a web search via DuckDuckGo lite."""
     encoded = query.replace(" ", "+")
@@ -189,7 +213,8 @@ async def _web_search(query: str) -> str:
             if title_tag:
                 title = title_tag.get_text(strip=True)
                 snippet = snippet_tag.get_text(strip=True) if snippet_tag else ""
-                results.append(f"TITLE: {title}\nSNIPPET: {snippet}")
+                entry = f"TITLE: {title}\nSNIPPET: {snippet}"
+                results.append(_sanitize_web_text(entry, max_chars=500))
         if results:
             return "\n\n".join(results)
         return "[NO RESULTS FOUND]"
@@ -198,7 +223,11 @@ async def _web_search(query: str) -> str:
 
 
 async def _web_fetch(url: str, extract_text: bool = True) -> str:
-    """Fetch and optionally extract clean text from a URL."""
+    """Fetch and extract clean text from a URL.
+
+    Raw HTML is never sent to Claude — it always passes through BeautifulSoup
+    text extraction to prevent prompt injection via adversarial page content.
+    """
     try:
         async with httpx.AsyncClient(
             timeout=20.0,
@@ -211,15 +240,13 @@ async def _web_fetch(url: str, extract_text: bool = True) -> str:
             },
         ) as client:
             resp = await client.get(url)
-        if extract_text:
-            soup = BeautifulSoup(resp.text, "lxml")
-            # Remove scripts and styles
-            for tag in soup(["script", "style", "nav", "footer", "header"]):
-                tag.decompose()
-            text = soup.get_text(separator="\n", strip=True)
-            # Truncate to 4000 chars to reduce context tokens sent to Claude
-            return text[:4000]
-        return resp.text[:4000]
+        # Always extract text — never send raw HTML to Claude regardless of extract_text flag.
+        # Raw HTML can contain hidden adversarial instructions in script tags or comments.
+        soup = BeautifulSoup(resp.text, "lxml")
+        for tag in soup(["script", "style", "nav", "footer", "header", "noscript"]):
+            tag.decompose()
+        text = soup.get_text(separator="\n", strip=True)
+        return _sanitize_web_text(text, max_chars=3500)
     except Exception as exc:
         return f"[FETCH ERROR: {exc}]"
 

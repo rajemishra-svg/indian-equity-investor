@@ -60,6 +60,18 @@ class SectorProfile:
     # ── Capital allocation prompt context ─────────────────────────────────
     capital_allocation_note: str = ""
 
+    # ── Step 9: sector-aware exit price multipliers ────────────────────────
+    # Valuation exit = DCF_weighted * exit_mult_1x (mild), *exit_mult_2x (full), *exit_mult_3x (long)
+    # Cyclicals exit earlier (mean-reversion); compounders held longer.
+    exit_mult_1x: float = 1.15   # conservative first exit
+    exit_mult_2x: float = 1.50   # mid exit target
+    exit_mult_3x: float = 2.00   # long-hold full exit
+
+    # ── Step 9: sector-aware tranche discounts ────────────────────────────
+    # None means: use settings.tranche_t2/t3_discount (global defaults)
+    tranche_t2_discount: Optional[float] = None  # None → use settings default
+    tranche_t3_discount: Optional[float] = None  # None → use settings default
+
 
 SECTOR_PROFILES: dict[str, SectorProfile] = {
     "default": SectorProfile(
@@ -184,6 +196,12 @@ SECTOR_PROFILES: dict[str, SectorProfile] = {
             "by commodity price cycles. Evaluate on through-cycle average ROCE, balance sheet "
             "strength at trough, and management capital discipline (avoiding peak capex)."
         ),
+        # Cyclicals mean-revert — exit closer to intrinsic; wider tranche spacing for volatility
+        exit_mult_1x=1.10,
+        exit_mult_2x=1.30,
+        exit_mult_3x=1.70,
+        tranche_t2_discount=0.12,  # 12% below CMP (more volatile)
+        tranche_t3_discount=0.22,  # 22% below CMP
     ),
 
     "recently_listed": SectorProfile(

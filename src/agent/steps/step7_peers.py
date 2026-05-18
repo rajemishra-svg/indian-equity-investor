@@ -42,6 +42,12 @@ class Step7Peers(BaseStep):
                 max_tokens=settings.max_tokens,
                 max_iterations=8,
             )
+            if self._last_loop_hit_max:
+                state.add_error("ER-06")
+                state.add_flag(
+                    "[ER-06: PEER RESEARCH INCOMPLETE — max agentic iterations reached; "
+                    "peer comparison based on partial data]"
+                )
             peer_result = self._parse_response(response_text, state)
         except Exception as exc:
             self.log.warning(
@@ -93,10 +99,13 @@ class Step7Peers(BaseStep):
             "and compare their financial quality and valuation.\n\n"
             "RULES:\n"
             "1. Use get_financial_data and web_search to fetch peer metrics.\n"
-            "2. Score quality (0–10) and valuation (0–10, lower P/E = higher score) for each peer.\n"
-            "3. A peer DOMINATES the target if it has HIGHER quality score AND LOWER valuation "
-            "score (i.e. cheaper). If dominant peer exists, set gate to FAIL.\n"
-            "4. Return ONLY valid JSON — no markdown code blocks.\n\n"
+            "2. Assign quality_rank (1 = best quality) and valuation_rank (1 = cheapest) "
+            "to the target AND each peer, 1-indexed across the full group.\n"
+            "3. A peer DOMINATES the target when BOTH conditions hold:\n"
+            "   • peer quality_rank < target quality_rank  (peer is better quality)\n"
+            "   • peer valuation_rank < target valuation_rank  (peer is cheaper by P/E or EV/EBITDA)\n"
+            "   If any peer dominates, set gate=fail and dominant_peer=that peer's ticker.\n"
+            "4. Return JSON only — no markdown.\n\n"
             "JSON schema:\n"
             "{\n"
             '  "gate": "<pass_green|pass_conditional|fail>",\n'

@@ -133,38 +133,58 @@ def classify_sector(
         ``"infrastructure_utility"``, ``"capital_goods"``, ``"commodities_cyclical"``,
         ``"recently_listed"``.
     """
+    sector, _ = classify_sector_with_confidence(
+        company_name, ticker, moat_narrative, listing_years
+    )
+    return sector
+
+
+def classify_sector_with_confidence(
+    company_name: str,
+    ticker: str = "",
+    moat_narrative: str = "",
+    listing_years: Optional[float] = None,
+) -> tuple[str, float]:
+    """Return (sector_name, confidence) for the given company.
+
+    Confidence is 1.0 when matched by company name, 0.7 when matched only via moat
+    narrative, and 0.5 for the default fallback (ambiguous).
+
+    Returns:
+        Tuple of (sector_name, confidence_float_0_to_1).
+    """
     name = (company_name or ticker or "").lower()
     narrative = moat_narrative.lower()
 
     # 1. Financial services — highest priority (unique accounting treatment)
     if any(kw in name for kw in _FINANCIAL_KEYWORDS):
-        return "financial_services"
+        return "financial_services", 1.0
     if moat_narrative and any(kw in narrative for kw in _FINANCIAL_MOAT_KEYWORDS):
-        return "financial_services"
+        return "financial_services", 0.7
 
     # 2. Defence / government contractor
     if any(kw in name for kw in _DEFENCE_KEYWORDS):
-        return "defence_govt"
+        return "defence_govt", 1.0
     if moat_narrative and any(kw in narrative for kw in _DEFENCE_MOAT_KEYWORDS):
-        return "defence_govt"
+        return "defence_govt", 0.7
 
     # 3. Infrastructure / utility
     if any(kw in name for kw in _INFRA_UTILITY_KEYWORDS):
-        return "infrastructure_utility"
+        return "infrastructure_utility", 1.0
 
     # 4. Capital goods / engineering
     if any(kw in name for kw in _CAPITAL_GOODS_KEYWORDS):
-        return "capital_goods"
+        return "capital_goods", 1.0
 
     # 5. Commodities / cyclicals
     if any(kw in name for kw in _COMMODITY_KEYWORDS):
-        return "commodities_cyclical"
+        return "commodities_cyclical", 1.0
 
     # 6. Recently listed (fallback — no strong sector signal)
     if listing_years is not None and listing_years < 3.0:
-        return "recently_listed"
+        return "recently_listed", 0.9
 
-    return "default"
+    return "default", 0.5
 
 
 def is_conglomerate(company_name: str, ticker: str = "") -> bool:

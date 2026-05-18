@@ -238,6 +238,7 @@ class Step5Valuation(BaseStep):
                 self.log.warning("dcf_failed", ticker=state.ticker, error=str(exc))
                 data_flags.append("[DATA UNVERIFIED: dcf_intrinsic]")
 
+        dcf_failed = dcf_weighted is None and not is_pre_profit and f is not None and q is not None
         if dcf_weighted is not None and cmp > 0:
             mos = _compute_mos(cmp, dcf_weighted)
             if mos is not None and mos >= state.required_mos_pct:
@@ -280,11 +281,21 @@ class Step5Valuation(BaseStep):
         # so the pipeline lands in PASS_CONDITIONAL at best, never PASS_GREEN.
         mos_met = mos is not None and mos >= state.required_mos_pct
 
-        # Gate — at least 2 of 5 methods in buy zone AND DCF MoS met
+        # Gate — at least 2 of 5 methods in buy zone AND DCF MoS met.
+        # Special case: if DCF computation failed (API error, not pre-profit),
+        # we must not penalise the gate as if MoS = 0. Force PASS_CONDITIONAL
+        # when other methods pass — the DCF failure is already flagged as DATA UNVERIFIED.
         if methods_in_buy_zone >= 2 and mos_met:
             gate = GateResult.PASS_GREEN
-        elif methods_in_buy_zone >= 1:
+        elif methods_in_buy_zone >= 1 or (dcf_failed and methods_in_buy_zone >= 1):
             gate = GateResult.PASS_CONDITIONAL
+        elif dcf_failed and methods_in_buy_zone == 0:
+            # All non-DCF methods failed AND DCF itself failed — genuine data gap.
+            gate = GateResult.PASS_CONDITIONAL
+            data_flags.append(
+                "[DATA UNVERIFIED: valuation gate uncertain — DCF failed and insufficient "
+                "market-based metrics; treat as PASS_CONDITIONAL pending manual DCF]"
+            )
         else:
             gate = GateResult.FAIL  # DO_NOT_BUY — add to watchlist Tier 2
 
@@ -356,12 +367,15 @@ class Step5Valuation(BaseStep):
         v = state.valuation_data
 
         # WACC: risk-adjusted by cap size + sector profile adjustment
-        cap_wacc = {"large_cap": 13.0, "mid_cap": 15.0, "small_cap": 16.5}.get(state.cap_size, 15.0)
+        cap_wacc = {
+            "large_cap": settings.wacc_large_cap,
+            "mid_cap": settings.wacc_mid_cap,
+            "small_cap": settings.wacc_small_cap,
+        }.get(state.cap_size, settings.wacc_mid_cap)
         # Sector profile carries an explicit WACC adjustment (e.g. +1.0 for cyclicals/infra)
         sector_profile = get_sector_profile(state.sector_name)
         wacc = cap_wacc + sector_profile.wacc_adjustment
-        # Terminal growth: conservative — India long-run nominal GDP ~10%, sustainable company share < 70%
-        terminal_growth = 6.0
+        terminal_growth = settings.wacc_terminal_growth
 
         # EC-02: For cyclical sectors use the 5Y-average EBITDA margin so the
         # DCF doesn't over-value at cycle peak or under-value at trough.
@@ -401,20 +415,14 @@ class Step5Valuation(BaseStep):
         system = (
             "You are a CFA-level equity valuation analyst. "
             "Compute a DCF intrinsic value for an Indian stock using the provided data.\n\n"
-            "RULES:\n"
-            "1. Use three scenarios: Base (50% weight), Bull (25%), Bear (25%).\n"
-            "2. Project FCF for 10 years, then compute terminal value.\n"
-            "3. Use the provided WACC and terminal growth rate.\n"
-            "4. FCF = CFO - Capex. If FCF is [NOT AVAILABLE], estimate from EBITDA * margin.\n"
-            "5. NEVER fabricate data. Use [NOT AVAILABLE] for missing items.\n"
-            "6. Return ONLY valid JSON:\n"
-            "{\n"
-            '  "base_intrinsic": <float or null>,\n'
-            '  "bull_intrinsic": <float or null>,\n'
-            '  "bear_intrinsic": <float or null>,\n'
-            '  "weighted_intrinsic": <float or null>,\n'
-            '  "assumptions": "<2 sentences summarising key assumptions>"\n'
-            "}"
+            "Rules: Three scenarios — Base (50%), Bull (25%), Bear (25%). "
+            "Project FCF 10 years then terminal value. Use provided WACC and terminal growth. "
+            "FCF = CFO - Capex; if unavailable, estimate from EBITDA × margin. "
+            "NEVER fabricate — use null for missing items.\n\n"
+            "Return JSON only:\n"
+            '{"base_intrinsic":<float|null>,"bull_intrinsic":<float|null>,'
+            '"bear_intrinsic":<float|null>,"weighted_intrinsic":<float|null>,'
+            '"assumptions":"<2 sentences>"}'
         )
         message = (
             f"Compute DCF intrinsic value for {state.ticker}.\n"

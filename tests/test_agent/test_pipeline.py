@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import anthropic
 import pytest
 
+from src.agent.mode_detector import reset_mode_cache
 from src.agent.pipeline import InvestmentPipeline
 from src.models import (
     AnalysisState,
@@ -24,6 +25,14 @@ from tests.fixtures.sample_data import (
     SAMPLE_VALUATION,
     WEAK_FINANCIALS,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_nifty_cache():
+    """Ensure module-level Nifty mode cache is cleared before every test."""
+    reset_mode_cache()
+    yield
+    reset_mode_cache()
 
 
 def _make_claude_text_response(text: str):

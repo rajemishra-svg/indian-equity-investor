@@ -42,6 +42,12 @@ class Step2Moat(BaseStep):
                 max_tokens=settings.max_tokens,
                 max_iterations=6,
             )
+            if self._last_loop_hit_max:
+                state.add_error("ER-06")
+                state.add_flag(
+                    "[ER-06: MOAT RESEARCH INCOMPLETE — max agentic iterations reached; "
+                    "assessment based on partial research]"
+                )
             moat = self._parse_moat_response(response_text, state)
         except Exception as exc:
             self.log.warning(
@@ -175,6 +181,11 @@ class Step2Moat(BaseStep):
         if not isinstance(concall_note, str) or not concall_note.strip():
             concall_note = None
 
+        full_narrative = data.get("moat_narrative", "[NOT AVAILABLE]")
+        # Build a ≤120-char short summary for token-efficient downstream context.
+        first_sentence = full_narrative.split(".")[0].strip()
+        short_narrative = (first_sentence[:117] + "…") if len(first_sentence) > 120 else first_sentence
+
         return MoatAssessment(
             moat_type=moat_type,
             moat_durability=data.get("moat_durability", "Unknown"),
@@ -182,7 +193,8 @@ class Step2Moat(BaseStep):
             market_share_trend=data.get("market_share_trend", "[NOT AVAILABLE]"),
             tam_multiple=data.get("tam_multiple"),
             working_capital_flag=data.get("working_capital_flag", "[NOT AVAILABLE]"),
-            moat_narrative=data.get("moat_narrative", "[NOT AVAILABLE]"),
+            moat_narrative=full_narrative,
+            moat_narrative_short=short_narrative,
             management_guidance_reliability=mgmt_reliability,
             concall_quality_note=concall_note,
             data_flags=data.get("data_flags", []),

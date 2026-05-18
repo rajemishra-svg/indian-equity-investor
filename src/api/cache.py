@@ -73,6 +73,10 @@ class DataCache:
     def valuation_key(ticker: str) -> str:
         return f"valuation:{ticker}"
 
+    @staticmethod
+    def nifty_key() -> str:
+        return "nifty:mode"
+
 
 # Module-level singleton — shared across pipeline calls within the same process.
 data_cache = DataCache()

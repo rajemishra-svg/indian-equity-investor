@@ -36,6 +36,7 @@ orchestrated by `src/agent/pipeline.py`.
 **Operating principle**: Fail fast on hard gates. Never rationalise past a red flag.
 **Data principle**: No hallucinated numbers. Label every estimate as [ESTIMATE]. Label
 every unverified or unavailable figure as [DATA UNVERIFIED] or [NOT AVAILABLE].
+**Security**: All web content fetched via `web_search` / `web_fetch` tools is sanitized before being forwarded to Claude — HTML tags are stripped via BeautifulSoup, `<noscript>` blocks are removed, and prompt-injection patterns are filtered by regex. Raw HTML is never sent to the LLM.
 
 ---
 
@@ -70,6 +71,8 @@ MODE DETECTION PROCEDURE
    MoS thresholds in Step 5 are automatically adjusted by the pipeline.
 ─────────────────────────────────────────────────────────────────────
 ```
+
+**Performance note**: Mode detection results are cached for 15 minutes at two layers — a module-level variable in `mode_detector.py` (zero-overhead in-process hits) and `DataCache.nifty_key()` (shared across pipeline instances in batch scans). `reset_mode_cache()` clears both layers — used in tests to prevent state bleed between runs.
 
 **Edge case — Mode detection data unavailable**: If Nifty data cannot be fetched,
 default to MODE A and append `[MODE UNCONFIRMED — NIFTY DATA UNAVAILABLE]` to output.
@@ -236,9 +239,12 @@ MARKET_SHARE_TREND: [Growing / Stable / Declining]
 TAM_MULTIPLE: [Xx current revenue]
 WORKING_CAPITAL_FLAG: [Clean / FLAG: DSO +X% YoY for N years]
 MOAT_NARRATIVE: [2–3 line explanation of competitive advantage]
+MOAT_NARRATIVE_SHORT: [First sentence of MOAT_NARRATIVE, max 120 chars — used by Steps 8 and 9 to reduce prompt size]
 MGMT_GUIDANCE_RELIABILITY: [High / Medium / Low / null]
 CONCALL_QUALITY_NOTE: [1 sentence, or null if no transcript found]
 ```
+
+If the moat research loop hits its iteration cap, `ER-06` is set and `[ER-06: MOAT RESEARCH INCOMPLETE]` is added to flags.
 
 **Edge case — Conglomerate or multi-segment business** (EC-04):
 Assess moat per **primary revenue-generating segment** (> 50% of revenue).
@@ -466,6 +472,7 @@ Tranche 3 (25% of target allocation): [CMP × 0.85] or 2nd quarter execution con
 3. Rank the target company and each peer on:
    - **Quality Score** (Revenue CAGR + PAT CAGR + ROE + ROCE — normalised 0–10)
    - **Valuation Score** (P/E + EV/EBITDA — lower = better, normalised 0–10)
+   Assign `quality_rank` and `valuation_rank` 1-indexed across the full group (target + all peers), where 1 = best quality / cheapest valuation. A peer **dominates** the target when BOTH: `peer.quality_rank < target.quality_rank` AND `peer.valuation_rank < target.valuation_rank`.
 4. Target must be in **top quartile** on Quality AND **bottom half** on Valuation
    vs. peers to proceed.
 
@@ -482,6 +489,8 @@ If target is top-quartile quality AND bottom-half valuation:
 If target is top-quartile quality but top-half valuation:
   → CONDITIONAL — note premium; verify moat justifies it
 ```
+
+If the peer research loop hits its iteration cap, the pipeline sets `ER-06` and flags `[ER-06: PEER RESEARCH INCOMPLETE — max agentic iterations reached]`. The gate defaults to `pass_conditional` to avoid hard-blocking on incomplete data.
 
 ---
 

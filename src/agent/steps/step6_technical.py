@@ -6,6 +6,7 @@ from typing import Optional
 import anthropic
 
 from src.agent.steps.base import BaseStep
+from src.config import settings
 from src.models import AnalysisState, TechnicalData, TechnicalSignal
 
 
@@ -108,8 +109,8 @@ class Step6Technical(BaseStep):
         # Tranche prices
         cmp = td.cmp
         t1 = round(cmp, 2)
-        t2 = round(cmp * 0.92, 2)  # 8% dip
-        t3 = round(cmp * 0.85, 2)  # 15% dip
+        t2 = round(cmp * (1 - settings.tranche_t2_discount), 2)
+        t3 = round(cmp * (1 - settings.tranche_t3_discount), 2)
 
         result = TechnicalSignal(
             signals_met=signals_met,

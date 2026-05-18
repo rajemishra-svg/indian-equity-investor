@@ -25,7 +25,7 @@ from src.api.cache import data_cache
 from src.config import settings
 from src.logging_config import get_logger
 from src.models import AnalysisState, GovernanceData
-from src.sector.classifier import classify_sector, is_conglomerate
+from src.sector.classifier import classify_sector_with_confidence, is_conglomerate
 
 
 async def _noop(value):
@@ -286,7 +286,7 @@ class InvestmentPipeline:
             state.valuation_data = valuation_result
 
         # Classify sector early so Step 0 (and all subsequent steps) can use it
-        state.sector_name = classify_sector(
+        state.sector_name, sector_confidence = classify_sector_with_confidence(
             company_name=state.company_name or "",
             ticker=ticker,
         )
@@ -294,7 +294,14 @@ class InvestmentPipeline:
             "sector_classified",
             ticker=ticker,
             sector=state.sector_name,
+            confidence=sector_confidence,
         )
+        if sector_confidence < 0.7:
+            state.add_flag(
+                f"[SECTOR AMBIGUOUS: classified as '{state.sector_name}' with low confidence "
+                f"({sector_confidence:.0%}); verify sector manually before relying on "
+                "sector-specific thresholds]"
+            )
 
         # P3-3: Conglomerate detection — flag for EC-04 sum-of-parts note in Step 5
         state.is_conglomerate = is_conglomerate(
@@ -317,36 +324,42 @@ class InvestmentPipeline:
             has_valuation=state.valuation_data is not None,
         )
 
-        # Persist raw data snapshots to SQLite (non-fatal)
-        try:
-            from src.db.repository import save_snapshot
-            from datetime import date as _date
-            today_str = _date.today().isoformat()
-            if state.quote:
-                await save_snapshot(
-                    settings.db_path, ticker, today_str, "quote",
-                    state.quote.model_dump(mode="json"), quote_source
+        # Persist raw data snapshots to SQLite (non-fatal; failures tracked in error_tags)
+        from src.db.repository import save_snapshot
+        from datetime import date as _date
+        today_str = _date.today().isoformat()
+        snapshot_failures = 0
+
+        async def _save_snap(data_type: str, data: dict, source: str) -> None:
+            nonlocal snapshot_failures
+            try:
+                await save_snapshot(settings.db_path, ticker, today_str, data_type, data, source)
+            except Exception as exc:
+                snapshot_failures += 1
+                self.log.warning(
+                    "db_snapshot_failed",
+                    ticker=ticker,
+                    data_type=data_type,
+                    error=str(exc),
                 )
-            if state.financials:
-                await save_snapshot(
-                    settings.db_path, ticker, today_str, "financials",
-                    state.financials.model_dump(mode="json"), "screener"
-                )
-            if state.governance_data:
-                # Governance is sourced from NSE → BSE → Screener fallback chain
-                # ER-04 = all shareholding sources failed, so we fell back to empty GovernanceData
-                gov_source = "screener" if "ER-04" in state.error_tags else "bse"
-                await save_snapshot(
-                    settings.db_path, ticker, today_str, "governance",
-                    state.governance_data.model_dump(mode="json"), gov_source
-                )
-            if state.valuation_data:
-                await save_snapshot(
-                    settings.db_path, ticker, today_str, "valuation",
-                    state.valuation_data.model_dump(mode="json"), valuation_source
-                )
-        except Exception as snap_exc:
-            self.log.warning("db_snapshot_failed", ticker=ticker, error=str(snap_exc))
+
+        if state.quote:
+            await _save_snap("quote", state.quote.model_dump(mode="json"), quote_source)
+        if state.financials:
+            await _save_snap("financials", state.financials.model_dump(mode="json"), "screener")
+        if state.governance_data:
+            gov_source = "screener" if "ER-04" in state.error_tags else "bse"
+            await _save_snap("governance", state.governance_data.model_dump(mode="json"), gov_source)
+        if state.valuation_data:
+            await _save_snap("valuation", state.valuation_data.model_dump(mode="json"), valuation_source)
+
+        if snapshot_failures >= 3:
+            # ≥3 of 4 snapshots failed — likely a DB path/permissions issue
+            state.add_error("ER-07")
+            state.add_flag(
+                f"[ER-07: DB SNAPSHOT FAILURES — {snapshot_failures}/4 snapshots could not be saved; "
+                "check db_path permissions and disk space]"
+            )
 
     async def _enrich_governance_from_trendlyne(
         self, ticker: str, state: AnalysisState, clients: dict

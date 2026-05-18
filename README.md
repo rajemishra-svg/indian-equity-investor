@@ -112,6 +112,8 @@ All threshold checks in Steps 0, 3, and 5 are driven by a `SectorProfile` — a 
 | `commodities_cyclical` | CAGR floors lower; WACC +1.0% |
 | `recently_listed` | All 5Y metrics waived (no listed history) |
 
+The classifier returns a confidence score (1.0 = name-match, 0.7 = narrative-only, 0.5 = default fallback); companies with confidence < 0.7 receive a `[SECTOR AMBIGUOUS]` flag in the final report.
+
 ## Pipeline Steps
 
 | Step | Name | Model | Strategy |
@@ -139,6 +141,8 @@ Step 5 failure → `recommendation_type = WATCHLIST` (pipeline continues for Ste
 | ER-03 | Trendlyne valuation failed → YFinance fallback | pipeline._prefetch_data |
 | ER-04 | All shareholding sources failed | pipeline._prefetch_data |
 | ER-05 | ≥ 5 error tags → BUY auto-downgraded to WATCHLIST | step9_output |
+| ER-06 | Agentic loop (moat/peer) hit max iterations — research may be partial | step2_moat, step7_peers |
+| ER-07 | ≥ 3 of 4 raw data snapshots failed to save to SQLite | pipeline._prefetch_data |
 | EC-01 | Pre-profit company — modified valuation criteria | step5_valuation |
 | EC-02 | Cyclical sector — mid-cycle normalised EBITDA | step5_valuation + sector profile |
 | EC-04 | Conglomerate — SOTP valuation recommended | pipeline + step5_valuation |
@@ -148,6 +152,8 @@ Step 5 failure → `recommendation_type = WATCHLIST` (pipeline continues for Ste
 ## SQLite Persistence
 
 Every analysis is automatically saved to `investor.db` after the pipeline completes. Raw API data (quote, financials, governance, valuation) is stored as JSON snapshots with the actual data source recorded. Results survive process restarts and can be queried with the `investor db-*` commands.
+
+If 3 or more of the 4 raw data snapshots fail to save (e.g. disk full, bad db_path), the pipeline adds an `ER-07` error tag and a `[ER-07: DB SNAPSHOT FAILURES]` flag — the analysis result is still returned.
 
 ```bash
 uv run investor db-summary                          # ranked view of all analysed stocks

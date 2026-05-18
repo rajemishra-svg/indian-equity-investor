@@ -58,5 +58,22 @@ class Settings(BaseSettings):
 
     db_path: str = "investor.db"  # SQLite database file
 
+    # --- DCF WACC base rates by cap size (%) ---
+    # Sector profiles add an adjustment on top via wacc_adjustment.
+    wacc_large_cap: float = 13.0
+    wacc_mid_cap: float = 15.0
+    wacc_small_cap: float = 16.5
+    wacc_terminal_growth: float = 6.0  # India long-run nominal GDP ~10%; sustainable share <70%
+
+    # --- Tranche entry levels (relative to CMP) ---
+    # T1 = CMP, T2 = CMP * (1 - t2_discount), T3 = CMP * (1 - t3_discount)
+    tranche_t2_discount: float = 0.08   # 8% below CMP
+    tranche_t3_discount: float = 0.15   # 15% below CMP
+
+    # --- Stop-loss multipliers by cap size ---
+    stop_loss_large_cap: float = 0.82
+    stop_loss_mid_cap: float = 0.75
+    stop_loss_small_cap: float = 0.70
+
 
 settings = Settings()

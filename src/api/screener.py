@@ -12,6 +12,10 @@ from bs4 import BeautifulSoup
 from src.api.base import BaseHTTPClient
 from src.models import FinancialMetrics, GovernanceData
 
+# Domain-level concurrency cap — shared across all ScreenerClient instances in the process.
+# Prevents thundering-herd 429s when batch scanner runs concurrent pre-screens.
+_SCREENER_SEMAPHORE = asyncio.Semaphore(2)
+
 
 class ScreenerClient(BaseHTTPClient):
     """Scraper for Screener.in consolidated financial data."""
@@ -63,24 +67,25 @@ class ScreenerClient(BaseHTTPClient):
         """
         _BACKOFF_BASE = [10, 30, 90]  # seconds before each retry
 
-        for attempt, base_wait in enumerate(_BACKOFF_BASE):
-            try:
-                return await self.get(url)
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code != 429:
-                    raise
-                jitter = random.uniform(-0.2 * base_wait, 0.2 * base_wait)
-                wait = round(base_wait + jitter, 1)
-                self.log.warning(
-                    "screener_rate_limited",
-                    wait_seconds=wait,
-                    attempt=attempt + 1,
-                    max_attempts=len(_BACKOFF_BASE) + 1,
-                )
-                await asyncio.sleep(wait)
+        async with _SCREENER_SEMAPHORE:
+            for attempt, base_wait in enumerate(_BACKOFF_BASE):
+                try:
+                    return await self.get(url)
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code != 429:
+                        raise
+                    jitter = random.uniform(-0.2 * base_wait, 0.2 * base_wait)
+                    wait = round(base_wait + jitter, 1)
+                    self.log.warning(
+                        "screener_rate_limited",
+                        wait_seconds=wait,
+                        attempt=attempt + 1,
+                        max_attempts=len(_BACKOFF_BASE) + 1,
+                    )
+                    await asyncio.sleep(wait)
 
-        # Final attempt after all back-off steps exhausted
-        return await self.get(url)
+            # Final attempt after all back-off steps exhausted
+            return await self.get(url)
 
     def _parse_financials(
         self, soup: BeautifulSoup, ticker: str

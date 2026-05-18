@@ -8,11 +8,22 @@ from abc import ABC, abstractmethod
 from typing import Any, Optional
 
 import anthropic
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from src.agent.tools import TOOLS, execute_tool
 from src.config import settings
 from src.logging_config import get_logger
 from src.models import AnalysisState
+
+
+def _is_retryable_anthropic_error(exc: BaseException) -> bool:
+    """Return True for transient Anthropic API errors worth retrying."""
+    return isinstance(exc, (anthropic.RateLimitError, anthropic.APIStatusError))
 
 
 class BaseStep(ABC):
@@ -24,6 +35,9 @@ class BaseStep(ABC):
         self.claude = anthropic_client
         self.clients = clients
         self.log = get_logger(self.__class__.__name__)
+        # Set to True by _agentic_loop when max_iterations is exhausted without end_turn.
+        # Callers can check this flag to add ER-06 error tags.
+        self._last_loop_hit_max: bool = False
 
     @property
     @abstractmethod
@@ -81,7 +95,16 @@ class BaseStep(ABC):
         if tools:
             kwargs["tools"] = tools
 
-        response = await self.claude.messages.create(**kwargs)
+        @retry(
+            retry=retry_if_exception_type(_is_retryable_anthropic_error),
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=5, max=60),
+            reraise=True,
+        )
+        async def _create() -> Any:
+            return await self.claude.messages.create(**kwargs)
+
+        response = await _create()
         elapsed = time.monotonic() - start
 
         self.log.info(
@@ -128,12 +151,22 @@ class BaseStep(ABC):
         total_input_tokens = 0
         total_output_tokens = 0
         iteration = 0
+        self._last_loop_hit_max = False
+
+        @retry(
+            retry=retry_if_exception_type(_is_retryable_anthropic_error),
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=5, max=60),
+            reraise=True,
+        )
+        async def _loop_create(**kw: Any) -> Any:
+            return await self.claude.messages.create(**kw)
 
         while iteration < max_iterations:
             iteration += 1
             start = time.monotonic()
 
-            response = await self.claude.messages.create(
+            response = await _loop_create(
                 model=_model,
                 max_tokens=_max_tokens,
                 system=[
@@ -194,14 +227,16 @@ class BaseStep(ABC):
             # If we just used the last iteration on a tool call, force one final
             # synthesis turn without tools so we always get a text JSON response.
             if iteration >= max_iterations:
-                self.log.info(
-                    "agentic_loop_force_synthesis",
+                self._last_loop_hit_max = True
+                self.log.warning(
+                    "agentic_loop_max_iterations_hit",
                     step=self.step_number,
                     step_name=self.step_name,
                     iteration=iteration,
+                    error_tag="ER-06",
                 )
                 start = time.monotonic()
-                response = await self.claude.messages.create(
+                response = await _loop_create(
                     model=_model,
                     max_tokens=_max_tokens,
                     system=[

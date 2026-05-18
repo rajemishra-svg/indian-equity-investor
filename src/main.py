@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import date
 from pathlib import Path
 
@@ -14,6 +15,19 @@ from src.config import settings
 from src.logging_config import configure_logging
 from src.models import AnalysisState
 from src.portfolio.tracker import PortfolioTracker
+
+_TICKER_RE = re.compile(r"^[A-Z0-9&\-\.]{1,20}$")
+
+
+def _validate_ticker(ticker: str) -> str:
+    """Normalise and validate a ticker symbol. Raises click.BadParameter on invalid input."""
+    normalised = ticker.upper().strip()
+    if not _TICKER_RE.match(normalised):
+        raise click.BadParameter(
+            f"'{ticker}' is not a valid NSE ticker. "
+            "Expected 1–20 uppercase alphanumeric characters (e.g. RELIANCE, M&M, BAJAJ-AUTO)."
+        )
+    return normalised
 
 console = Console()
 
@@ -51,6 +65,7 @@ def analyze(ticker: str, save: bool) -> None:
 
     Example: investor analyze RELIANCE
     """
+    ticker = _validate_ticker(ticker)
 
     async def _run() -> AnalysisState:
         pipeline = InvestmentPipeline()

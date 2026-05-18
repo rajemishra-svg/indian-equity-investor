@@ -214,6 +214,9 @@ class MoatAssessment(BaseModel):
     tam_multiple: Optional[float] = None
     working_capital_flag: str
     moat_narrative: str
+    # Compressed 1-sentence summary for use in downstream steps (reduces token cost).
+    # Auto-generated from moat_narrative if not explicitly set.
+    moat_narrative_short: Optional[str] = None
     # P3-1: Management quality signals from concall research
     management_guidance_reliability: Optional[str] = None  # "High" | "Medium" | "Low" | None
     concall_quality_note: Optional[str] = None             # 1-sentence note or None

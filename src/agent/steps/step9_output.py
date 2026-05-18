@@ -18,6 +18,7 @@ from src.models import (
     TrancheEntry,
     WatchlistTier,
 )
+from src.sector.profiles import get_sector_profile
 
 
 class Step9Output(BaseStep):
@@ -149,13 +150,17 @@ class Step9Output(BaseStep):
             state.suggested_allocation_pct = 4.0
 
     def _build_tranches(self, state: AnalysisState) -> None:
-        """Build tranche plan from technical signals."""
+        """Build tranche plan from technical signals using sector-aware discounts."""
         if state.technical is None:
             return
 
         t = state.technical
         cmp = t.tranche_1_price or (state.quote.cmp if state.quote else 0)
         base_alloc = int(state.suggested_allocation_pct or 3)
+
+        profile = get_sector_profile(state.sector_name)
+        t2_disc = profile.tranche_t2_discount if profile.tranche_t2_discount is not None else settings.tranche_t2_discount
+        t3_disc = profile.tranche_t3_discount if profile.tranche_t3_discount is not None else settings.tranche_t3_discount
 
         # Allocate: 40% T1, 35% T2, 25% T3
         state.tranches = [
@@ -168,27 +173,31 @@ class Step9Output(BaseStep):
             TrancheEntry(
                 tranche=2,
                 pct_allocation=round(base_alloc * 0.35),
-                price=t.tranche_2_price or round(cmp * 0.92, 2),
-                condition="If price falls ~8% from CMP",
+                price=t.tranche_2_price or round(cmp * (1 - t2_disc), 2),
+                condition=f"If price falls ~{int(t2_disc * 100)}% from CMP",
             ),
             TrancheEntry(
                 tranche=3,
                 pct_allocation=round(base_alloc * 0.25),
-                price=t.tranche_3_price or round(cmp * 0.85, 2),
-                condition="If price falls ~15% from CMP",
+                price=t.tranche_3_price or round(cmp * (1 - t3_disc), 2),
+                condition=f"If price falls ~{int(t3_disc * 100)}% from CMP",
             ),
         ]
 
     async def _build_exit_strategy(self, state: AnalysisState) -> None:
-        """Ask Claude for exit strategy parameters."""
+        """Build exit strategy using sector-aware multipliers and config-driven stop-loss."""
         cmp = state.quote.cmp if state.quote else 0.0
         dcf = state.valuation.dcf_intrinsic_weighted if state.valuation else None
 
-        valuation_exit = round(dcf * 1.15, 2) if dcf else None
-        # Stop-loss: cap-size adjusted — large caps mean-revert faster; small caps can gap down
-        sl_multiplier = {"large_cap": 0.82, "mid_cap": 0.75, "small_cap": 0.70}.get(
-            state.cap_size, 0.75
-        )
+        profile = get_sector_profile(state.sector_name)
+        valuation_exit = round(dcf * profile.exit_mult_1x, 2) if dcf else None
+
+        # Stop-loss: cap-size adjusted from config — large caps mean-revert faster
+        sl_multiplier = {
+            "large_cap": settings.stop_loss_large_cap,
+            "mid_cap": settings.stop_loss_mid_cap,
+            "small_cap": settings.stop_loss_small_cap,
+        }.get(state.cap_size, settings.stop_loss_mid_cap)
         stop_loss = round(cmp * sl_multiplier, 2) if cmp else None
 
         # LTCG eligibility = 1 year from today
@@ -222,7 +231,9 @@ class Step9Output(BaseStep):
 
         context_parts = [f"Ticker: {state.ticker}"]
         if state.moat:
-            context_parts.append(f"Moat: {state.moat.moat_narrative}")
+            # Use short narrative to reduce token cost; full narrative is in the report body
+            moat_ctx = state.moat.moat_narrative_short or state.moat.moat_narrative
+            context_parts.append(f"Moat: {moat_ctx}")
         if state.tailwind:
             context_parts.append(f"Tailwind: {state.tailwind.tailwind_narrative}")
         if state.valuation:

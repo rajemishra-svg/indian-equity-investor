@@ -4,13 +4,17 @@ Two-phase process:
   Phase 1 — Cheap pre-screen (Step 0, deterministic, no Claude calls).
              Runs concurrently across the full universe with an HTTP semaphore.
   Phase 2 — Full 9-step pipeline on the shortlisted candidates only.
-             Run sequentially to avoid overwhelming Screener / Claude API.
+             Runs with bounded concurrency (3 parallel pipelines) to balance
+             speed against Screener / Claude API rate limits.
 """
 from __future__ import annotations
 
 import asyncio
 import csv
 import io
+import json
+from datetime import date
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -66,21 +70,43 @@ async def _fetch_constituents_from_archives(index: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Hard-coded Nifty 50 fallback — last resort when both NSE API and archives fail
+# Nifty 50 fallback — loaded from config/nifty50_fallback.json.
+# Last resort when both NSE API and archives fail.
+# Update config/nifty50_fallback.json when index composition changes.
 # ---------------------------------------------------------------------------
 
-NIFTY50_FALLBACK: list[str] = [
-    "RELIANCE", "TCS", "HDFCBANK", "BHARTIARTL", "ICICIBANK",
-    "INFOSYS", "SBIN", "HINDUNILVR", "ITC", "KOTAKBANK",
-    "LT", "AXISBANK", "ASIANPAINT", "MARUTI", "SUNPHARMA",
-    "TATAMOTORS", "NTPC", "ONGC", "TECHM", "BAJFINANCE",
-    "WIPRO", "HCLTECH", "ADANIENT", "ULTRACEMCO", "POWERGRID",
-    "TATASTEEL", "JSWSTEEL", "TITAN", "BAJAJFINSV", "NESTLEIND",
-    "DIVISLAB", "DRREDDY", "CIPLA", "EICHERMOT", "BPCL",
-    "COALINDIA", "GRASIM", "HINDALCO", "M&M", "SBILIFE",
-    "APOLLOHOSP", "ADANIPORTS", "BAJAJ-AUTO", "BRITANNIA", "HDFCLIFE",
-    "INDUSINDBK", "LTIM", "TATACONSUM", "UPL", "VEDL",
-]
+_FALLBACK_CONFIG_PATH = Path(__file__).parent.parent.parent / "config" / "nifty50_fallback.json"
+
+
+def _load_nifty50_fallback() -> list[str]:
+    """Load Nifty 50 fallback list from config file with staleness warning."""
+    try:
+        with open(_FALLBACK_CONFIG_PATH) as f:
+            data = json.load(f)
+        symbols: list[str] = data.get("symbols", [])
+        last_updated_str: str = data.get("last_updated", "")
+        warning_days: int = data.get("staleness_warning_days", 90)
+        if last_updated_str:
+            try:
+                last_updated = date.fromisoformat(last_updated_str)
+                age_days = (date.today() - last_updated).days
+                if age_days > warning_days:
+                    log.warning(
+                        "nifty50_fallback_stale",
+                        last_updated=last_updated_str,
+                        age_days=age_days,
+                        warning_days=warning_days,
+                        msg="Update config/nifty50_fallback.json — index composition may have changed",
+                    )
+            except ValueError:
+                pass
+        return symbols
+    except Exception as exc:
+        log.warning("nifty50_fallback_load_failed", error=str(exc))
+        return []
+
+
+NIFTY50_FALLBACK: list[str] = _load_nifty50_fallback()
 
 
 # ---------------------------------------------------------------------------
@@ -233,21 +259,29 @@ class BatchScanner:
         if prescreen_only or not candidates:
             return summaries, []
 
-        # Phase 3: full pipeline — sequential to respect Screener + Claude rate limits
-        pipeline = InvestmentPipeline()
-        full_results: list[AnalysisState] = []
+        # Phase 3: full pipeline — bounded concurrency (3 parallel analyses).
+        # Each pipeline manages its own HTTP sessions; Screener's module-level
+        # semaphore caps domain-level request rate independently.
+        _PIPELINE_CONCURRENCY = 3
+        pipeline_sem = asyncio.Semaphore(_PIPELINE_CONCURRENCY)
 
-        for summary in candidates[:max_full_analyses]:
-            log.info(
-                "full_analysis_start",
-                ticker=summary.ticker,
-                prescreen_score=summary.score,
-            )
-            try:
-                state = await pipeline.analyze(summary.ticker)
-                full_results.append(state)
-            except Exception as exc:
-                log.warning("full_analysis_failed", ticker=summary.ticker, error=str(exc))
+        async def _run_one(summary: PreScreenSummary) -> AnalysisState | None:
+            async with pipeline_sem:
+                log.info(
+                    "full_analysis_start",
+                    ticker=summary.ticker,
+                    prescreen_score=summary.score,
+                )
+                try:
+                    pipeline = InvestmentPipeline()
+                    return await pipeline.analyze(summary.ticker)
+                except Exception as exc:
+                    log.warning("full_analysis_failed", ticker=summary.ticker, error=str(exc))
+                    return None
+
+        tasks = [_run_one(s) for s in candidates[:max_full_analyses]]
+        raw_results = await asyncio.gather(*tasks)
+        full_results: list[AnalysisState] = [r for r in raw_results if r is not None]
 
         # Phase 4: rank
         ranked = rank_results(full_results)
