@@ -8,6 +8,7 @@ from pathlib import Path
 import anthropic
 
 from src.agent.mode_detector import detect_mode
+from src.sector.classifier import classify_sector_with_confidence as _reclassify
 from src.agent.steps import (
     Step0PreScreen,
     Step1Governance,
@@ -27,6 +28,9 @@ from src.logging_config import get_logger
 from src.models import AnalysisState, GovernanceData
 from src.sector.classifier import classify_sector_with_confidence, is_conglomerate
 
+# Low-confidence threshold below which we attempt post-Step-2 reclassification
+_SECTOR_RECLASS_THRESHOLD = 0.7
+
 
 async def _noop(value):
     """Return a cached value as an awaitable, skipping the real HTTP call."""
@@ -37,7 +41,7 @@ class InvestmentPipeline:
     """Orchestrates the 9-step investment analysis pipeline."""
 
     def __init__(self) -> None:
-        self.claude = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+        self.claude = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key.get_secret_value())
         self.nse = NSEClient()
         self.screener = ScreenerClient()
         self.bse = BSEClient()
@@ -93,6 +97,16 @@ class InvestmentPipeline:
                 Step9Output(self.claude, clients),
             ]
 
+            # Fix 8.3: if quote unavailable, cap_size defaults to mid_cap — flag it explicitly
+            if state.quote is None:
+                state.add_flag(
+                    "[ER-01: MARKET CAP UNKNOWN — quote unavailable; cap_size defaults to "
+                    "mid_cap for WACC/MoS purposes; verify manually before acting on valuation]"
+                )
+
+            # Track initial sector confidence for post-Step-2 reclassification (Fix 1.4)
+            _initial_sector_confidence = 0.5  # will be updated by prefetch
+
             # --- Sequential step execution ---
             terminated_logged = False
             for step in steps:
@@ -131,6 +145,35 @@ class InvestmentPipeline:
                     elapsed_seconds=round(elapsed, 2),
                     ticker=ticker,
                 )
+
+                # Fix 1.4: re-classify sector after Step 2 when initial confidence was low.
+                # Moat narrative is now available and may reveal the true sector (e.g.
+                # a company named "XYZ Enterprises" that turns out to be a bank/NBFC).
+                if isinstance(step, Step2Moat) and state.moat:
+                    _, prior_confidence = classify_sector_with_confidence(
+                        company_name=state.company_name or "",
+                        ticker=ticker,
+                    )
+                    if prior_confidence < _SECTOR_RECLASS_THRESHOLD:
+                        new_sector, new_conf = classify_sector_with_confidence(
+                            company_name=state.company_name or "",
+                            ticker=ticker,
+                            moat_narrative=state.moat.moat_narrative or "",
+                        )
+                        if new_sector != state.sector_name:
+                            old_sector = state.sector_name
+                            state.sector_name = new_sector
+                            state.add_flag(
+                                f"[SECTOR RECLASSIFIED: '{old_sector}' → '{new_sector}' "
+                                f"after moat analysis (confidence {new_conf:.0%})]"
+                            )
+                            self.log.info(
+                                "sector_reclassified",
+                                ticker=ticker,
+                                from_sector=old_sector,
+                                to_sector=new_sector,
+                                new_confidence=new_conf,
+                            )
 
             self.log.info(
                 "pipeline_complete",
@@ -324,41 +367,61 @@ class InvestmentPipeline:
             has_valuation=state.valuation_data is not None,
         )
 
-        # Persist raw data snapshots to SQLite (non-fatal; failures tracked in error_tags)
+        # Persist raw data snapshots to SQLite concurrently (non-fatal; failures tracked).
+        # Fix 3.1: all four saves run in parallel via asyncio.gather.
+        # Fix 1.3: governance source is "bse" when BSE provided data, "screener" only when
+        #          BSE failed AND Screener succeeded (not when ER-04 fired — that means NO
+        #          data was saved, so the guard below skips the save anyway).
         from src.db.repository import save_snapshot
         from datetime import date as _date
         today_str = _date.today().isoformat()
-        snapshot_failures = 0
 
-        async def _save_snap(data_type: str, data: dict, source: str) -> None:
-            nonlocal snapshot_failures
+        async def _save_snap(data_type: str, data: dict, source: str) -> bool:
+            """Save one snapshot; returns True on success, False on failure."""
             try:
                 await save_snapshot(settings.db_path, ticker, today_str, data_type, data, source)
+                return True
             except Exception as exc:
-                snapshot_failures += 1
                 self.log.warning(
                     "db_snapshot_failed",
                     ticker=ticker,
                     data_type=data_type,
                     error=str(exc),
                 )
+                return False
 
+        # Determine governance source: NSE or BSE provided data; Screener only when
+        # Screener was the fallback and it succeeded (no ER-04 tag = at least one source worked).
+        # ER-04 means all sources failed → governance_data is a stub; the guard prevents saving it.
+        gov_data_is_real = (
+            state.governance_data is not None
+            and state.governance_data.promoter_holding_pct is not None
+        )
+        gov_source = "screener" if (
+            gov_data_is_real and "ER-04" not in state.error_tags
+            and state.governance_data.auditor_name is None  # BSE usually has holding, not auditor
+        ) else "bse"
+
+        snap_tasks = []
         if state.quote:
-            await _save_snap("quote", state.quote.model_dump(mode="json"), quote_source)
+            snap_tasks.append(_save_snap("quote", state.quote.model_dump(mode="json"), quote_source))
         if state.financials:
-            await _save_snap("financials", state.financials.model_dump(mode="json"), "screener")
-        if state.governance_data:
-            gov_source = "screener" if "ER-04" in state.error_tags else "bse"
-            await _save_snap("governance", state.governance_data.model_dump(mode="json"), gov_source)
+            snap_tasks.append(_save_snap("financials", state.financials.model_dump(mode="json"), "screener"))
+        if gov_data_is_real:
+            snap_tasks.append(_save_snap("governance", state.governance_data.model_dump(mode="json"), gov_source))
         if state.valuation_data:
-            await _save_snap("valuation", state.valuation_data.model_dump(mode="json"), valuation_source)
+            snap_tasks.append(_save_snap("valuation", state.valuation_data.model_dump(mode="json"), valuation_source))
+
+        snap_results = await asyncio.gather(*snap_tasks, return_exceptions=True)
+        snapshot_failures = sum(
+            1 for r in snap_results if r is False or isinstance(r, Exception)
+        )
 
         if snapshot_failures >= 3:
-            # ≥3 of 4 snapshots failed — likely a DB path/permissions issue
             state.add_error("ER-07")
             state.add_flag(
-                f"[ER-07: DB SNAPSHOT FAILURES — {snapshot_failures}/4 snapshots could not be saved; "
-                "check db_path permissions and disk space]"
+                f"[ER-07: DB SNAPSHOT FAILURES — {snapshot_failures}/{len(snap_tasks)} snapshots "
+                "could not be saved; check db_path permissions and disk space]"
             )
 
     async def _enrich_governance_from_trendlyne(

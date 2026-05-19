@@ -10,6 +10,8 @@ import anthropic
 
 from src.agent.steps.base import BaseStep
 from src.config import settings
+import math
+
 from src.models import (
     AnalysisState,
     ConvictionLevel,
@@ -50,7 +52,8 @@ class Step9Output(BaseStep):
         # required before committing capital.
         if state.recommendation_type == "BUY" and len(state.error_tags) >= 5:
             state.recommendation_type = "WATCHLIST"
-            state.watchlist_tier = 1  # passed all gates — data quality is the only blocker
+            # Passed all gates — data quality is the only blocker; use Tier 1
+            state.watchlist_tier = WatchlistTier.TIER_1
             flag = (
                 f"[ER-05: AUTO-DOWNGRADE — {len(state.error_tags)} data errors accumulated "
                 f"({', '.join(state.error_tags)}); manual data verification required before BUY]"
@@ -107,10 +110,12 @@ class Step9Output(BaseStep):
             max_m = state.valuation.max_methods or 5
             scores.append(state.valuation.methods_in_buy_zone / max_m)
 
-        # Moat quality contribution: durable moat = meaningful long-term edge
+        # Moat quality contribution: durable moat = meaningful long-term edge.
+        # "Unknown" durability means research was incomplete (e.g. ER-06) —
+        # treated same as "Low" (0.35), not the previous 0.50 which was too generous.
         if state.moat:
-            moat_score = {"High": 1.0, "Medium": 0.70, "Low": 0.35, "Unknown": 0.50}.get(
-                state.moat.moat_durability, 0.50
+            moat_score = {"High": 1.0, "Medium": 0.70, "Low": 0.35, "Unknown": 0.35}.get(
+                state.moat.moat_durability, 0.35
             )
             # No-moat companies face structural disadvantage — cap conviction
             if state.moat.moat_type.value == "none":
@@ -162,35 +167,62 @@ class Step9Output(BaseStep):
         t2_disc = profile.tranche_t2_discount if profile.tranche_t2_discount is not None else settings.tranche_t2_discount
         t3_disc = profile.tranche_t3_discount if profile.tranche_t3_discount is not None else settings.tranche_t3_discount
 
-        # Allocate: 40% T1, 35% T2, 25% T3
+        # Allocate: 40% T1, 35% T2, 25% T3.
+        # Use ceil/floor so T1+T2+T3 always sums exactly to base_alloc.
+        t1_alloc = math.ceil(base_alloc * 0.40)
+        t3_alloc = math.floor(base_alloc * 0.25)
+        t2_alloc = base_alloc - t1_alloc - t3_alloc  # remainder — never under/over allocates
+
         state.tranches = [
             TrancheEntry(
                 tranche=1,
-                pct_allocation=round(base_alloc * 0.40),
+                pct_allocation=t1_alloc,
                 price=t.tranche_1_price or cmp,
                 condition="Enter now at CMP",
             ),
             TrancheEntry(
                 tranche=2,
-                pct_allocation=round(base_alloc * 0.35),
+                pct_allocation=t2_alloc,
                 price=t.tranche_2_price or round(cmp * (1 - t2_disc), 2),
                 condition=f"If price falls ~{int(t2_disc * 100)}% from CMP",
             ),
             TrancheEntry(
                 tranche=3,
-                pct_allocation=round(base_alloc * 0.25),
+                pct_allocation=t3_alloc,
                 price=t.tranche_3_price or round(cmp * (1 - t3_disc), 2),
                 condition=f"If price falls ~{int(t3_disc * 100)}% from CMP",
             ),
         ]
 
     async def _build_exit_strategy(self, state: AnalysisState) -> None:
-        """Build exit strategy using sector-aware multipliers and config-driven stop-loss."""
+        """Build staggered exit strategy using sector-aware multipliers.
+
+        Three valuation exit targets correspond to SectorProfile.exit_mult_1x/2x/3x:
+          • exit_mult_1x: conservative — trim when price reaches fair value (~DCF intrinsic)
+          • exit_mult_2x: mid — reduce further when price is well above intrinsic
+          • exit_mult_3x: long-hold full exit at peak premium to intrinsic
+
+        Cyclical sectors have tighter multipliers (1.10/1.30/1.70) vs. quality compounders
+        (default 1.15/1.50/2.00) because cyclicals mean-revert faster.
+        """
         cmp = state.quote.cmp if state.quote else 0.0
         dcf = state.valuation.dcf_intrinsic_weighted if state.valuation else None
 
         profile = get_sector_profile(state.sector_name)
-        valuation_exit = round(dcf * profile.exit_mult_1x, 2) if dcf else None
+
+        # Staggered exits: T1 trim, T2 reduce, T3 full exit
+        exit_t1 = round(dcf * profile.exit_mult_1x, 2) if dcf else None
+        exit_t2 = round(dcf * profile.exit_mult_2x, 2) if dcf else None
+        exit_t3 = round(dcf * profile.exit_mult_3x, 2) if dcf else None
+
+        # Use exit_t2 as the primary "valuation_exit_price" in the report summary;
+        # T1 and T3 are stored as data flags so they appear in the detailed output.
+        if exit_t1 and exit_t2 and exit_t3:
+            state.add_flag(
+                f"[EXIT TARGETS: T1-trim ₹{exit_t1} ({profile.exit_mult_1x:.2f}× DCF) | "
+                f"T2-reduce ₹{exit_t2} ({profile.exit_mult_2x:.2f}× DCF) | "
+                f"T3-full ₹{exit_t3} ({profile.exit_mult_3x:.2f}× DCF)]"
+            )
 
         # Stop-loss: cap-size adjusted from config — large caps mean-revert faster
         sl_multiplier = {
@@ -213,7 +245,7 @@ class Step9Output(BaseStep):
 
         state.exit_strategy = ExitStrategy(
             fundamental_trigger=fundamental_trigger,
-            valuation_exit_price=valuation_exit,
+            valuation_exit_price=exit_t2,   # mid-target as primary summary price
             stop_loss_price=stop_loss,
             ltcg_eligible_after=ltcg_date.isoformat(),
         )
@@ -523,9 +555,5 @@ class Step9Output(BaseStep):
                     "re-evaluate after 2 clean annual reports"
                 )
             return "When all 7 financial hurdles are met for 2 consecutive annual reports"
-        elif state.terminated_at_step == 8:
-            return (
-                "When primary structural risk is materially resolved — "
-                "e.g. regulation clarified, technology transition path confirmed, etc."
-            )
+        # Note: Step 8 (Premortem) has no hard gate — terminated_at_step == 8 never fires.
         return "When underlying business fundamentals improve materially for 2+ quarters"

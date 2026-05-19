@@ -22,7 +22,10 @@ IMMEDIATE_TRIGGER_CHECKS = [
     ),
     (
         "active_sebi_ed_fraud_investigation",
-        lambda g: not g.sebi_record_clean,
+        # Fire when explicit orders are present (from any source) OR when enrichment
+        # ran and confirmed not-clean.  Does NOT fire on the conservative False default
+        # before any SEBI data has been fetched (sebi_record_checked=False, orders=[]).
+        lambda g: bool(g.sebi_orders) or (g.sebi_record_checked and not g.sebi_record_clean),
     ),
     (
         "rpt > 20% of revenue (unexplained)",
@@ -211,7 +214,10 @@ class Step1Governance(BaseStep):
 
         needs_auditor = g.auditor_name is None
         needs_rpt = g.rpt_pct_revenue is None
-        needs_sebi = not g.sebi_orders and g.sebi_record_clean  # still at default
+        # sebi_record_clean now defaults to False — enrichment is needed when
+        # sebi_orders is empty AND the flag has not been affirmatively confirmed clean
+        # (i.e. it is still at the conservative False default).
+        needs_sebi = not g.sebi_orders and not g.sebi_record_clean
         needs_insider = g.insider_net_buying_3m is None  # P3-2: insider activity
 
         if not (needs_auditor or needs_rpt or needs_sebi or needs_insider):
@@ -310,6 +316,8 @@ class Step1Governance(BaseStep):
             orders = enriched.get("sebi_orders")
             if isinstance(orders, list):
                 g.sebi_orders = [str(o) for o in orders]
+            # Mark enrichment as having run — the immediate trigger can now fire
+            g.sebi_record_checked = True
 
         # P3-2: Insider/promoter activity signal
         if needs_insider:
@@ -317,10 +325,16 @@ class Step1Governance(BaseStep):
             # Coerce string "null" (common LLM mistake) to Python None
             if isinstance(insider_raw, str) and insider_raw.lower() == "null":
                 insider_raw = None
-            if isinstance(insider_raw, str) and insider_raw.upper() in (
-                "NET_BUYING", "NET_SELLING", "NEUTRAL"
-            ):
-                g.insider_net_buying_3m = insider_raw.upper()
+            if isinstance(insider_raw, str):
+                # Normalise short-form variants the model sometimes returns
+                _INSIDER_ALIASES = {
+                    "NET_BUYING": "NET_BUYING", "BUYING": "NET_BUYING",
+                    "NET_SELLING": "NET_SELLING", "SELLING": "NET_SELLING",
+                    "NEUTRAL": "NEUTRAL", "NONE": "NEUTRAL",
+                }
+                normalised = _INSIDER_ALIASES.get(insider_raw.upper())
+                if normalised:
+                    g.insider_net_buying_3m = normalised
             # JSON null or unrecognised → leave as None (not populated)
 
         self.log.info(
@@ -462,6 +476,11 @@ class Step1Governance(BaseStep):
         if g is None:
             flags.append("[DATA UNVERIFIED: sebi_record]")
             return 1
+        if not g.sebi_record_checked:
+            # Enrichment never ran (e.g. all fields were already present from prefetch).
+            # Treat as neither clean nor dirty — give benefit of doubt but flag.
+            flags.append("[DATA UNVERIFIED: sebi_record not checked in this run — manual verification recommended]")
+            return 2
         if g.sebi_record_clean and not g.sebi_orders:
             return 3
         elif g.sebi_orders:
@@ -469,7 +488,7 @@ class Step1Governance(BaseStep):
             concerns.append(f"SEBI orders on record: {g.sebi_orders}")
             return 2
         elif not g.sebi_record_clean:
-            # sebi_record_clean=False but no specific orders given — suspicious gap
+            # enrichment ran and confirmed not clean but gave no specific orders
             flags.append("[DATA UNVERIFIED: sebi_record — marked not-clean but no orders listed; manual verification required]")
             return 1  # conservative until verified
         else:

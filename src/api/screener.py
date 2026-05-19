@@ -170,6 +170,8 @@ class ScreenerClient(BaseHTTPClient):
             ebitda_margin_trend=metrics.get("ebitda_margin_trend"),
             # P2-4: Cyclical normalization
             ebitda_margin_5y_avg=metrics.get("ebitda_margin_5y_avg"),
+            # Revenue (absolute) — used for P/S ratio on pre-profit companies
+            trailing_revenue_cr=metrics.get("trailing_revenue_cr"),
             data_flags=flags,
         )
 
@@ -275,6 +277,8 @@ class ScreenerClient(BaseHTTPClient):
 
         if sales_vals:
             result["_sales_vals"] = sales_vals  # consumed later in _parse_financials
+            # Expose latest annual revenue for P/S ratio computation
+            result["trailing_revenue_cr"] = sales_vals[-1]
 
         # Other income as % of revenue (latest year only)
         if other_income_vals and sales_vals and sales_vals[-1] > 0:

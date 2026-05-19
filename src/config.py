@@ -1,4 +1,5 @@
 """Application configuration via pydantic-settings."""
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -11,7 +12,9 @@ class Settings(BaseSettings):
         env_ignore_empty=True,  # treat empty env vars as unset; .env file value wins
     )
 
-    anthropic_api_key: str = "dummy-key-for-tests"
+    # SecretStr prevents the key from appearing in repr/logs/serialised settings objects.
+    # Use settings.anthropic_api_key.get_secret_value() wherever the raw string is needed.
+    anthropic_api_key: SecretStr = SecretStr("dummy-key-for-tests")
 
     # --- Model routing ---
     # Sonnet for deep qualitative + agentic steps (2, 7); Haiku for structured/simple steps.

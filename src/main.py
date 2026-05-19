@@ -133,6 +133,110 @@ def portfolio() -> None:
 
 
 # ---------------------------------------------------------------------------
+# add-trade command
+# ---------------------------------------------------------------------------
+
+
+@cli.command("add-trade")
+@click.argument("ticker")
+@click.argument("action", type=click.Choice(["BUY", "SELL"], case_sensitive=False))
+@click.argument("qty", type=int)
+@click.argument("price", type=float)
+@click.option(
+    "--date",
+    "txn_date",
+    default=None,
+    help="Trade date in YYYY-MM-DD format (default: today).",
+)
+@click.option("--company", default="", help="Company name (used only when adding a new BUY holding).")
+@click.option("--allocation", "allocation_pct", default=0.0, type=float, help="Allocation % of portfolio (BUY only).")
+@click.option("--notes", default="", help="Optional notes recorded in the transaction log.")
+def add_trade(
+    ticker: str,
+    action: str,
+    qty: int,
+    price: float,
+    txn_date: str | None,
+    company: str,
+    allocation_pct: float,
+    notes: str,
+) -> None:
+    """Record a BUY or SELL transaction.
+
+    Updates transaction-log.md and (for BUY) adds a row to holdings.md and
+    tax-tracker.md so LTCG eligibility is tracked automatically.
+
+    \b
+    Examples:
+      investor add-trade RELIANCE BUY 10 2850.50
+      investor add-trade INFY SELL 5 1920.00 --date 2026-05-15 --notes "partial exit"
+      investor add-trade HDFCBANK BUY 20 1650.00 --company "HDFC Bank" --allocation 5.0
+    """
+    ticker = _validate_ticker(ticker)
+    action = action.upper()
+
+    # Parse / default the date
+    try:
+        trade_date = date.fromisoformat(txn_date) if txn_date else date.today()
+    except ValueError:
+        raise click.BadParameter(
+            f"'{txn_date}' is not a valid date. Use YYYY-MM-DD format.",
+            param_hint="--date",
+        )
+
+    if qty <= 0:
+        raise click.BadParameter("QTY must be a positive integer.", param_hint="qty")
+    if price <= 0:
+        raise click.BadParameter("PRICE must be positive.", param_hint="price")
+
+    tracker = PortfolioTracker()
+
+    # Always log to transaction-log.md
+    tracker.add_transaction(
+        ticker=ticker,
+        action=action,
+        price=price,
+        quantity=qty,
+        txn_date=trade_date,
+        notes=notes,
+    )
+    console.print(
+        f"[green]✓[/green] Transaction logged: {action} {qty} × {ticker} @ ₹{price:.2f} on {trade_date}"
+    )
+
+    if action == "BUY":
+        # Add row to holdings.md
+        tracker.add_holding(
+            ticker=ticker,
+            avg_cost=price,
+            quantity=qty,
+            purchase_date=trade_date,
+            allocation_pct=allocation_pct,
+            company_name=company or ticker,
+        )
+        console.print(f"[green]✓[/green] Holding added to holdings.md")
+
+        # Add LTCG eligibility row (1 year from purchase date)
+        from datetime import timedelta
+        ltcg_date = trade_date.replace(year=trade_date.year + 1)
+        tracker.update_tax_tracker(
+            ticker=ticker,
+            purchase_date=trade_date,
+            ltcg_date=ltcg_date,
+            avg_cost=price,
+        )
+        console.print(
+            f"[green]✓[/green] Tax tracker updated — LTCG eligible from {ltcg_date} "
+            f"(gains > ₹1.25L taxed at 12.5% after that date)"
+        )
+
+    if action == "SELL":
+        console.print(
+            "[dim]Tip: update holdings.md manually to reflect reduced quantity / exit.[/dim]"
+        )
+
+
+# ---------------------------------------------------------------------------
 # watchlist command
 # ---------------------------------------------------------------------------
 

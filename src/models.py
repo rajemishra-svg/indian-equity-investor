@@ -125,6 +125,9 @@ class FinancialMetrics(BaseModel):
     # ── P2-4: EC-02 cyclical normalization ────────────────────────────────
     ebitda_margin_5y_avg: Optional[float] = None  # 5Y OPM avg; used in DCF for cyclicals
 
+    # ── Revenue (absolute) — needed for P/S ratio on pre-profit companies ──
+    trailing_revenue_cr: Optional[float] = None   # latest annual revenue in ₹ Crore
+
     data_flags: List[str] = Field(default_factory=list)
 
 
@@ -139,7 +142,13 @@ class GovernanceData(BaseModel):
     rpt_pct_revenue: Optional[float] = None
     contingent_liabilities_pct_networth: Optional[float] = None
     sebi_orders: List[str] = Field(default_factory=list)
-    sebi_record_clean: bool = True
+    # Default False — assume dirty until enrichment confirms clean (Bug 1.5 fix).
+    # A company whose SEBI data was never fetched must NOT get credit for a clean record.
+    sebi_record_clean: bool = False
+    # sebi_record_checked tracks whether enrichment actually ran and queried SEBI.
+    # The immediate trigger fires only when checked=True AND clean=False — this prevents
+    # a network/API error during enrichment from causing a spurious REJECT.
+    sebi_record_checked: bool = False
     capital_allocation_description: Optional[str] = None
     # EC-06: set True for MNC subsidiaries and professionally-managed companies
     # where promoter holding is naturally low (foreign parent holds via FPI/FDI routes
@@ -384,6 +393,9 @@ class AnalysisState(BaseModel):
 
     @property
     def cap_size(self) -> str:
+        """Return cap-size bucket.  Returns 'mid_cap' when quote is unavailable so
+        WACC/MoS defaults are conservative rather than silently wrong.  Callers that
+        need to distinguish genuine unknowns should check ``state.quote is None``."""
         if self.quote:
             mc = self.quote.market_cap_cr
             if mc >= 20000:
@@ -391,7 +403,9 @@ class AnalysisState(BaseModel):
             elif mc >= 5000:
                 return "mid_cap"
             return "small_cap"
-        return "unknown"
+        # Quote unavailable — default to mid_cap (uses higher WACC/MoS than large_cap).
+        # Pipeline adds an explicit flag so the analyst is aware (see 8.3 fix in pipeline.py).
+        return "mid_cap"
 
     @property
     def required_mos_pct(self) -> float:

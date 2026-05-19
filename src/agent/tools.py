@@ -2,12 +2,22 @@
 from __future__ import annotations
 
 import json
+import re as _re
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 from bs4 import BeautifulSoup
 
 from src.logging_config import get_logger
+
+# Private/internal IP ranges that must not be reachable from the agentic loop.
+# Prevents SSRF attacks where a prompt-injected page instructs Claude to fetch
+# internal network endpoints.
+_BLOCKED_HOST_PATTERN = _re.compile(
+    r"(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.)",
+    _re.IGNORECASE,
+)
 
 log = get_logger("tools")
 
@@ -172,13 +182,14 @@ def _sanitize_web_text(text: str, max_chars: int = 3500) -> str:
     External pages can embed adversarial instructions like "Ignore previous instructions…".
     This function strips the most dangerous patterns and caps length to reduce token cost.
     """
-    import re as _re
-    # Strip common prompt-injection openers (case-insensitive)
+    # Strip common prompt-injection openers (case-insensitive).
+    # "act as " is intentionally narrowed to AI/chatbot variants to avoid
+    # redacting legitimate financial phrases like "act as a catalyst".
     _INJECTION_PATTERNS = [
         r"ignore (all |your )?(previous|prior|above) instructions?",
         r"disregard (all |your )?(previous|prior|above) instructions?",
         r"you are now ",
-        r"act as ",
+        r"act as (?:an? )?(?:AI|assistant|language model|chatbot|different|new|another)",
         r"new instructions?:",
         r"system prompt:",
         r"<\|im_start\|>",
@@ -192,8 +203,7 @@ def _sanitize_web_text(text: str, max_chars: int = 3500) -> str:
 
 async def _web_search(query: str) -> str:
     """Perform a web search via DuckDuckGo lite."""
-    encoded = query.replace(" ", "+")
-    url = f"https://html.duckduckgo.com/html/?q={encoded}"
+    url = f"https://html.duckduckgo.com/html/?{urlencode({'q': query})}"
     try:
         async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
             resp = await client.get(
@@ -227,7 +237,10 @@ async def _web_fetch(url: str, extract_text: bool = True) -> str:
 
     Raw HTML is never sent to Claude — it always passes through BeautifulSoup
     text extraction to prevent prompt injection via adversarial page content.
+    Private/internal IPs are blocked to prevent SSRF attacks.
     """
+    if _BLOCKED_HOST_PATTERN.search(url):
+        return f"[BLOCKED: '{url}' resolves to a private/internal address — not permitted]"
     try:
         async with httpx.AsyncClient(
             timeout=20.0,

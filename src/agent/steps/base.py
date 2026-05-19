@@ -22,8 +22,17 @@ from src.models import AnalysisState
 
 
 def _is_retryable_anthropic_error(exc: BaseException) -> bool:
-    """Return True for transient Anthropic API errors worth retrying."""
-    return isinstance(exc, (anthropic.RateLimitError, anthropic.APIStatusError))
+    """Return True only for transient Anthropic API errors.
+
+    400 (bad request) and 404 (not found) are permanent failures — retrying
+    wastes 3 attempts and up to 60 s of backoff without any chance of success.
+    Only retry rate-limit (429) and server-side transient errors (5xx / 529).
+    """
+    if isinstance(exc, anthropic.RateLimitError):
+        return True
+    if isinstance(exc, anthropic.APIStatusError):
+        return exc.status_code in (429, 500, 502, 503, 529)
+    return False
 
 
 class BaseStep(ABC):
