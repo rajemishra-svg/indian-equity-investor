@@ -1,12 +1,10 @@
 """Pydantic models for the Indian equity investor agent."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
-from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
-
 
 # ---------------------------------------------------------------------------
 # Enumerations
@@ -72,76 +70,76 @@ class StockQuote(BaseModel):
     cmp: float
     w52_high: float
     w52_low: float
-    dma_200: Optional[float] = None
+    dma_200: float | None = None
     market_cap_cr: float
     exchange: str = "NSE"
-    data_timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    data_timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
     is_stale: bool = False
     # P2-5 / P3-4: liquidity + technical signals
-    avg_daily_value_cr: Optional[float] = None   # 3-month avg daily traded value (₹ Cr)
-    volume_trend_down_days: Optional[str] = None  # "declining" | "stable" | "increasing"
+    avg_daily_value_cr: float | None = None   # 3-month avg daily traded value (₹ Cr)
+    volume_trend_down_days: str | None = None  # "declining" | "stable" | "increasing"
 
 
 class FinancialMetrics(BaseModel):
-    market_cap_cr: Optional[float] = None  # from Screener top-ratios (fallback when NSE is blocked)
-    revenue_cagr_5y: Optional[float] = None
-    revenue_cagr_3y: Optional[float] = None
-    pat_cagr_5y: Optional[float] = None
-    pat_cagr_3y: Optional[float] = None
-    roe_5y_avg: Optional[float] = None
-    roce_5y_avg: Optional[float] = None
-    cfo_net_profit_3y_avg: Optional[float] = None
-    debt_to_equity: Optional[float] = None
-    interest_coverage: Optional[float] = None
-    current_ratio: Optional[float] = None
-    net_debt_ebitda: Optional[float] = None
-    ebitda_margin_latest: Optional[float] = None
+    market_cap_cr: float | None = None  # from Screener top-ratios (fallback when NSE is blocked)
+    revenue_cagr_5y: float | None = None
+    revenue_cagr_3y: float | None = None
+    pat_cagr_5y: float | None = None
+    pat_cagr_3y: float | None = None
+    roe_5y_avg: float | None = None
+    roce_5y_avg: float | None = None
+    cfo_net_profit_3y_avg: float | None = None
+    debt_to_equity: float | None = None
+    interest_coverage: float | None = None
+    current_ratio: float | None = None
+    net_debt_ebitda: float | None = None
+    ebitda_margin_latest: float | None = None
 
     # ── P1-3: Working capital metrics (computed from balance sheet + revenue) ──
     # Debtor Days = Trade Receivables / Annual Revenue × 365
-    debtor_days_latest: Optional[float] = None   # most recent year
-    debtor_days_3y_ago: Optional[float] = None   # 3 years prior — for trend comparison
+    debtor_days_latest: float | None = None   # most recent year
+    debtor_days_3y_ago: float | None = None   # 3 years prior — for trend comparison
     # Inventory Days = Inventory / Annual Revenue × 365 (None for service companies)
-    inventory_days_latest: Optional[float] = None
+    inventory_days_latest: float | None = None
 
     # ── P1-4: Earnings quality ──────────────────────────────────────────────
     # Other income as % of revenue — high % signals weak core-business earnings
-    other_income_pct_revenue: Optional[float] = None
+    other_income_pct_revenue: float | None = None
 
     # ── P1-1: Sector-specific KPIs — financial services ────────────────────
     # Populated from Screener ratios section; None for non-banking companies.
-    gnpa_pct: Optional[float] = None    # Gross NPA % — banks/NBFCs
-    nnpa_pct: Optional[float] = None    # Net NPA %
-    nim_pct: Optional[float] = None     # Net Interest Margin %
-    roa_pct: Optional[float] = None     # Return on Assets %
-    car_pct: Optional[float] = None     # Capital Adequacy Ratio %
+    gnpa_pct: float | None = None    # Gross NPA % — banks/NBFCs
+    nnpa_pct: float | None = None    # Net NPA %
+    nim_pct: float | None = None     # Net Interest Margin %
+    roa_pct: float | None = None     # Return on Assets %
+    car_pct: float | None = None     # Capital Adequacy Ratio %
 
     # ── P2-3: Trend direction signals ──────────────────────────────────────
     # Trajectory matters as much as the absolute level.
     # Values: "improving" | "stable" | "deteriorating" | None
-    roce_trend: Optional[str] = None
-    roe_trend: Optional[str] = None
-    ebitda_margin_trend: Optional[str] = None
+    roce_trend: str | None = None
+    roe_trend: str | None = None
+    ebitda_margin_trend: str | None = None
     # ── P2-4: EC-02 cyclical normalization ────────────────────────────────
-    ebitda_margin_5y_avg: Optional[float] = None  # 5Y OPM avg; used in DCF for cyclicals
+    ebitda_margin_5y_avg: float | None = None  # 5Y OPM avg; used in DCF for cyclicals
 
     # ── Revenue (absolute) — needed for P/S ratio on pre-profit companies ──
-    trailing_revenue_cr: Optional[float] = None   # latest annual revenue in ₹ Crore
+    trailing_revenue_cr: float | None = None   # latest annual revenue in ₹ Crore
 
-    data_flags: List[str] = Field(default_factory=list)
+    data_flags: list[str] = Field(default_factory=list)
 
 
 class GovernanceData(BaseModel):
-    promoter_holding_pct: Optional[float] = None
-    promoter_pledging_pct: Optional[float] = None
-    promoter_pledging_trend: List[float] = Field(default_factory=list)  # last 8 quarters
-    pledging_trend_direction: Optional[str] = None  # "increasing", "decreasing", "stable"
-    auditor_name: Optional[str] = None
+    promoter_holding_pct: float | None = None
+    promoter_pledging_pct: float | None = None
+    promoter_pledging_trend: list[float] = Field(default_factory=list)  # last 8 quarters
+    pledging_trend_direction: str | None = None  # "increasing", "decreasing", "stable"
+    auditor_name: str | None = None
     auditor_changed_3y: bool = False
-    audit_qualifications: List[str] = Field(default_factory=list)
-    rpt_pct_revenue: Optional[float] = None
-    contingent_liabilities_pct_networth: Optional[float] = None
-    sebi_orders: List[str] = Field(default_factory=list)
+    audit_qualifications: list[str] = Field(default_factory=list)
+    rpt_pct_revenue: float | None = None
+    contingent_liabilities_pct_networth: float | None = None
+    sebi_orders: list[str] = Field(default_factory=list)
     # Default False — assume dirty until enrichment confirms clean (Bug 1.5 fix).
     # A company whose SEBI data was never fetched must NOT get credit for a clean record.
     sebi_record_clean: bool = False
@@ -149,7 +147,7 @@ class GovernanceData(BaseModel):
     # The immediate trigger fires only when checked=True AND clean=False — this prevents
     # a network/API error during enrichment from causing a spurious REJECT.
     sebi_record_checked: bool = False
-    capital_allocation_description: Optional[str] = None
+    capital_allocation_description: str | None = None
     # EC-06: set True for MNC subsidiaries and professionally-managed companies
     # where promoter holding is naturally low (foreign parent holds via FPI/FDI routes
     # or there is no controlling promoter family).  When True, the promoter_holding >= 40%
@@ -158,26 +156,26 @@ class GovernanceData(BaseModel):
     is_mnc: bool = False
     # P3-2: Insider / promoter activity (last 3 months from BSE bulk/block deals)
     # "buying" = net promoter/insider purchases, "selling" = net sales, "neutral" = mixed
-    insider_net_buying_3m: Optional[str] = None
-    data_flags: List[str] = Field(default_factory=list)
+    insider_net_buying_3m: str | None = None
+    data_flags: list[str] = Field(default_factory=list)
 
 
 class ValuationData(BaseModel):
-    pe_current: Optional[float] = None
-    ev_ebitda_current: Optional[float] = None
-    pbv_current: Optional[float] = None
-    peg_ratio: Optional[float] = None
-    fcf_yield_pct: Optional[float] = None
-    pe_10y_percentile: Optional[float] = None
-    pe_5y_percentile: Optional[float] = None
-    pe_10y_low: Optional[float] = None
-    pe_10y_high: Optional[float] = None
-    forward_eps_2y: Optional[float] = None
-    forward_eps_cagr_2y: Optional[float] = None
-    fcf_latest_cr: Optional[float] = None
-    net_debt_cr: Optional[float] = None
-    shares_outstanding_cr: Optional[float] = None
-    data_flags: List[str] = Field(default_factory=list)
+    pe_current: float | None = None
+    ev_ebitda_current: float | None = None
+    pbv_current: float | None = None
+    peg_ratio: float | None = None
+    fcf_yield_pct: float | None = None
+    pe_10y_percentile: float | None = None
+    pe_5y_percentile: float | None = None
+    pe_10y_low: float | None = None
+    pe_10y_high: float | None = None
+    forward_eps_2y: float | None = None
+    forward_eps_cagr_2y: float | None = None
+    fcf_latest_cr: float | None = None
+    net_debt_cr: float | None = None
+    shares_outstanding_cr: float | None = None
+    data_flags: list[str] = Field(default_factory=list)
 
 
 class TechnicalData(BaseModel):
@@ -185,9 +183,9 @@ class TechnicalData(BaseModel):
     w52_high: float
     w52_low: float
     pct_from_52w_low: float
-    dma_200: Optional[float] = None
-    rsi_14: Optional[float] = None
-    volume_trend_down_days: Optional[str] = None  # "declining", "stable", "increasing"
+    dma_200: float | None = None
+    rsi_14: float | None = None
+    volume_trend_down_days: str | None = None  # "declining", "stable", "increasing"
 
 
 # ---------------------------------------------------------------------------
@@ -199,20 +197,20 @@ class PreScreenResult(BaseModel):
     score: int
     max_score: int = 9
     gate: GateResult
-    metric_scores: Dict[str, bool] = Field(default_factory=dict)
-    failed_metrics: List[str] = Field(default_factory=list)
-    conditional_exceptions: List[str] = Field(default_factory=list)
-    data_flags: List[str] = Field(default_factory=list)
+    metric_scores: dict[str, bool] = Field(default_factory=dict)
+    failed_metrics: list[str] = Field(default_factory=list)
+    conditional_exceptions: list[str] = Field(default_factory=list)
+    data_flags: list[str] = Field(default_factory=list)
 
 
 class GovernanceScore(BaseModel):
     score: int
     max_score: int = 15
     gate: GateResult
-    immediate_triggers: List[str] = Field(default_factory=list)
-    sub_scores: Dict[str, int] = Field(default_factory=dict)
-    concerns: List[str] = Field(default_factory=list)
-    data_flags: List[str] = Field(default_factory=list)
+    immediate_triggers: list[str] = Field(default_factory=list)
+    sub_scores: dict[str, int] = Field(default_factory=dict)
+    concerns: list[str] = Field(default_factory=list)
+    data_flags: list[str] = Field(default_factory=list)
 
 
 class MoatAssessment(BaseModel):
@@ -220,25 +218,25 @@ class MoatAssessment(BaseModel):
     moat_durability: str
     market_position: str
     market_share_trend: str
-    tam_multiple: Optional[float] = None
+    tam_multiple: float | None = None
     working_capital_flag: str
     moat_narrative: str
     # Compressed 1-sentence summary for use in downstream steps (reduces token cost).
     # Auto-generated from moat_narrative if not explicitly set.
-    moat_narrative_short: Optional[str] = None
+    moat_narrative_short: str | None = None
     # P3-1: Management quality signals from concall research
-    management_guidance_reliability: Optional[str] = None  # "High" | "Medium" | "Low" | None
-    concall_quality_note: Optional[str] = None             # 1-sentence note or None
-    data_flags: List[str] = Field(default_factory=list)
+    management_guidance_reliability: str | None = None  # "High" | "Medium" | "Low" | None
+    concall_quality_note: str | None = None             # 1-sentence note or None
+    data_flags: list[str] = Field(default_factory=list)
 
 
 class FinancialGateResult(BaseModel):
     score: int  # out of 7
     gate: GateResult
-    hard_triggers_fired: List[str] = Field(default_factory=list)
-    hurdles_met: Dict[str, bool] = Field(default_factory=dict)
-    sector_overrides: List[str] = Field(default_factory=list)
-    data_flags: List[str] = Field(default_factory=list)
+    hard_triggers_fired: list[str] = Field(default_factory=list)
+    hurdles_met: dict[str, bool] = Field(default_factory=dict)
+    sector_overrides: list[str] = Field(default_factory=list)
+    data_flags: list[str] = Field(default_factory=list)
 
 
 class TailwindAssessment(BaseModel):
@@ -246,62 +244,62 @@ class TailwindAssessment(BaseModel):
     tailwind_type: TailwindType
     cycle_position: CyclePosition
     growth_runway_years: str
-    headwind_flags: List[str] = Field(default_factory=list)
+    headwind_flags: list[str] = Field(default_factory=list)
     tailwind_narrative: str
-    data_flags: List[str] = Field(default_factory=list)
+    data_flags: list[str] = Field(default_factory=list)
 
 
 class ValuationResult(BaseModel):
     gate: GateResult
-    dcf_intrinsic_base: Optional[float] = None
-    dcf_intrinsic_bull: Optional[float] = None
-    dcf_intrinsic_bear: Optional[float] = None
-    dcf_intrinsic_weighted: Optional[float] = None
-    margin_of_safety_pct: Optional[float] = None
+    dcf_intrinsic_base: float | None = None
+    dcf_intrinsic_bull: float | None = None
+    dcf_intrinsic_bear: float | None = None
+    dcf_intrinsic_weighted: float | None = None
+    margin_of_safety_pct: float | None = None
     required_mos_pct: float = 35.0
     mos_met: bool = False
     methods_in_buy_zone: int = 0
     max_methods: int = 5  # total valuation methods evaluated (PE percentile, PEG, DCF, FCF yield, EV/EBITDA)
-    pe_percentile_verdict: Optional[str] = None  # EXCELLENT/FAIR/EXPENSIVE/AVOID
-    peg_verdict: Optional[str] = None
-    fcf_yield_verdict: Optional[str] = None
-    ev_ebitda_verdict: Optional[str] = None
-    data_flags: List[str] = Field(default_factory=list)
+    pe_percentile_verdict: str | None = None  # EXCELLENT/FAIR/EXPENSIVE/AVOID
+    peg_verdict: str | None = None
+    fcf_yield_verdict: str | None = None
+    ev_ebitda_verdict: str | None = None
+    data_flags: list[str] = Field(default_factory=list)
 
 
 class TechnicalSignal(BaseModel):
     signals_met: int
-    signal_details: Dict[str, bool] = Field(default_factory=dict)
+    signal_details: dict[str, bool] = Field(default_factory=dict)
     entry_guidance: str  # GREEN/AMBER/RED
-    tranche_1_price: Optional[float] = None
-    tranche_2_price: Optional[float] = None
-    tranche_3_price: Optional[float] = None
-    data_flags: List[str] = Field(default_factory=list)
+    tranche_1_price: float | None = None
+    tranche_2_price: float | None = None
+    tranche_3_price: float | None = None
+    data_flags: list[str] = Field(default_factory=list)
 
 
 class PeerData(BaseModel):
     ticker: str
     name: str
-    revenue_cagr_5y: Optional[float] = None
-    pat_cagr_5y: Optional[float] = None
-    ebitda_margin: Optional[float] = None
-    roe_5y_avg: Optional[float] = None
-    roce_5y_avg: Optional[float] = None
-    debt_to_equity: Optional[float] = None
-    forward_pe: Optional[float] = None
-    ev_ebitda_forward: Optional[float] = None
-    promoter_holding: Optional[float] = None
-    pledging_pct: Optional[float] = None
+    revenue_cagr_5y: float | None = None
+    pat_cagr_5y: float | None = None
+    ebitda_margin: float | None = None
+    roe_5y_avg: float | None = None
+    roce_5y_avg: float | None = None
+    debt_to_equity: float | None = None
+    forward_pe: float | None = None
+    ev_ebitda_forward: float | None = None
+    promoter_holding: float | None = None
+    pledging_pct: float | None = None
 
 
 class PeerComparisonResult(BaseModel):
     gate: GateResult
-    target_quality_rank: Optional[int] = None
-    target_valuation_rank: Optional[int] = None
+    target_quality_rank: int | None = None
+    target_valuation_rank: int | None = None
     peer_count: int = 0
-    peers: List[PeerData] = Field(default_factory=list)
-    dominant_peer: Optional[str] = None
-    data_flags: List[str] = Field(default_factory=list)
+    peers: list[PeerData] = Field(default_factory=list)
+    dominant_peer: str | None = None
+    data_flags: list[str] = Field(default_factory=list)
 
 
 class PremortRisk(BaseModel):
@@ -310,7 +308,7 @@ class PremortRisk(BaseModel):
     tertiary_risk: str
     risk_type: str  # CYCLICAL_MANAGEABLE or STRUCTURAL_UNHEDGEABLE
     proceed: bool
-    data_flags: List[str] = Field(default_factory=list)
+    data_flags: list[str] = Field(default_factory=list)
 
 
 class TrancheEntry(BaseModel):
@@ -322,9 +320,9 @@ class TrancheEntry(BaseModel):
 
 class ExitStrategy(BaseModel):
     fundamental_trigger: str
-    valuation_exit_price: Optional[float] = None
-    stop_loss_price: Optional[float] = None
-    ltcg_eligible_after: Optional[str] = None  # date string
+    valuation_exit_price: float | None = None
+    stop_loss_price: float | None = None
+    ltcg_eligible_after: str | None = None  # date string
 
 
 # ---------------------------------------------------------------------------
@@ -336,48 +334,48 @@ class AnalysisState(BaseModel):
     ticker: str
     company_name: str = ""
     mode: MarketMode = MarketMode.NORMAL
-    nifty_level: Optional[float] = None
-    nifty_52w_high: Optional[float] = None
-    nifty_decline_pct: Optional[float] = None
-    sector_name: Optional[str] = None
+    nifty_level: float | None = None
+    nifty_52w_high: float | None = None
+    nifty_decline_pct: float | None = None
+    sector_name: str | None = None
     # P3-3: Conglomerate detection — ITC, L&T-type multi-business companies where
     # standard DCF undervalues the sum of parts.  Detected by sector classifier.
     is_conglomerate: bool = False
 
     # Raw fetched data
-    quote: Optional[StockQuote] = None
-    financials: Optional[FinancialMetrics] = None
-    governance_data: Optional[GovernanceData] = None
-    valuation_data: Optional[ValuationData] = None
-    technical_data: Optional[TechnicalData] = None
+    quote: StockQuote | None = None
+    financials: FinancialMetrics | None = None
+    governance_data: GovernanceData | None = None
+    valuation_data: ValuationData | None = None
+    technical_data: TechnicalData | None = None
 
     # Step results
-    pre_screen: Optional[PreScreenResult] = None
-    governance: Optional[GovernanceScore] = None
-    moat: Optional[MoatAssessment] = None
-    financial_gate: Optional[FinancialGateResult] = None
-    tailwind: Optional[TailwindAssessment] = None
-    valuation: Optional[ValuationResult] = None
-    technical: Optional[TechnicalSignal] = None
-    peer_comparison: Optional[PeerComparisonResult] = None
-    premortem: Optional[PremortRisk] = None
+    pre_screen: PreScreenResult | None = None
+    governance: GovernanceScore | None = None
+    moat: MoatAssessment | None = None
+    financial_gate: FinancialGateResult | None = None
+    tailwind: TailwindAssessment | None = None
+    valuation: ValuationResult | None = None
+    technical: TechnicalSignal | None = None
+    peer_comparison: PeerComparisonResult | None = None
+    premortem: PremortRisk | None = None
 
     # Pipeline status
     current_step: int = 0
-    terminated_at_step: Optional[int] = None
-    termination_reason: Optional[str] = None
-    all_data_flags: List[str] = Field(default_factory=list)
-    error_tags: List[str] = Field(default_factory=list)
+    terminated_at_step: int | None = None
+    termination_reason: str | None = None
+    all_data_flags: list[str] = Field(default_factory=list)
+    error_tags: list[str] = Field(default_factory=list)
 
     # Final recommendation
-    recommendation_type: Optional[str] = None  # BUY/WATCHLIST/REJECT/PEER_SWITCH
-    watchlist_tier: Optional[WatchlistTier] = None
-    conviction: Optional[ConvictionLevel] = None
-    suggested_allocation_pct: Optional[float] = None
-    investment_thesis: Optional[str] = None
-    tranches: List[TrancheEntry] = Field(default_factory=list)
-    exit_strategy: Optional[ExitStrategy] = None
-    formatted_output: Optional[str] = None
+    recommendation_type: str | None = None  # BUY/WATCHLIST/REJECT/PEER_SWITCH
+    watchlist_tier: WatchlistTier | None = None
+    conviction: ConvictionLevel | None = None
+    suggested_allocation_pct: float | None = None
+    investment_thesis: str | None = None
+    tranches: list[TrancheEntry] = Field(default_factory=list)
+    exit_strategy: ExitStrategy | None = None
+    formatted_output: str | None = None
 
     def add_flag(self, flag: str) -> None:
         if flag not in self.all_data_flags:
