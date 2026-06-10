@@ -254,6 +254,7 @@ The scanner's two-phase design exists to control Claude API cost:
 - **Phase 2 (pre-screen)** runs Step 0 only — purely deterministic, zero LLM calls. All 500 tickers in an index can be pre-screened for the cost of HTTP requests alone. Concurrency is capped by `asyncio.Semaphore(concurrency)` (default 8). **SQLite warm cache**: `get_fresh_snapshot()` is checked before any HTTP call; data fresher than 7 days skips Screener entirely, making repeated weekly scans near-free.
 - **Phase 3 (full pipeline)** runs concurrently — asyncio.gather with a Semaphore(3) cap, each candidate in its own `InvestmentPipeline` instance. The `DataCache` singleton means any data already fetched in Phase 2 is reused here at no extra HTTP cost.
 - **Fallback universe**: NSE JSON API → NSE archives CSV → `config/nifty50_fallback.json` (50 tickers, staleness warning after 90 days).
+- **Candidate cut** (`candidate_sort_key()`): Step 0 scores are 0–9 integers, so many tickers tie; the Phase 3 `[:max_full_analyses]` cut orders ties by ROCE 5Y desc → CFO/NP 3Y desc → % below 52W high desc → ticker asc (all captured from Phase 2 data at zero extra cost). The CLI pre-screen table uses the same ordering and shows the ROCE column.
 - **Ranking** (`rank_results()`): BUY > WATCHLIST > PEER_SWITCH > REJECT, then by conviction HIGH > MEDIUM > LOW, then MoS% descending, then governance score descending.
 
 ### API clients (`src/api/`)

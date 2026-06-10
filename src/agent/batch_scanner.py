@@ -13,10 +13,9 @@ import asyncio
 import csv
 import io
 import json
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
-from dataclasses import dataclass, field
-from typing import Optional
 
 import httpx
 
@@ -123,7 +122,41 @@ class PreScreenSummary:
     gate: GateResult
     failed_metrics: list[str] = field(default_factory=list)
     data_flags: list[str] = field(default_factory=list)
-    error: Optional[str] = None
+    error: str | None = None
+    # Tie-breakers for the Phase 3 candidate cut — captured from data already
+    # fetched in Phase 2, so they cost nothing extra.
+    roce_5y: float | None = None             # capital efficiency (higher better)
+    cfo_np_3y: float | None = None           # earnings quality (higher better)
+    pct_below_52w_high: float | None = None  # entry attractiveness (higher better)
+
+
+def candidate_sort_key(s: PreScreenSummary) -> tuple:
+    """Deterministic ordering for the Phase 3 candidate cut.
+
+    Step 0 scores are 0–9 integers, so dozens of tickers tie at 8–9 and a
+    score-only sort would cut the expensive full-analysis list at arbitrary
+    universe order.  Ties are broken by quality and entry attractiveness,
+    using data Phase 2 already fetched:
+
+      1. score (desc)
+      2. ROCE 5Y avg (desc) — capital efficiency
+      3. CFO/NP 3Y (desc) — earnings quality
+      4. % below 52W high (desc) — better entry odds among already-vetted names
+      5. ticker (asc) — total determinism
+
+    Missing metrics sort after present ones at the same level.
+    """
+
+    def _desc(value: float | None) -> float:
+        return -value if value is not None else float("inf")
+
+    return (
+        -s.score,
+        _desc(s.roce_5y),
+        _desc(s.cfo_np_3y),
+        _desc(s.pct_below_52w_high),
+        s.ticker,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -244,10 +277,12 @@ class BatchScanner:
         log.info("prescreen_start", ticker_count=len(tickers), min_score=prescreen_min_score)
         summaries = await self.prescreen_universe(tickers)
 
+        # Sort with quality tie-breakers (ROCE → CFO/NP → % below 52W high) so
+        # the [:max_full_analyses] cut below picks the genuinely best names
+        # among tied Step 0 scores instead of arbitrary universe order.
         candidates = sorted(
             [s for s in summaries if s.score >= prescreen_min_score and not s.error],
-            key=lambda s: s.score,
-            reverse=True,
+            key=candidate_sort_key,
         )
         log.info(
             "prescreen_complete",
@@ -313,12 +348,20 @@ class BatchScanner:
             state = await step0.run(state)
 
             pre = state.pre_screen
+            f = state.financials
+            q = state.quote
+            pct_below_high: float | None = None
+            if q and q.w52_high and q.w52_high > 0:
+                pct_below_high = round((q.w52_high - q.cmp) / q.w52_high * 100, 2)
             return PreScreenSummary(
                 ticker=ticker,
                 score=pre.score if pre else 0,
                 gate=pre.gate if pre else GateResult.NOT_RUN,
                 failed_metrics=pre.failed_metrics if pre else [],
                 data_flags=state.all_data_flags,
+                roce_5y=f.roce_5y_avg if f else None,
+                cfo_np_3y=f.cfo_net_profit_3y_avg if f else None,
+                pct_below_52w_high=pct_below_high,
             )
 
 

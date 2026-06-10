@@ -417,7 +417,7 @@ def scan(
       investor scan --index "NIFTY 100" --top 5 --min-score 7\n
       investor scan --concurrency 3
     """
-    from src.agent.batch_scanner import BatchScanner
+    from src.agent.batch_scanner import BatchScanner, candidate_sort_key
 
     async def _run():
         scanner = BatchScanner(concurrency=concurrency)
@@ -445,6 +445,7 @@ def scan(
     )
     ps_table.add_column("Ticker", style="bold")
     ps_table.add_column("Score", justify="center")
+    ps_table.add_column("ROCE 5Y", justify="right")
     ps_table.add_column("Gate")
     ps_table.add_column("Failed Metrics", style="dim")
 
@@ -455,11 +456,14 @@ def scan(
         "not_run": "dim",
     }
 
-    for s in sorted(passed, key=lambda x: x.score, reverse=True):
+    # Same ordering the scanner uses for the Phase 3 cut, so the table top
+    # matches which tickers actually get the full analysis.
+    for s in sorted(passed, key=candidate_sort_key):
         colour = gate_colours.get(s.gate.value, "white")
         ps_table.add_row(
             s.ticker,
             f"[{colour}]{s.score}/9[/{colour}]",
+            f"{s.roce_5y:.1f}%" if s.roce_5y is not None else "[dim]N/A[/dim]",
             f"[{colour}]{s.gate.value.upper()}[/{colour}]",
             ", ".join(s.failed_metrics[:3]) + ("…" if len(s.failed_metrics) > 3 else ""),
         )

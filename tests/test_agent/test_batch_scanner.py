@@ -327,3 +327,105 @@ async def test_scan_respects_max_full_analyses():
 
     assert pipeline_mock.analyze.await_count == 2
     assert len(results) == 2
+
+
+# ---------------------------------------------------------------------------
+# candidate_sort_key — deterministic Phase 3 cut among tied Step 0 scores
+# ---------------------------------------------------------------------------
+
+
+def _tied_summary(ticker, score=8, roce=None, cfo=None, below=None):
+    return PreScreenSummary(
+        ticker=ticker,
+        score=score,
+        gate=GateResult.PASS_GREEN,
+        roce_5y=roce,
+        cfo_np_3y=cfo,
+        pct_below_52w_high=below,
+    )
+
+
+def test_score_dominates_tiebreakers():
+    from src.agent.batch_scanner import candidate_sort_key
+
+    low = _tied_summary("LOW", score=7, roce=40.0)
+    high = _tied_summary("HIGH", score=9, roce=5.0)
+    assert sorted([low, high], key=candidate_sort_key)[0].ticker == "HIGH"
+
+
+def test_tied_scores_break_on_roce():
+    from src.agent.batch_scanner import candidate_sort_key
+
+    ordered = sorted(
+        [_tied_summary("AAA", roce=15.0), _tied_summary("BBB", roce=25.0)],
+        key=candidate_sort_key,
+    )
+    assert [s.ticker for s in ordered] == ["BBB", "AAA"]
+
+
+def test_roce_tie_breaks_on_cfo_np():
+    from src.agent.batch_scanner import candidate_sort_key
+
+    a = _tied_summary("AAA", roce=20.0, cfo=60.0)
+    b = _tied_summary("BBB", roce=20.0, cfo=90.0)
+    assert sorted([a, b], key=candidate_sort_key)[0].ticker == "BBB"
+
+
+def test_cfo_tie_breaks_on_distance_below_52w_high():
+    from src.agent.batch_scanner import candidate_sort_key
+
+    a = _tied_summary("AAA", roce=20.0, cfo=80.0, below=5.0)
+    b = _tied_summary("BBB", roce=20.0, cfo=80.0, below=25.0)
+    assert sorted([a, b], key=candidate_sort_key)[0].ticker == "BBB"
+
+
+def test_missing_metric_sorts_after_present():
+    from src.agent.batch_scanner import candidate_sort_key
+
+    has_data = _tied_summary("ZZZ", roce=10.0)
+    missing = _tied_summary("AAA", roce=None)  # alphabetically first, but no data
+    assert sorted([has_data, missing], key=candidate_sort_key)[0].ticker == "ZZZ"
+
+
+def test_full_tie_falls_back_to_ticker_for_determinism():
+    from src.agent.batch_scanner import candidate_sort_key
+
+    assert (
+        sorted([_tied_summary("ZED"), _tied_summary("ALPHA")], key=candidate_sort_key)[0].ticker
+        == "ALPHA"
+    )
+
+
+@pytest.mark.asyncio
+async def test_prescreen_populates_tiebreaker_fields():
+    """_prescreen_one must capture ROCE / CFO-NP / %-below-high from Phase 2 data."""
+    scanner = BatchScanner(concurrency=2)
+
+    mock_nse = AsyncMock()
+    mock_nse.__aenter__ = AsyncMock(return_value=mock_nse)
+    mock_nse.__aexit__ = AsyncMock(return_value=False)
+    mock_nse.get_stock_quote = AsyncMock(return_value=SAMPLE_QUOTE)
+
+    mock_screener = AsyncMock()
+    mock_screener.__aenter__ = AsyncMock(return_value=mock_screener)
+    mock_screener.__aexit__ = AsyncMock(return_value=False)
+    mock_screener.get_financials = AsyncMock(return_value=SAMPLE_FINANCIALS)
+
+    mock_bse = AsyncMock()
+    mock_bse.__aenter__ = AsyncMock(return_value=mock_bse)
+    mock_bse.__aexit__ = AsyncMock(return_value=False)
+    mock_bse.get_shareholding = AsyncMock(return_value=SAMPLE_GOVERNANCE)
+
+    with (
+        patch("src.agent.batch_scanner.NSEClient", return_value=mock_nse),
+        patch("src.agent.batch_scanner.ScreenerClient", return_value=mock_screener),
+        patch("src.agent.batch_scanner.BSEClient", return_value=mock_bse),
+        patch("src.agent.batch_scanner.YFinanceClient", return_value=_mock_yfinance_client()),
+    ):
+        summaries = await scanner.prescreen_universe(["RELIANCE"])
+
+    s = summaries[0]
+    assert s.roce_5y == pytest.approx(SAMPLE_FINANCIALS.roce_5y_avg)
+    assert s.cfo_np_3y == pytest.approx(SAMPLE_FINANCIALS.cfo_net_profit_3y_avg)
+    expected_below = (SAMPLE_QUOTE.w52_high - SAMPLE_QUOTE.cmp) / SAMPLE_QUOTE.w52_high * 100
+    assert s.pct_below_52w_high == pytest.approx(expected_below, abs=0.01)
