@@ -194,33 +194,66 @@ def _normalized_base_fcf(state: AnalysisState) -> float | None:
     )
 
 
-def _derive_growth_rates(state: AnalysisState) -> tuple[float, float, float]:
-    """Derive base/bull/bear annual FCF growth rates from historical revenue CAGRs.
+def _cagr_blend(five_year: float | None, three_year: float | None) -> float | None:
+    """60/40 blend of 5Y and 3Y CAGR; whichever single figure exists otherwise."""
+    if five_year is not None and three_year is not None:
+        return 0.6 * five_year + 0.4 * three_year
+    if five_year is not None:
+        return five_year
+    return three_year
 
-    Uses a 60/40 blend of 5Y and 3Y revenue CAGR.  Applies haircuts so the DCF
-    is conservative: base = blended × 0.85, bull = blended × 1.10, bear = blended × 0.60.
-    All rates are capped to prevent Gordon Growth instability.
+
+def _derive_growth_rates(state: AnalysisState) -> tuple[float, float, float, str]:
+    """Derive base/bull/bear annual FCF growth rates and an anchor description.
+
+    The anchor is a 60/40 blend of 5Y/3Y revenue CAGR, profitability-checked
+    against the same blend of PAT CAGR::
+
+        anchor = min(revenue_blend, (revenue_blend + pat_blend) / 2)
+
+    The DCF projects FCF — a profit-derived quantity — so revenue growth alone
+    overstates it when margins are deteriorating (PAT lagging revenue drags the
+    anchor down).  The asymmetry is deliberate: margin *expansion* is never
+    extrapolated (the min() keeps the anchor at the revenue blend), because
+    margin gains are finite while revenue growth can compound.
+
+    Haircuts keep the scenarios conservative: base = anchor × 0.85,
+    bull = anchor × 1.10, bear = anchor × 0.60, all capped for Gordon Growth
+    stability.
     """
     f = state.financials
-    rev5 = f.revenue_cagr_5y if f and f.revenue_cagr_5y is not None else None
-    rev3 = f.revenue_cagr_3y if f and f.revenue_cagr_3y is not None else None
+    rev_blend = _cagr_blend(
+        f.revenue_cagr_5y if f else None, f.revenue_cagr_3y if f else None
+    )
+    pat_blend = _cagr_blend(
+        f.pat_cagr_5y if f else None, f.pat_cagr_3y if f else None
+    )
 
-    if rev5 is not None and rev3 is not None:
-        blended = 0.6 * rev5 + 0.4 * rev3
-    elif rev5 is not None:
-        blended = rev5
-    elif rev3 is not None:
-        blended = rev3
+    rev_label = "revenue blend"
+    if rev_blend is None:
+        rev_blend = 10.0  # conservative default when no revenue history
+        rev_label = "default (no revenue history)"
+
+    if pat_blend is not None:
+        anchor = min(rev_blend, (rev_blend + pat_blend) / 2)
+        if anchor < rev_blend:
+            anchor_note = (
+                f"PAT-checked ({rev_label} {rev_blend:.1f}% cut to {anchor:.1f}% "
+                f"by PAT blend {pat_blend:.1f}%)"
+            )
+        else:
+            anchor_note = f"{rev_label} {rev_blend:.1f}% (PAT confirms)"
     else:
-        blended = 10.0  # conservative default when no history
+        anchor = rev_blend
+        anchor_note = f"{rev_label} {rev_blend:.1f}% (PAT history unavailable)"
 
-    blended = max(0.0, min(blended, 30.0))  # cap at 30% for Gordon stability
+    anchor = max(0.0, min(anchor, 30.0))  # cap at 30% for Gordon stability
 
-    base = blended * 0.85
-    bull = min(blended * 1.10, 35.0)
-    bear = blended * 0.60
+    base = anchor * 0.85
+    bull = min(anchor * 1.10, 35.0)
+    bear = anchor * 0.60
 
-    return base, bull, bear
+    return base, bull, bear, anchor_note
 
 
 def _get_shares_outstanding(state: AnalysisState) -> float | None:
@@ -260,7 +293,7 @@ def _run_deterministic_dcf(
     v = state.valuation_data
     net_debt = (v.net_debt_cr or 0.0) if v else 0.0
 
-    growth_base, growth_bull, growth_bear = _derive_growth_rates(state)
+    growth_base, growth_bull, growth_bear, growth_anchor_note = _derive_growth_rates(state)
 
     iv_base = _dcf_single_scenario(base_fcf, growth_base, wacc_pct, terminal_growth_pct, net_debt, shares)
     iv_bull = _dcf_single_scenario(base_fcf, growth_bull, wacc_pct, terminal_growth_pct, net_debt, shares)
@@ -280,7 +313,8 @@ def _run_deterministic_dcf(
     fcf_label = "Normalized base FCF (EC-02)" if normalized_fcf_cr is not None else "Base FCF"
     assumptions = (
         f"{fcf_label} ₹{base_fcf:.0f}Cr; growth {growth_base:.1f}%/{growth_bull:.1f}%/{growth_bear:.1f}% "
-        f"(base/bull/bear); WACC {wacc_pct:.1f}%; terminal growth {terminal_growth_pct:.1f}%"
+        f"(base/bull/bear, anchor: {growth_anchor_note}); WACC {wacc_pct:.1f}%; "
+        f"terminal growth {terminal_growth_pct:.1f}%"
     )
     return iv_base, iv_bull, iv_bear, iv_weighted, assumptions
 

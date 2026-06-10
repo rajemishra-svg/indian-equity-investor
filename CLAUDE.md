@@ -237,7 +237,7 @@ Also exposes `is_conglomerate(company_name, ticker)` — checks against `_CONGLO
 Five methods, each scored as in-buy-zone or not:
 1. **PE percentile** (10Y historical from yfinance): EXCELLENT (<30th), FAIR (30–60th)
 2. **PEG ratio**: EXCELLENT (<1.0), FAIR (1.0–1.3)
-3. **DCF**: weighted average of base/bull/bear scenarios; MoS must meet `state.required_mos_pct`; EC-02 normalizes base FCF (trailing revenue × 5Y avg EBITDA margin × 0.55) for cyclical sectors
+3. **DCF**: weighted average of base/bull/bear scenarios; MoS must meet `state.required_mos_pct`; EC-02 normalizes base FCF (trailing revenue × 5Y avg EBITDA margin × 0.55) for cyclical sectors. Growth anchor = `min(revenue_blend, (revenue_blend + pat_blend)/2)` where each blend is 60/40 of 5Y/3Y CAGR — collapsing margins (PAT lagging revenue) drag projected FCF growth down, but margin expansion is never extrapolated
 4. **FCF yield**: FAIR (3–5%), ATTRACTIVE (>5%)
 5. **EV/EBITDA**: EXCELLENT (<12x), FAIR (12–20x); skipped for `financial_services`
 

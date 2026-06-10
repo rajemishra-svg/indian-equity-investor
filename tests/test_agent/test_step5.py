@@ -161,3 +161,62 @@ async def test_valuation_fail_sets_watchlist_but_does_not_terminate():
     # The whole point: Steps 6–8 must still run for WATCHLIST candidates.
     assert state.terminated_at_step is None
     assert not state.is_terminated
+
+
+# ---------------------------------------------------------------------------
+# Growth anchor — PAT-checked revenue blend
+# ---------------------------------------------------------------------------
+
+
+def test_growth_anchor_cut_by_collapsing_margins():
+    """PAT lagging revenue (margin collapse) must drag the DCF growth anchor down."""
+    from src.agent.steps.step5_valuation import _derive_growth_rates
+
+    state = _make_state(
+        revenue_cagr_5y=20.0, revenue_cagr_3y=20.0,  # revenue blend 20%
+        pat_cagr_5y=5.0, pat_cagr_3y=5.0,            # PAT blend 5%
+    )
+    base, bull, bear, note = _derive_growth_rates(state)
+    # anchor = min(20, (20+5)/2) = 12.5 → base = 12.5 × 0.85
+    assert base == pytest.approx(12.5 * 0.85)
+    assert bear == pytest.approx(12.5 * 0.60)
+    assert "PAT-checked" in note and "cut to 12.5%" in note
+
+
+def test_growth_anchor_does_not_extrapolate_margin_expansion():
+    """PAT outpacing revenue must NOT raise the anchor above the revenue blend."""
+    from src.agent.steps.step5_valuation import _derive_growth_rates
+
+    state = _make_state(
+        revenue_cagr_5y=15.0, revenue_cagr_3y=15.0,  # revenue blend 15%
+        pat_cagr_5y=30.0, pat_cagr_3y=30.0,          # PAT blend 30%
+    )
+    base, _, _, note = _derive_growth_rates(state)
+    assert base == pytest.approx(15.0 * 0.85)  # anchored to revenue, not PAT
+    assert "PAT confirms" in note
+
+
+def test_growth_anchor_falls_back_to_revenue_when_pat_missing():
+    from src.agent.steps.step5_valuation import _derive_growth_rates
+
+    state = _make_state(pat_cagr_5y=None, pat_cagr_3y=None)
+    base, _, _, note = _derive_growth_rates(state)
+    # revenue blend = 0.6×12 + 0.4×10 = 11.2 → base = 11.2 × 0.85
+    assert base == pytest.approx(11.2 * 0.85)
+    assert "PAT history unavailable" in note
+
+
+def test_margin_collapse_lowers_dcf_intrinsic():
+    """End-to-end: same revenue growth, collapsing margins → lower intrinsic value."""
+    healthy = _make_state(
+        revenue_cagr_5y=18.0, revenue_cagr_3y=18.0,
+        pat_cagr_5y=18.0, pat_cagr_3y=18.0,
+    )
+    collapsing = _make_state(
+        revenue_cagr_5y=18.0, revenue_cagr_3y=18.0,
+        pat_cagr_5y=2.0, pat_cagr_3y=2.0,
+    )
+    iv_healthy = _run_deterministic_dcf(healthy, 13.0, 6.0)[3]
+    iv_collapsing = _run_deterministic_dcf(collapsing, 13.0, 6.0)[3]
+    assert iv_healthy is not None and iv_collapsing is not None
+    assert iv_collapsing < iv_healthy
