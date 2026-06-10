@@ -286,6 +286,7 @@ class PeerData(BaseModel):
     roe_5y_avg: float | None = None
     roce_5y_avg: float | None = None
     debt_to_equity: float | None = None
+    pe_current: float | None = None
     forward_pe: float | None = None
     ev_ebitda_forward: float | None = None
     promoter_holding: float | None = None

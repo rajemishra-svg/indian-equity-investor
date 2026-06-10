@@ -121,9 +121,9 @@ CLI (src/main.py)
 | 2 — Moat | Agentic loop (≤6 iterations, web tools) | `model_heavy` | Qualitative research + concall analysis |
 | 3 — Financials | Deterministic (no LLM) | — | Pure arithmetic |
 | 4 — Tailwinds | Single Haiku call (no tools) | `model_light` | Context from Step 2 state is sufficient |
-| 5 — Valuation | Deterministic + 1 Haiku DCF call | `model_light` | Structured JSON, no research needed |
+| 5 — Valuation | Deterministic (no LLM, Python DCF) | — | Pure arithmetic — auditable, zero API cost |
 | 6 — Technical | Deterministic (no LLM) | — | Arithmetic from quote |
-| 7 — Peers | Agentic loop (≤8 iterations, web tools) | `model_heavy` | Requires live peer data fetches |
+| 7 — Peers | 1 Haiku call (peer identification) + deterministic comparison | `model_light` | Only peer *naming* needs an LLM; metric fetches (Screener + yfinance) and quality/valuation ranking + dominance test run in Python |
 | 8 — Premortem | Single Haiku call (no tools) | `model_light` | All risk context already in state |
 | 9 — Output | 1 Haiku call (thesis) + deterministic format | `model_light` | Narrative from existing state |
 
@@ -136,7 +136,9 @@ All steps inherit from `BaseStep`. Two helpers:
 - `_call_claude(system, messages, model, max_tokens)` — single-turn call with ephemeral prompt caching on the system prompt.
 - `_agentic_loop(system, initial_message, tools, model, max_tokens, max_iterations)` — iterates until `stop_reason == "end_turn"` or tool calls exhaust `max_iterations`. Dispatches tools via `execute_tool()` in `src/agent/tools.py`.
 
-Every `_call_claude` / `_agentic_loop` call logs `input_tokens`, `output_tokens`, `elapsed_seconds`.
+**Message-prefix caching**: `_agentic_loop` keeps one moving `cache_control: ephemeral` breakpoint on the newest user content block (initial message, then each iteration's last tool_result). Each iteration therefore reads the entire prior conversation from cache instead of re-billing it at full input price — this is the dominant cost saving on the Step 2 Sonnet loop. The system prompt carries a second, static breakpoint (which also caches the tool definitions ahead of it).
+
+Every `_call_claude` / `_agentic_loop` call logs `input_tokens`, `output_tokens`, `elapsed_seconds`; agentic iterations additionally log `cache_read_tokens` / `cache_creation_tokens`.
 
 Both `_call_claude` and `_agentic_loop` wrap `claude.messages.create` in a tenacity retry decorator (3 attempts, exponential 5–60s backoff) covering `RateLimitError` and transient `APIStatusError`.
 
@@ -149,14 +151,16 @@ Three steps terminate the pipeline on failure:
 - **Step 1**: Governance score < 9/15 OR any immediate trigger (pledging > 10%, SEBI fraud, RPT > 20%, going concern, mid-year auditor resign)
 - **Step 3**: Any hard financial trigger (CFO/NP < 50%, D/E > 3, ICR < 3) OR score < 5/7
 
-On termination: `state.terminated_at_step` and `state.termination_reason` are set, `state.recommendation_type = "REJECT"`. Step 9 always runs to generate the REJECTION_LOG output. Step 5 failure sets `recommendation_type = "WATCHLIST"` (not a hard gate — pipeline continues).
+On termination: `state.terminated_at_step` and `state.termination_reason` are set, `state.recommendation_type = "REJECT"`. Step 9 always runs to generate the REJECTION_LOG output.
+
+Step 5 failure is **not** a termination: it sets `recommendation_type = "WATCHLIST"` + `watchlist_tier` + `termination_reason` but leaves `terminated_at_step` unset, so Steps 6–8 still run. A WATCHLIST entry therefore carries technical entry levels, a peer comparison (which may upgrade the outcome to PEER_SWITCH), and a premortem — `watchlist-alerts` can act on it later without re-running the pipeline. Step 7 peer dominance *does* terminate (`terminated_at_step = 7`, `recommendation_type = "PEER_SWITCH"`).
 
 ### Edge Case Handlers (baked into pipeline logic)
 
 | Code | Condition | Enforcement |
 |------|-----------|-------------|
 | EC-01 | Pre-profit (EBITDA margin < 0 or both PAT CAGRs < –20%) | Step 5 skips DCF/PE/PEG/EV-EBITDA; Step 9 caps suggested allocation ≤ 4% |
-| EC-02 | Cyclical sector (`commodities_cyclical`) | Step 5 DCF uses `ebitda_margin_5y_avg` instead of latest year |
+| EC-02 | Cyclical sector (`commodities_cyclical`) | Step 5 DCF normalizes base FCF to `trailing_revenue_cr × ebitda_margin_5y_avg × 0.55` (mid-cycle) instead of latest-year FCF |
 | EC-04 | Conglomerate detected by `is_conglomerate()` | Pipeline sets `state.is_conglomerate`; Step 5 adds SOTP advisory flag |
 | EC-06 | MNC subsidiary (`GovernanceData.is_mnc = True`) | Step 0 waives the promoter holding ≥ 40% check |
 | EC-11 | Low liquidity (`avg_daily_value_cr < ₹5 Cr`) | Step 0 adds a non-scoring `[EC-11: LOW LIQUIDITY]` flag |
@@ -173,7 +177,7 @@ On termination: `state.terminated_at_step` and `state.termination_reason` are se
 | ER-03 | Trendlyne valuation failed (before YFinance fallback) |
 | ER-04 | All shareholding sources failed (NSE + BSE + Screener) |
 | ER-05 | ≥ 5 accumulated errors → BUY auto-downgraded to WATCHLIST |
-| ER-06 | Agentic loop hit max iterations (moat or peer research incomplete) |
+| ER-06 | Agentic loop hit max iterations (moat research incomplete — Step 2 only) |
 | ER-07 | ≥ 3 of 4 raw data snapshots failed to save to SQLite |
 | ER-08 | Both NSE and YFinance Nifty50 failed → mode defaults to NORMAL |
 
@@ -209,7 +213,7 @@ Also exposes `is_conglomerate(company_name, ticker)` — checks against `_CONGLO
 - **Step 0**: all 9 pre-screen metrics use `profile.*` thresholds; `None` = auto-pass; EC-06 waives promoter holding for MNCs; EC-11 flags low liquidity
 - **Step 1**: `profile.capital_allocation_note` injected into capital allocation prompt; P3-2 insider activity signal enriched and flagged
 - **Step 3**: all 7 hurdles and 3 hard triggers use `profile.*` thresholds; P1-1 bank KPIs, P1-3 WC deterioration, P1-4 earnings quality, P2-3 trend direction all evaluated as soft flags
-- **Step 5**: `wacc += profile.wacc_adjustment`; EV/EBITDA skipped when `not profile.ev_ebitda_applicable`; EC-01 skips earnings-based methods; EC-02 normalises EBITDA; EC-04 adds SOTP note; sector-aware exit multipliers are stored in SectorProfile and used by Step 9
+- **Step 5**: `wacc += profile.wacc_adjustment`; EV/EBITDA skipped when `not profile.ev_ebitda_applicable`; EC-01 skips earnings-based methods; EC-02 normalizes base FCF from 5Y avg EBITDA margin; EC-04 adds SOTP note; sector-aware exit multipliers are stored in SectorProfile and used by Step 9
 - **Steps 8 and 9**: use `moat.moat_narrative_short` (first sentence of moat narrative, max 120 chars) to keep downstream prompts compact and within token budget.
 
 ### Enrichment Features (P1–P3)
@@ -233,7 +237,7 @@ Also exposes `is_conglomerate(company_name, ticker)` — checks against `_CONGLO
 Five methods, each scored as in-buy-zone or not:
 1. **PE percentile** (10Y historical from yfinance): EXCELLENT (<30th), FAIR (30–60th)
 2. **PEG ratio**: EXCELLENT (<1.0), FAIR (1.0–1.3)
-3. **DCF**: weighted average of base/bull/bear scenarios; MoS must meet `state.required_mos_pct`; EC-02 uses 5Y avg EBITDA margin for cyclical sectors
+3. **DCF**: weighted average of base/bull/bear scenarios; MoS must meet `state.required_mos_pct`; EC-02 normalizes base FCF (trailing revenue × 5Y avg EBITDA margin × 0.55) for cyclical sectors
 4. **FCF yield**: FAIR (3–5%), ATTRACTIVE (>5%)
 5. **EV/EBITDA**: EXCELLENT (<12x), FAIR (12–20x); skipped for `financial_services`
 
@@ -300,7 +304,7 @@ Every completed analysis is persisted to `investor.db`. Writes are always wrappe
 ```python
 max_tokens       = 4096   # agentic loops
 max_tokens_mini  = 256    # tiny JSON (capital allocation score)
-max_tokens_short = 600    # DCF / tailwind / premortem JSON
+max_tokens_short = 600    # peer identification / tailwind / premortem JSON
 max_tokens_thesis= 512    # narrative thesis
 
 # WACC (used by Step 5 — overrideable via .env)

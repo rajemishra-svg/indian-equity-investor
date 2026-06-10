@@ -1,22 +1,17 @@
 """Step 9 — Final Output Generation (format report from templates)."""
 from __future__ import annotations
 
-import json
-from datetime import date, datetime, timezone
-from pathlib import Path
-from typing import Optional
+import math
+from datetime import UTC, date, datetime
 
 import anthropic
 
 from src.agent.steps.base import BaseStep
 from src.config import settings
-import math
-
 from src.models import (
     AnalysisState,
     ConvictionLevel,
     ExitStrategy,
-    GateResult,
     TrancheEntry,
     WatchlistTier,
 )
@@ -292,7 +287,7 @@ class Step9Output(BaseStep):
     def _format_report(self, state: AnalysisState) -> str:  # noqa: C901
         """Format the full report using the BUY_RECOMMENDATION or appropriate template."""
         rtype = state.recommendation_type or "REJECT"
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         date_str = now.strftime("%Y-%m-%d %H:%M IST")
 
         q = state.quote
@@ -430,7 +425,7 @@ class Step9Output(BaseStep):
                     lines.append(
                         f"  {p.ticker:12s}: ROE {p.roe_5y_avg or '[N/A]'}% | "
                         f"ROCE {p.roce_5y_avg or '[N/A]'}% | "
-                        f"P/E {p.forward_pe or '[N/A]'}x"
+                        f"P/E {p.pe_current or p.forward_pe or '[N/A]'}x"
                     )
 
             if state.premortem:

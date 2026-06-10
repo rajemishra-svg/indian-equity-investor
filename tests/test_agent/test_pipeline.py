@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import anthropic
 import pytest
@@ -10,10 +10,6 @@ import pytest
 from src.agent.mode_detector import reset_mode_cache
 from src.agent.pipeline import InvestmentPipeline
 from src.models import (
-    AnalysisState,
-    ConvictionLevel,
-    GateResult,
-    GovernanceData,
     MarketMode,
 )
 from tests.fixtures.sample_data import (
@@ -21,9 +17,7 @@ from tests.fixtures.sample_data import (
     SAMPLE_FINANCIALS,
     SAMPLE_GOVERNANCE,
     SAMPLE_QUOTE,
-    SAMPLE_TECHNICAL,
     SAMPLE_VALUATION,
-    WEAK_FINANCIALS,
 )
 
 
@@ -74,41 +68,13 @@ def _make_tailwind_response():
     return _make_claude_text_response(json.dumps(data))
 
 
-def _make_dcf_response():
+def _make_peer_identify_response():
+    """Step 7 identification call — Claude only names peers; metrics come from clients."""
     data = {
-        "base_intrinsic": 3200.0,
-        "bull_intrinsic": 3800.0,
-        "bear_intrinsic": 2600.0,
-        "weighted_intrinsic": 3200.0,
-        "assumptions": "10Y DCF at 13% WACC. Terminal growth 6%.",
-    }
-    return _make_claude_text_response(json.dumps(data))
-
-
-def _make_peer_response():
-    data = {
-        "gate": "pass_green",
-        "target_quality_rank": 1,
-        "target_valuation_rank": 2,
-        "peer_count": 3,
-        "dominant_peer": None,
         "peers": [
-            {
-                "ticker": "ONGC",
-                "name": "Oil and Natural Gas Corporation",
-                "revenue_cagr_5y": 8.0,
-                "pat_cagr_5y": 10.0,
-                "ebitda_margin": 30.0,
-                "roe_5y_avg": 12.0,
-                "roce_5y_avg": 14.0,
-                "debt_to_equity": 0.2,
-                "forward_pe": 8.0,
-                "ev_ebitda_forward": 5.0,
-                "promoter_holding": 68.0,
-                "pledging_pct": 0.0,
-            }
-        ],
-        "data_flags": [],
+            {"ticker": "ONGC", "name": "Oil and Natural Gas Corporation"},
+            {"ticker": "IOC", "name": "Indian Oil Corporation"},
+        ]
     }
     return _make_claude_text_response(json.dumps(data))
 
@@ -140,13 +106,12 @@ def mock_pipeline_env():
     """Patch all external dependencies for a full pipeline run."""
     # All Claude responses in order of calls
     claude_responses = [
-        _make_capital_alloc_response(),  # Step 1 capital allocation
-        _make_moat_response(),           # Step 2 moat
-        _make_tailwind_response(),       # Step 4 tailwinds
-        _make_dcf_response(),            # Step 5 DCF
-        _make_peer_response(),           # Step 7 peers
-        _make_premortem_response(),      # Step 8 premortem
-        _make_thesis_response(),         # Step 9 thesis
+        _make_capital_alloc_response(),   # Step 1 capital allocation
+        _make_moat_response(),            # Step 2 moat
+        _make_tailwind_response(),        # Step 4 tailwinds
+        _make_peer_identify_response(),   # Step 7 peer identification (Step 5 DCF is deterministic)
+        _make_premortem_response(),       # Step 8 premortem
+        _make_thesis_response(),          # Step 9 thesis
     ]
 
     mock_claude = AsyncMock(spec=anthropic.AsyncAnthropic)
@@ -298,8 +263,7 @@ async def test_mode_detection_sets_market_mode(mock_pipeline_env):
             _make_capital_alloc_response(),
             _make_moat_response(),
             _make_tailwind_response(),
-            _make_dcf_response(),
-            _make_peer_response(),
+            _make_peer_identify_response(),
             _make_premortem_response(),
             _make_thesis_response(),
         ]

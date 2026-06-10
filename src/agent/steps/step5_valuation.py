@@ -10,16 +10,12 @@ At required_mos_pct=25%: CMP must be ≤ 75% of intrinsic value to pass.
 """
 from __future__ import annotations
 
-import math
-from typing import Optional
-
 import anthropic
 
 from src.agent.steps.base import BaseStep
 from src.config import settings
 from src.models import AnalysisState, GateResult, ValuationResult, WatchlistTier
 from src.sector.profiles import get_sector_profile
-
 
 # ---------------------------------------------------------------------------
 # Verdict bands
@@ -57,8 +53,12 @@ _PS_BANDS = [
 
 BUY_ZONE_VERDICTS = {"EXCELLENT", "FAIR", "ATTRACTIVE"}
 
+# Conservative EBITDA → FCF conversion used when FCF must be estimated:
+# −20% taxes, −10% maintenance capex, −5% working capital, +10% D&A add-back.
+_EBITDA_TO_FCF_CONVERSION = 0.55
 
-def _band_verdict(value: Optional[float], bands: list) -> str:
+
+def _band_verdict(value: float | None, bands: list) -> str:
     if value is None:
         return "UNKNOWN"
     for threshold, label in bands:
@@ -67,7 +67,7 @@ def _band_verdict(value: Optional[float], bands: list) -> str:
     return "AVOID"
 
 
-def _fcf_yield_verdict(fcf_yield: Optional[float]) -> str:
+def _fcf_yield_verdict(fcf_yield: float | None) -> str:
     if fcf_yield is None:
         return "UNKNOWN"
     if fcf_yield < 3.0:
@@ -77,7 +77,7 @@ def _fcf_yield_verdict(fcf_yield: Optional[float]) -> str:
     return "ATTRACTIVE"
 
 
-def _compute_mos(cmp: float, intrinsic: Optional[float]) -> Optional[float]:
+def _compute_mos(cmp: float, intrinsic: float | None) -> float | None:
     """Graham MoS = (Intrinsic − CMP) / Intrinsic × 100."""
     if intrinsic is None or intrinsic <= 0:
         return None
@@ -95,7 +95,7 @@ def _dcf_single_scenario(
     terminal_growth_pct: float,
     net_debt_cr: float,
     shares_outstanding_cr: float,
-) -> Optional[float]:
+) -> float | None:
     """Two-stage DCF for one growth scenario; returns per-share intrinsic value.
 
     Stage 1 (years 1-5): FCF grows at full scenario growth rate.
@@ -141,7 +141,7 @@ def _dcf_single_scenario(
     return round(equity_value_cr / shares_outstanding_cr, 2)
 
 
-def _estimate_base_fcf(state: AnalysisState) -> Optional[float]:
+def _estimate_base_fcf(state: AnalysisState) -> float | None:
     """Estimate the base trailing FCF in crores.
 
     Priority order:
@@ -167,13 +167,31 @@ def _estimate_base_fcf(state: AnalysisState) -> Optional[float]:
         net_debt = (v.net_debt_cr or 0)
         ev = q.market_cap_cr + net_debt
         ebitda_cr = ev / v.ev_ebitda_current
-        # Conservative FCF conversion: EBITDA × 0.55
-        # (-20% taxes, -10% maintenance capex, -5% WC, +10% D&A non-cash add-back)
-        fcf_est = ebitda_cr * 0.55
+        fcf_est = ebitda_cr * _EBITDA_TO_FCF_CONVERSION
         if fcf_est > 0:
             return round(fcf_est, 2)
 
     return None
+
+
+def _normalized_base_fcf(state: AnalysisState) -> float | None:
+    """EC-02: mid-cycle base FCF for cyclical sectors.
+
+    Latest-year FCF overstates intrinsic value at cycle peaks (and understates it
+    at troughs), so cyclicals are valued on normalized profitability instead:
+    trailing revenue × 5Y average EBITDA margin × the standard FCF conversion.
+    Returns None when the required inputs are missing — caller falls back to the
+    standard latest-FCF estimate and flags the gap.
+    """
+    f = state.financials
+    if f is None or f.trailing_revenue_cr is None or f.ebitda_margin_5y_avg is None:
+        return None
+    if f.trailing_revenue_cr <= 0 or f.ebitda_margin_5y_avg <= 0:
+        return None
+    return round(
+        f.trailing_revenue_cr * (f.ebitda_margin_5y_avg / 100) * _EBITDA_TO_FCF_CONVERSION,
+        2,
+    )
 
 
 def _derive_growth_rates(state: AnalysisState) -> tuple[float, float, float]:
@@ -205,7 +223,7 @@ def _derive_growth_rates(state: AnalysisState) -> tuple[float, float, float]:
     return base, bull, bear
 
 
-def _get_shares_outstanding(state: AnalysisState) -> Optional[float]:
+def _get_shares_outstanding(state: AnalysisState) -> float | None:
     """Return shares outstanding in crores; falls back to market_cap / CMP derivation."""
     v = state.valuation_data
     q = state.quote
@@ -218,16 +236,20 @@ def _get_shares_outstanding(state: AnalysisState) -> Optional[float]:
 
 def _run_deterministic_dcf(
     state: AnalysisState,
-    ebitda_margin_for_dcf: Optional[float],
     wacc_pct: float,
     terminal_growth_pct: float,
-) -> tuple[Optional[float], Optional[float], Optional[float], Optional[float], str]:
+    normalized_fcf_cr: float | None = None,
+) -> tuple[float | None, float | None, float | None, float | None, str]:
     """Compute 3-scenario DCF intrinsics and return (base, bull, bear, weighted, assumptions).
+
+    Args:
+        normalized_fcf_cr: When set (EC-02 cyclical sectors), used as the base FCF
+            instead of the latest-year estimate.
 
     Returns (None, None, None, None, reason) when inputs are insufficient.
     Weighted average: 50% base, 25% bull, 25% bear.
     """
-    base_fcf = _estimate_base_fcf(state)
+    base_fcf = normalized_fcf_cr if normalized_fcf_cr is not None else _estimate_base_fcf(state)
     if base_fcf is None:
         return None, None, None, None, "Insufficient FCF/earnings data for DCF"
 
@@ -255,8 +277,9 @@ def _run_deterministic_dcf(
             total_w += w
     iv_weighted = round(weighted / total_w, 2) if total_w > 0 else None
 
+    fcf_label = "Normalized base FCF (EC-02)" if normalized_fcf_cr is not None else "Base FCF"
     assumptions = (
-        f"Base FCF ₹{base_fcf:.0f}Cr; growth {growth_base:.1f}%/{growth_bull:.1f}%/{growth_bear:.1f}% "
+        f"{fcf_label} ₹{base_fcf:.0f}Cr; growth {growth_base:.1f}%/{growth_bull:.1f}%/{growth_bear:.1f}% "
         f"(base/bull/bear); WACC {wacc_pct:.1f}%; terminal growth {terminal_growth_pct:.1f}%"
     )
     return iv_base, iv_bull, iv_bear, iv_weighted, assumptions
@@ -366,10 +389,10 @@ class Step5Valuation(BaseStep):
             methods_in_buy_zone += 1
 
         # --- Method 3: Deterministic DCF (skipped for pre-profit) ---
-        dcf_base: Optional[float] = None
-        dcf_bull: Optional[float] = None
-        dcf_bear: Optional[float] = None
-        dcf_weighted: Optional[float] = None
+        dcf_base: float | None = None
+        dcf_bull: float | None = None
+        dcf_bear: float | None = None
+        dcf_weighted: float | None = None
         dcf_assumptions: str = ""
         dcf_data_sufficient = f is not None and q is not None
 
@@ -378,15 +401,22 @@ class Step5Valuation(BaseStep):
         elif dcf_data_sufficient:
             profile = get_sector_profile(state.sector_name)
 
-            # EC-02: cyclical sectors use 5Y average EBITDA margin
-            if profile.use_normalized_ebitda and f.ebitda_margin_5y_avg is not None:
-                ebitda_for_dcf = f.ebitda_margin_5y_avg
-                data_flags.append(
-                    f"[EC-02 CYCLICAL: using 5Y avg OPM {f.ebitda_margin_5y_avg:.1f}% "
-                    f"instead of latest {f.ebitda_margin_latest or '[N/A]'}% for DCF]"
-                )
-            else:
-                ebitda_for_dcf = f.ebitda_margin_latest
+            # EC-02: cyclical sectors are valued on mid-cycle (5Y average)
+            # profitability — latest-year FCF overvalues at cycle peaks.
+            normalized_fcf: float | None = None
+            if profile.use_normalized_ebitda:
+                normalized_fcf = _normalized_base_fcf(state)
+                if normalized_fcf is not None:
+                    data_flags.append(
+                        f"[EC-02 CYCLICAL: DCF base FCF normalized to ₹{normalized_fcf:.0f} Cr "
+                        f"(trailing revenue × 5Y avg OPM {f.ebitda_margin_5y_avg:.1f}% × "
+                        f"{_EBITDA_TO_FCF_CONVERSION:.2f} FCF conversion) instead of latest-year FCF]"
+                    )
+                else:
+                    data_flags.append(
+                        "[EC-02 CYCLICAL: margin normalization skipped — trailing revenue or "
+                        "5Y avg OPM unavailable; DCF uses latest FCF estimate]"
+                    )
 
             cap_wacc = {
                 "large_cap": settings.wacc_large_cap,
@@ -397,14 +427,14 @@ class Step5Valuation(BaseStep):
             terminal_growth = settings.wacc_terminal_growth
 
             dcf_base, dcf_bull, dcf_bear, dcf_weighted, dcf_assumptions = _run_deterministic_dcf(
-                state, ebitda_for_dcf, wacc, terminal_growth
+                state, wacc, terminal_growth, normalized_fcf_cr=normalized_fcf
             )
             if dcf_weighted is None:
                 data_flags.append(f"[DATA UNVERIFIED: dcf_intrinsic — {dcf_assumptions}]")
 
         dcf_failed = dcf_weighted is None and not is_pre_profit and dcf_data_sufficient
 
-        mos: Optional[float] = None
+        mos: float | None = None
         if dcf_weighted is not None and cmp > 0:
             mos = _compute_mos(cmp, dcf_weighted)
             if mos is not None and mos >= state.required_mos_pct:
@@ -528,7 +558,10 @@ class Step5Valuation(BaseStep):
                 if mos is not None
                 else "Valuation not in buy zone: insufficient data"
             )
-            state.terminated_at_step = self.step_number
+            # NOT a termination: terminated_at_step stays None so Steps 6–8 still run.
+            # A WATCHLIST entry needs technical entry levels, peer comparison (which
+            # may upgrade to PEER_SWITCH) and a premortem — watchlist-alerts acts on
+            # this analysis later without re-running the pipeline.
             self.log.info(
                 "pipeline_watchlist",
                 step=self.step_number,

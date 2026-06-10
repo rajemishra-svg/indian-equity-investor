@@ -17,16 +17,16 @@ class Settings(BaseSettings):
     anthropic_api_key: SecretStr = SecretStr("dummy-key-for-tests")
 
     # --- Model routing ---
-    # Sonnet for deep qualitative + agentic steps (2, 7); Haiku for structured/simple steps.
+    # Sonnet for the deep qualitative agentic step (2); Haiku for structured/simple steps.
     # Haiku is ~15x cheaper per token than Sonnet; use it wherever reasoning depth is low.
-    model_heavy: str = "claude-sonnet-4-6"           # Steps 2, 7 (agentic + complex reasoning)
-    model_light: str = "claude-haiku-4-5-20251001"   # Steps 1, 4, 5, 8, 9 (structured JSON)
+    model_heavy: str = "claude-sonnet-4-6"           # Step 2 (agentic moat research)
+    model_light: str = "claude-haiku-4-5-20251001"   # Steps 1, 4, 7, 8, 9 (structured JSON)
 
     # --- Per-step max_tokens ---
     # Tight limits prevent runaway output and reduce output-token billing.
     max_tokens: int = 4096               # default / agentic loop iterations
     max_tokens_mini: int = 256           # tiny JSON (capital allocation score: {"score":3})
-    max_tokens_short: int = 600          # medium JSON (DCF, tailwind, premortem)
+    max_tokens_short: int = 600          # medium JSON (peer identification, tailwind, premortem)
     max_tokens_thesis: int = 512         # narrative output (investment thesis)
 
     nse_base_url: str = "https://www.nseindia.com"

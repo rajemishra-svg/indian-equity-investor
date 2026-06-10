@@ -34,3 +34,9 @@ logs/
 
 # Personal notes not for version control
 *.private.md
+
+# Local SQLite databases — analyses + personal portfolio data, never commit
+investor.db
+*.db
+*.db-wal
+*.db-shm

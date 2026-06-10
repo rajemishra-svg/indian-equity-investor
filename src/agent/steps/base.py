@@ -5,7 +5,7 @@ import json
 import re
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any
 
 import anthropic
 from tenacity import (
@@ -19,6 +19,19 @@ from src.agent.tools import TOOLS, execute_tool
 from src.config import settings
 from src.logging_config import get_logger
 from src.models import AnalysisState
+
+
+def _cache_usage(usage: Any) -> tuple[int, int]:
+    """Extract (cache_read, cache_creation) input-token counts from a usage block.
+
+    Defensive: older SDK versions / mocked responses may not carry these fields.
+    """
+    read = getattr(usage, "cache_read_input_tokens", 0)
+    written = getattr(usage, "cache_creation_input_tokens", 0)
+    return (
+        read if isinstance(read, int) else 0,
+        written if isinstance(written, int) else 0,
+    )
 
 
 def _is_retryable_anthropic_error(exc: BaseException) -> bool:
@@ -73,9 +86,9 @@ class BaseStep(ABC):
         self,
         system: str,
         messages: list[dict],
-        tools: Optional[list[dict]] = None,
-        model: Optional[str] = None,
-        max_tokens: Optional[int] = None,
+        tools: list[dict] | None = None,
+        model: str | None = None,
+        max_tokens: int | None = None,
     ) -> str:
         """Call Claude with an optional tool list. Returns first text block.
 
@@ -135,9 +148,9 @@ class BaseStep(ABC):
         self,
         system: str,
         initial_message: str,
-        tools: Optional[list[dict]] = None,
-        model: Optional[str] = None,
-        max_tokens: Optional[int] = None,
+        tools: list[dict] | None = None,
+        model: str | None = None,
+        max_tokens: int | None = None,
         max_iterations: int = 12,
     ) -> str:
         """Run an agentic Claude loop that uses tools until stop_reason is end_turn.
@@ -156,9 +169,27 @@ class BaseStep(ABC):
         _model = model if model is not None else settings.model_heavy
         _max_tokens = max_tokens if max_tokens is not None else settings.max_tokens
         active_tools = tools if tools is not None else TOOLS
-        messages: list[dict] = [{"role": "user", "content": initial_message}]
+        # Message-prefix caching: each iteration re-sends the full (growing) history,
+        # so without a breakpoint inside `messages` every iteration is billed at full
+        # input price.  A single moving breakpoint on the newest user block lets each
+        # iteration read the entire prior conversation from cache (the API looks back
+        # up to ~20 blocks before a breakpoint for the longest cached prefix).
+        messages: list[dict] = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": initial_message,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+            }
+        ]
+        cached_block: dict = messages[0]["content"][0]
         total_input_tokens = 0
         total_output_tokens = 0
+        total_cache_read_tokens = 0
         iteration = 0
         self._last_loop_hit_max = False
 
@@ -192,6 +223,8 @@ class BaseStep(ABC):
             elapsed = time.monotonic() - start
             total_input_tokens += response.usage.input_tokens
             total_output_tokens += response.usage.output_tokens
+            cache_read, cache_written = _cache_usage(response.usage)
+            total_cache_read_tokens += cache_read
 
             self.log.info(
                 "claude_agentic_step",
@@ -202,6 +235,8 @@ class BaseStep(ABC):
                 stop_reason=response.stop_reason,
                 input_tokens=response.usage.input_tokens,
                 output_tokens=response.usage.output_tokens,
+                cache_read_tokens=cache_read,
+                cache_creation_tokens=cache_written,
                 elapsed_seconds=round(elapsed, 2),
             )
 
@@ -228,6 +263,14 @@ class BaseStep(ABC):
                         "content": result_content,
                     }
                 )
+
+            # Move the cache breakpoint to the newest tool result so the next
+            # request reads the whole conversation prefix from cache instead of
+            # re-billing it (max 4 breakpoints per request — keep exactly one
+            # in messages, plus the static one on the system prompt).
+            cached_block.pop("cache_control", None)
+            tool_results[-1]["cache_control"] = {"type": "ephemeral"}
+            cached_block = tool_results[-1]
 
             # Append assistant turn and tool results
             messages.append({"role": "assistant", "content": response.content})
@@ -270,6 +313,8 @@ class BaseStep(ABC):
                 elapsed = time.monotonic() - start
                 total_input_tokens += response.usage.input_tokens
                 total_output_tokens += response.usage.output_tokens
+                cache_read, cache_written = _cache_usage(response.usage)
+                total_cache_read_tokens += cache_read
                 self.log.info(
                     "claude_agentic_step",
                     step=self.step_number,
@@ -279,6 +324,8 @@ class BaseStep(ABC):
                     stop_reason=response.stop_reason,
                     input_tokens=response.usage.input_tokens,
                     output_tokens=response.usage.output_tokens,
+                    cache_read_tokens=cache_read,
+                    cache_creation_tokens=cache_written,
                     elapsed_seconds=round(elapsed, 2),
                 )
                 break
@@ -290,6 +337,7 @@ class BaseStep(ABC):
             model=_model,
             input_tokens=total_input_tokens,
             output_tokens=total_output_tokens,
+            cache_read_tokens=total_cache_read_tokens,
             iterations=iteration,
         )
 
