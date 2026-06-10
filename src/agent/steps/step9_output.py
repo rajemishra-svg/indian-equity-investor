@@ -227,9 +227,9 @@ class Step9Output(BaseStep):
         }.get(state.cap_size, settings.stop_loss_mid_cap)
         stop_loss = round(cmp * sl_multiplier, 2) if cmp else None
 
-        # LTCG eligibility = 1 year from today
-        today = date.today()
-        ltcg_date = date(today.year + 1, today.month, today.day)
+        # LTCG eligibility = 1 year from today (leap-safe: Feb 29 → Feb 28)
+        from src.portfolio.tracker import add_one_year
+        ltcg_date = add_one_year(date.today())
 
         # Fundamental trigger from premortem
         fundamental_trigger = (
@@ -266,9 +266,9 @@ class Step9Output(BaseStep):
         if state.valuation:
             v = state.valuation
             context_parts.append(
-                f"Valuation: {v.methods_in_buy_zone}/4 methods in buy zone, "
+                f"Valuation: {v.methods_in_buy_zone}/{v.max_methods} methods in buy zone, "
                 f"MoS {v.margin_of_safety_pct:.1f}%" if v.margin_of_safety_pct else
-                f"Valuation: {v.methods_in_buy_zone}/4 methods in buy zone"
+                f"Valuation: {v.methods_in_buy_zone}/{v.max_methods} methods in buy zone"
             )
 
         message = "\n".join(context_parts) + "\n\nWrite the investment thesis."

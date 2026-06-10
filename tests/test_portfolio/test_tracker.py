@@ -155,3 +155,123 @@ async def test_add_tax_entry(tracker):
     assert row["purchase_date"] == "2026-05-15"
     assert row["ltcg_date"] == "2027-05-15"
     assert row["avg_cost"] == pytest.approx(2850.0)
+
+
+# ---------------------------------------------------------------------------
+# record_sell — FIFO lot consumption
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sell_consumes_oldest_lot_first(tracker):
+    await tracker.add_holding("RELIANCE", 2000.0, 10, date(2024, 1, 10))
+    await tracker.add_holding("RELIANCE", 2500.0, 10, date(2025, 6, 10))
+
+    result = await tracker.record_sell(
+        "RELIANCE", price=3000.0, quantity=10, txn_date=date(2026, 6, 1)
+    )
+
+    assert len(result["lots"]) == 1
+    lot = result["lots"][0]
+    assert lot["purchase_date"] == "2024-01-10"  # oldest lot goes first
+    assert lot["lot_exhausted"] is True
+    assert result["remaining_qty"] == 10
+
+    holdings = await tracker.get_holdings()
+    assert len(holdings) == 1
+    assert holdings[0]["avg_cost"] == pytest.approx(2500.0)
+
+
+@pytest.mark.asyncio
+async def test_sell_spans_lots_and_splits_ltcg_stcg(tracker):
+    await tracker.add_holding("INFY", 1500.0, 10, date(2024, 1, 1))   # > 1y → LTCG
+    await tracker.add_holding("INFY", 1800.0, 10, date(2026, 3, 1))   # ~3m → STCG
+
+    result = await tracker.record_sell(
+        "INFY", price=2000.0, quantity=15, txn_date=date(2026, 6, 1)
+    )
+
+    first, second = result["lots"]
+    assert first["quantity_consumed"] == 10 and first["lot_exhausted"]
+    assert second["quantity_consumed"] == 5 and not second["lot_exhausted"]
+    assert first["is_ltcg"] is True
+    assert second["is_ltcg"] is False
+    assert result["ltcg_gain"] == pytest.approx((2000 - 1500) * 10)
+    assert result["stcg_gain"] == pytest.approx((2000 - 1800) * 5)
+    assert result["realized_gain"] == pytest.approx(6000.0)
+    assert result["remaining_qty"] == 5
+
+    holdings = await tracker.get_holdings()
+    assert len(holdings) == 1
+    assert holdings[0]["quantity"] == 5
+
+
+@pytest.mark.asyncio
+async def test_oversell_raises_and_records_nothing(tracker):
+    await tracker.add_holding("TCS", 3500.0, 5, date(2026, 1, 1))
+
+    with pytest.raises(ValueError, match="only 5 held"):
+        await tracker.record_sell("TCS", price=4000.0, quantity=6, txn_date=date(2026, 6, 1))
+
+    holdings = await tracker.get_holdings()
+    assert holdings[0]["quantity"] == 5  # untouched
+    assert await tracker.get_transactions() == []  # no SELL logged
+
+
+@pytest.mark.asyncio
+async def test_sell_logs_transaction_after_consuming_lots(tracker):
+    await tracker.add_holding("HDFCBANK", 1600.0, 10, date(2026, 1, 1))
+
+    await tracker.record_sell("HDFCBANK", price=1700.0, quantity=4, txn_date=date(2026, 6, 1))
+
+    txns = await tracker.get_transactions()
+    assert len(txns) == 1
+    assert txns[0]["action"] == "SELL"
+    assert txns[0]["quantity"] == 4
+
+
+@pytest.mark.asyncio
+async def test_exhausted_lot_drops_its_tax_entry(tracker):
+    import aiosqlite
+
+    await tracker.add_holding("WIPRO", 400.0, 10, date(2025, 1, 1))
+    await tracker.add_tax_entry("WIPRO", date(2025, 1, 1), date(2026, 1, 1), 400.0)
+    await tracker.add_holding("WIPRO", 450.0, 10, date(2025, 7, 1))
+    await tracker.add_tax_entry("WIPRO", date(2025, 7, 1), date(2026, 7, 1), 450.0)
+
+    await tracker.record_sell("WIPRO", price=500.0, quantity=10, txn_date=date(2026, 6, 1))
+
+    async with aiosqlite.connect(tracker.db_path) as db:
+        async with db.execute(
+            "SELECT purchase_date FROM portfolio_tax WHERE user_id=? AND ticker=?",
+            (tracker.user_id, "WIPRO"),
+        ) as cur:
+            rows = [r[0] for r in await cur.fetchall()]
+    assert rows == ["2025-07-01"]  # exhausted 2025-01-01 lot's entry removed
+
+
+@pytest.mark.asyncio
+async def test_sell_isolated_by_user(tracker, other_tracker):
+    await tracker.add_holding("RELIANCE", 2800.0, 10, date(2026, 1, 1))
+
+    with pytest.raises(ValueError):
+        await other_tracker.record_sell(
+            "RELIANCE", price=2900.0, quantity=5, txn_date=date(2026, 6, 1)
+        )
+
+
+# ---------------------------------------------------------------------------
+# add_one_year — leap-safe LTCG date arithmetic
+# ---------------------------------------------------------------------------
+
+
+def test_add_one_year_regular_date():
+    from src.portfolio.tracker import add_one_year
+
+    assert add_one_year(date(2026, 5, 15)) == date(2027, 5, 15)
+
+
+def test_add_one_year_leap_day():
+    from src.portfolio.tracker import add_one_year
+
+    assert add_one_year(date(2024, 2, 29)) == date(2025, 2, 28)

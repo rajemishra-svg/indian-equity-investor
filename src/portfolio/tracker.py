@@ -22,12 +22,26 @@ from src.db.repository import (
     add_transaction as _db_add_transaction,
 )
 from src.db.repository import (
+    consume_holdings_fifo as _db_consume_holdings_fifo,
+)
+from src.db.repository import (
     get_holdings as _db_get_holdings,
 )
 from src.db.repository import (
     get_transactions as _db_get_transactions,
 )
 from src.logging_config import get_logger
+
+# Indian LTCG rule: equity gains qualify as long-term after 12 months.
+_LTCG_HOLDING_DAYS = 365
+
+
+def add_one_year(d: date) -> date:
+    """Return the date one calendar year later, leap-safe (Feb 29 → Feb 28)."""
+    try:
+        return d.replace(year=d.year + 1)
+    except ValueError:  # Feb 29 in a leap year
+        return d.replace(year=d.year + 1, day=28)
 
 
 class PortfolioTracker:
@@ -114,6 +128,91 @@ class PortfolioTracker:
     async def get_transactions(self, ticker: str | None = None) -> list[dict]:
         """Return transactions for this user, optionally filtered by ticker."""
         return await _db_get_transactions(self.db_path, self.user_id, ticker)
+
+    # ------------------------------------------------------------------
+    # Sells — FIFO lot consumption with realized P&L
+    # ------------------------------------------------------------------
+
+    async def record_sell(
+        self,
+        ticker: str,
+        price: float,
+        quantity: int,
+        txn_date: date,
+        notes: str = "",
+    ) -> dict:
+        """Sell ``quantity`` shares FIFO: consume lots, log the transaction,
+        and return realized P&L split into LTCG and STCG.
+
+        Lots are consumed oldest-first; exhausted lots disappear from holdings
+        (and their tax-tracker rows are removed), a partially sold lot keeps
+        its remaining quantity.  The SELL transaction is logged only after the
+        lots are successfully consumed.
+
+        Returns::
+
+            {
+              "lots": [{"purchase_date", "avg_cost", "quantity_consumed",
+                        "lot_exhausted", "gain", "is_ltcg"}, ...],
+              "realized_gain": float,   # total, ₹
+              "ltcg_gain": float,       # held ≥ 1 year
+              "stcg_gain": float,       # held < 1 year
+              "remaining_qty": int,     # still held after the sale
+            }
+
+        Raises:
+            ValueError: when fewer than ``quantity`` shares are held —
+                nothing is recorded in that case.
+        """
+        ticker = ticker.upper()
+        consumed = await _db_consume_holdings_fifo(
+            self.db_path, self.user_id, ticker, quantity
+        )
+        await self.add_transaction(
+            ticker=ticker,
+            action="SELL",
+            price=price,
+            quantity=quantity,
+            txn_date=txn_date,
+            notes=notes,
+        )
+
+        lots: list[dict] = []
+        ltcg_gain = 0.0
+        stcg_gain = 0.0
+        for slice_ in consumed:
+            purchase = date.fromisoformat(slice_["purchase_date"])
+            is_ltcg = (txn_date - purchase).days >= _LTCG_HOLDING_DAYS
+            gain = round((price - slice_["avg_cost"]) * slice_["quantity_consumed"], 2)
+            if is_ltcg:
+                ltcg_gain += gain
+            else:
+                stcg_gain += gain
+            lots.append({**slice_, "gain": gain, "is_ltcg": is_ltcg})
+
+        remaining_qty = sum(
+            h["quantity"] for h in await self.get_holdings() if h["ticker"] == ticker
+        )
+
+        result = {
+            "lots": lots,
+            "realized_gain": round(ltcg_gain + stcg_gain, 2),
+            "ltcg_gain": round(ltcg_gain, 2),
+            "stcg_gain": round(stcg_gain, 2),
+            "remaining_qty": remaining_qty,
+        }
+        self.log.info(
+            "sell_recorded",
+            user=self.user_id,
+            ticker=ticker,
+            price=price,
+            quantity=quantity,
+            realized_gain=result["realized_gain"],
+            ltcg_gain=result["ltcg_gain"],
+            stcg_gain=result["stcg_gain"],
+            remaining_qty=remaining_qty,
+        )
+        return result
 
     # ------------------------------------------------------------------
     # Tax tracker

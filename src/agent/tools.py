@@ -1,25 +1,80 @@
 """Claude tool definitions and execution dispatcher."""
 from __future__ import annotations
 
+import asyncio
+import ipaddress
 import json
 import re as _re
+import socket
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
 
 from src.logging_config import get_logger
 
-# Private/internal IP ranges that must not be reachable from the agentic loop.
-# Prevents SSRF attacks where a prompt-injected page instructs Claude to fetch
-# internal network endpoints.
-_BLOCKED_HOST_PATTERN = _re.compile(
-    r"(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.)",
-    _re.IGNORECASE,
-)
+# Maximum redirect hops _web_fetch follows manually — each hop is re-validated
+# so a public page cannot redirect the agent onto an internal endpoint.
+_MAX_REDIRECTS = 5
 
 log = get_logger("tools")
+
+
+# ---------------------------------------------------------------------------
+# SSRF guard — DNS-resolution based, applied to every fetch and redirect hop
+# ---------------------------------------------------------------------------
+
+
+def _resolves_to_non_global(host: str) -> bool:
+    """True when ``host`` is, or resolves to, any non-global IP address.
+
+    Catches what a string blocklist cannot: hostnames that DNS-resolve to
+    internal IPs, decimal/octal IP encodings (``http://2130706433/``), IPv6
+    loopback (``[::1]``), ``0.0.0.0``, link-local metadata endpoints, CGN
+    ranges, and unresolvable hosts (blocked conservatively).
+
+    Known limitation: resolve-then-fetch is not atomic, so a DNS-rebinding
+    attacker controlling a domain's TTL could still race the check.  Full
+    protection would require pinning the resolved IP into the transport.
+    """
+    bare = host.strip("[]")
+    try:
+        return not ipaddress.ip_address(bare).is_global
+    except ValueError:
+        pass  # not an IP literal — resolve it
+    try:
+        infos = socket.getaddrinfo(bare, None, proto=socket.IPPROTO_TCP)
+    except OSError:
+        return True  # unresolvable — treat as blocked
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return True
+        if not ip.is_global:
+            return True
+    return False
+
+
+async def _validate_fetch_url(url: str) -> str | None:
+    """Return a [BLOCKED: ...] message when ``url`` must not be fetched, else None."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return f"[BLOCKED: scheme '{parsed.scheme or 'none'}' not permitted — only http/https]"
+    host = parsed.hostname
+    if not host:
+        return f"[BLOCKED: '{url}' has no resolvable host]"
+    # getaddrinfo is blocking — keep the event loop free during DNS lookups.
+    is_blocked = await asyncio.get_event_loop().run_in_executor(
+        None, _resolves_to_non_global, host
+    )
+    if is_blocked:
+        return (
+            f"[BLOCKED: '{host}' is or resolves to a private/reserved address — "
+            "not permitted]"
+        )
+    return None
 
 # ---------------------------------------------------------------------------
 # Tool schemas for Claude API
@@ -237,14 +292,16 @@ async def _web_fetch(url: str, extract_text: bool = True) -> str:
 
     Raw HTML is never sent to Claude — it always passes through BeautifulSoup
     text extraction to prevent prompt injection via adversarial page content.
-    Private/internal IPs are blocked to prevent SSRF attacks.
+
+    SSRF guard: the host is DNS-resolved and checked against non-global IP
+    ranges before every request, and redirects are followed manually so each
+    hop is re-validated — a public page cannot bounce the agent onto an
+    internal endpoint.
     """
-    if _BLOCKED_HOST_PATTERN.search(url):
-        return f"[BLOCKED: '{url}' resolves to a private/internal address — not permitted]"
     try:
         async with httpx.AsyncClient(
             timeout=20.0,
-            follow_redirects=True,
+            follow_redirects=False,  # followed manually below, re-validating each hop
             headers={
                 "User-Agent": (
                     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -252,7 +309,18 @@ async def _web_fetch(url: str, extract_text: bool = True) -> str:
                 )
             },
         ) as client:
-            resp = await client.get(url)
+            resp = None
+            for _ in range(_MAX_REDIRECTS + 1):
+                blocked = await _validate_fetch_url(url)
+                if blocked:
+                    return blocked
+                resp = await client.get(url)
+                if resp.has_redirect_location:
+                    url = urljoin(url, resp.headers["location"])
+                    continue
+                break
+            else:
+                return f"[FETCH ERROR: more than {_MAX_REDIRECTS} redirects]"
         # Always extract text — never send raw HTML to Claude regardless of extract_text flag.
         # Raw HTML can contain hidden adversarial instructions in script tags or comments.
         soup = BeautifulSoup(resp.text, "lxml")

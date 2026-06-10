@@ -266,6 +266,8 @@ All clients except `YFinanceClient` extend `BaseHTTPClient` which provides `http
 
 **Security**: Web content fetched via `tools.py` is always sanitized before being sent to Claude: BeautifulSoup strips all HTML tags (including `<script>`, `<style>`, `<noscript>`), and a regex pass removes prompt-injection patterns ("ignore all previous instructions", "act as", "system prompt:", etc.). Raw HTML is never forwarded to the LLM.
 
+**SSRF guard** (`tools.py`): before every `web_fetch` request the URL scheme must be http/https and the host is DNS-resolved and rejected if any resolved address is non-global (loopback, RFC1918, link-local/metadata, CGN, `0.0.0.0`, IPv6 loopback, decimal-encoded IPs, unresolvable hosts). Redirects are followed manually (max 5 hops) with the same validation per hop, so a public page cannot bounce the agent onto an internal endpoint. Known limitation: resolve-then-fetch is not atomic (DNS rebinding with a fast TTL could race the check).
+
 **YFinanceClient** (`src/api/yfinance_client.py`): wraps the synchronous `yfinance` library in `run_in_executor()` calls. Provides `get_stock_quote()` (with `avg_daily_value_cr` and `volume_trend_down_days`), `get_valuation_data()` (with `pe_10y_percentile` via `_compute_pe_percentile()`), and `get_nifty50()`. NSE tickers map to Yahoo Finance by appending `.NS`. Data is ~15–20 min delayed — marked `is_stale=True`. Has a no-op async context manager.
 
 **DataCache** (`src/api/cache.py`): module-level singleton with TTL-based invalidation. TTLs: quote/valuation = 1 hour, financials/shareholding = 24 hours, Nifty mode = 15 minutes (via `nifty_key()`). `None` is never cached. `mode_detector.py` maintains a module-level copy of the same data for zero-overhead in-process hits; `reset_mode_cache()` invalidates both layers (used in tests).
@@ -289,7 +291,7 @@ Every completed analysis is persisted to `investor.db`. Writes are always wrappe
 - After `_prefetch_data`: saves 4 raw snapshots with actual source names
 - After `pipeline_complete` log: calls `save_analysis()` — this is the single authoritative persistence point; no separate markdown files are written
 
-**Portfolio tracking** (`src/portfolio/tracker.py`): reads/writes `portfolio/` markdown files for actual trade records (holdings, transactions, tax). Watchlist and rejection tracking is now fully in SQLite.
+**Portfolio tracking** (`src/portfolio/tracker.py`): async DB-backed per-user operations on `portfolio_holdings` / `portfolio_transactions` / `portfolio_tax` (keyed by `user_id`). Each holdings row is one purchase **lot**. `record_sell()` consumes lots FIFO (oldest first) via `consume_holdings_fifo()` in the repository — exhausted lots are deleted (their tax rows cleaned up), partial lots reduced, and the SELL transaction is logged only after consumption succeeds; it returns realized P&L split into LTCG (held ≥ 365 days) and STCG. Overselling raises `ValueError` and records nothing. `add_one_year()` is the leap-safe LTCG date helper (Feb 29 → Feb 28). Watchlist and rejection tracking is fully in the analyses table.
 
 **CLI commands** (`src/main.py`):
 - `investor db-summary` — ranked table of every analysed ticker

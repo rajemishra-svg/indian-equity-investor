@@ -418,3 +418,21 @@ async def test_snapshot_different_data_types_stored_separately(db_path):
             (count,) = await cur.fetchone()
 
     assert count == 3
+
+
+# ---------------------------------------------------------------------------
+# WAL journal mode
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_init_db_enables_wal_journal_mode(db_path):
+    """init_db must switch the database to WAL so concurrent scan workers
+    don't hit 'database is locked' (which spuriously trips ER-07)."""
+    import aiosqlite
+
+    await init_db(db_path)
+    async with aiosqlite.connect(db_path) as db:
+        async with db.execute("PRAGMA journal_mode") as cur:
+            (mode,) = await cur.fetchone()
+    assert mode.lower() == "wal"

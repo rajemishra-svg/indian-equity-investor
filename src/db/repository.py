@@ -57,6 +57,13 @@ class AnalysisRepository:
 async def init_db(db_path: str) -> None:
     """Create tables/indexes if they do not yet exist, then apply column migrations."""
     async with aiosqlite.connect(db_path) as db:
+        # WAL lets concurrent batch-scan workers write snapshots without
+        # "database is locked" failures (which spuriously trip ER-07).
+        # The journal mode is persistent — set once per database file.
+        # synchronous=NORMAL is the recommended pairing with WAL: durable
+        # against app crashes, much faster than FULL.
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA synchronous=NORMAL")
         await db.executescript(CREATE_TABLES_SQL)
         await db.commit()
         # Idempotent column migrations — safe to run on every startup
@@ -537,6 +544,94 @@ async def add_tax_entry(
             (user_id, ticker.upper(), purchase_date, ltcg_date, avg_cost),
         )
         await db.commit()
+
+
+async def consume_holdings_fifo(
+    db_path: str, user_id: str, ticker: str, quantity: int
+) -> list[dict]:
+    """Consume ``quantity`` shares from the oldest purchase lots first (FIFO).
+
+    Each ``portfolio_holdings`` row is one purchase lot.  Lots are consumed in
+    ``purchase_date`` order (ties broken by insertion id): exhausted lots are
+    deleted, a partially consumed lot has its quantity reduced.  Tax-tracker
+    rows whose purchase lots no longer exist are removed in the same
+    transaction.
+
+    Returns the consumed slices, oldest first::
+
+        [{"purchase_date": "2025-04-01", "avg_cost": 2800.0,
+          "quantity_consumed": 60, "lot_exhausted": True}, ...]
+
+    Raises:
+        ValueError: when the user holds fewer than ``quantity`` shares of
+            ``ticker``.  Nothing is modified in that case.
+    """
+    if quantity <= 0:
+        raise ValueError(f"SELL quantity must be positive, got {quantity}")
+
+    await init_db(db_path)
+    ticker = ticker.upper()
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT id, avg_cost, quantity, purchase_date
+            FROM portfolio_holdings
+            WHERE user_id = ? AND ticker = ?
+            ORDER BY purchase_date ASC, id ASC
+            """,
+            (user_id, ticker),
+        ) as cursor:
+            lots = [dict(row) async for row in cursor]
+
+        held = sum(lot["quantity"] for lot in lots)
+        if held < quantity:
+            raise ValueError(
+                f"Cannot sell {quantity} × {ticker}: only {held} held for user '{user_id}'"
+            )
+
+        remaining = quantity
+        consumed: list[dict] = []
+        for lot in lots:
+            if remaining <= 0:
+                break
+            take = min(lot["quantity"], remaining)
+            remaining -= take
+            exhausted = take == lot["quantity"]
+            if exhausted:
+                await db.execute(
+                    "DELETE FROM portfolio_holdings WHERE id = ?", (lot["id"],)
+                )
+            else:
+                await db.execute(
+                    "UPDATE portfolio_holdings SET quantity = ? WHERE id = ?",
+                    (lot["quantity"] - take, lot["id"]),
+                )
+            consumed.append(
+                {
+                    "purchase_date": lot["purchase_date"],
+                    "avg_cost": lot["avg_cost"],
+                    "quantity_consumed": take,
+                    "lot_exhausted": exhausted,
+                }
+            )
+
+        # Drop tax-tracker rows whose purchase lots are now fully consumed.
+        # Keyed by purchase_date (not lot id), so only delete dates for which
+        # no holdings row remains — same-date sibling lots keep their entry.
+        await db.execute(
+            """
+            DELETE FROM portfolio_tax
+            WHERE user_id = ? AND ticker = ?
+              AND purchase_date NOT IN (
+                  SELECT purchase_date FROM portfolio_holdings
+                  WHERE user_id = ? AND ticker = ?
+              )
+            """,
+            (user_id, ticker, user_id, ticker),
+        )
+        await db.commit()
+    return consumed
 
 
 # ---------------------------------------------------------------------------

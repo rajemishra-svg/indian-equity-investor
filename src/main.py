@@ -14,7 +14,7 @@ from src.agent.pipeline import InvestmentPipeline
 from src.config import settings
 from src.logging_config import configure_logging
 from src.models import AnalysisState
-from src.portfolio.tracker import PortfolioTracker
+from src.portfolio.tracker import PortfolioTracker, add_one_year
 
 _TICKER_RE = re.compile(r"^[A-Z0-9&\-\.]{1,20}$")
 
@@ -211,38 +211,63 @@ def add_trade(
 
     tracker = PortfolioTracker(user_id=user_id)
 
-    async def _record() -> None:
-        await tracker.add_transaction(
-            ticker=ticker, action=action, price=price_f,
-            quantity=qty, txn_date=trade_date, notes=notes,
-        )
+    async def _record() -> dict | None:
         if action == "BUY":
+            await tracker.add_transaction(
+                ticker=ticker, action=action, price=price_f,
+                quantity=qty, txn_date=trade_date, notes=notes,
+            )
             await tracker.add_holding(
                 ticker=ticker, avg_cost=price_f, quantity=qty,
                 purchase_date=trade_date, allocation_pct=allocation_pct,
                 company_name=company or ticker,
             )
-            ltcg_date = trade_date.replace(year=trade_date.year + 1)
             await tracker.add_tax_entry(
                 ticker=ticker, purchase_date=trade_date,
-                ltcg_date=ltcg_date, avg_cost=price_f,
+                ltcg_date=add_one_year(trade_date), avg_cost=price_f,
             )
+            return None
+        # SELL — consume purchase lots FIFO; record_sell logs the transaction
+        # only after the lots are successfully consumed.
+        return await tracker.record_sell(
+            ticker=ticker, price=price_f, quantity=qty,
+            txn_date=trade_date, notes=notes,
+        )
 
-    asyncio.run(_record())
+    try:
+        sell_result = asyncio.run(_record())
+    except ValueError as exc:
+        # Oversell: nothing was recorded — surface a clean CLI error.
+        raise click.ClickException(str(exc)) from exc
 
     console.print(
         f"[green]✓[/green] Transaction logged: {action} {qty} × {ticker} @ ₹{price_f:.2f} on {trade_date}"
         f"  [dim](user: {tracker.user_id})[/dim]"
     )
     if action == "BUY":
-        ltcg_date = trade_date.replace(year=trade_date.year + 1)
         console.print("[green]✓[/green] Holding added to portfolio DB")
         console.print(
-            f"[green]✓[/green] Tax tracker updated — LTCG eligible from {ltcg_date} "
+            f"[green]✓[/green] Tax tracker updated — LTCG eligible from {add_one_year(trade_date)} "
             f"(gains > ₹1.25L taxed at 12.5% after that date)"
         )
-    if action == "SELL":
-        console.print("[dim]Tip: use 'investor portfolio' to review updated holdings.[/dim]")
+    if action == "SELL" and sell_result:
+        gain_colour = "green" if sell_result["realized_gain"] >= 0 else "red"
+        console.print(
+            f"[green]✓[/green] {qty} shares consumed FIFO across "
+            f"{len(sell_result['lots'])} lot(s); {sell_result['remaining_qty']} still held"
+        )
+        for lot in sell_result["lots"]:
+            tax_label = "LTCG" if lot["is_ltcg"] else "STCG"
+            lot_colour = "green" if lot["gain"] >= 0 else "red"
+            console.print(
+                f"  Lot {lot['purchase_date']} @ ₹{lot['avg_cost']:.2f} × "
+                f"{lot['quantity_consumed']}: [{lot_colour}]₹{lot['gain']:+,.2f}[/{lot_colour}] ({tax_label})"
+            )
+        console.print(
+            f"Realized P&L: [{gain_colour}]₹{sell_result['realized_gain']:+,.2f}[/{gain_colour}]  "
+            f"(LTCG ₹{sell_result['ltcg_gain']:+,.2f} — 12.5% over ₹1.25L/yr | "
+            f"STCG ₹{sell_result['stcg_gain']:+,.2f} — 20%)"
+        )
 
 
 # ---------------------------------------------------------------------------
