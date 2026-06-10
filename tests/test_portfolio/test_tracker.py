@@ -1,45 +1,33 @@
-"""Tests for PortfolioTracker."""
+"""Tests for PortfolioTracker — async DB-backed interface."""
 from __future__ import annotations
 
-import tempfile
 from datetime import date
-from pathlib import Path
 
 import pytest
 
-from src.models import AnalysisState
 from src.portfolio.tracker import PortfolioTracker
-from tests.fixtures.sample_data import SAMPLE_FINANCIALS, SAMPLE_QUOTE
 
 
 @pytest.fixture
-def tmp_portfolio(tmp_path) -> PortfolioTracker:
-    """Create a PortfolioTracker pointing at a temp directory."""
-    portfolio_dir = tmp_path / "portfolio"
-    portfolio_dir.mkdir()
-    return PortfolioTracker(portfolio_dir=portfolio_dir)
+def tracker(tmp_path) -> PortfolioTracker:
+    """PortfolioTracker backed by a temp SQLite DB with user 'testuser'."""
+    return PortfolioTracker(db_path=str(tmp_path / "test.db"), user_id="testuser")
 
 
 @pytest.fixture
-def tmp_tracker_with_watchlist(tmp_path) -> PortfolioTracker:
-    """Tracker with analysis/ directory for watchlist tests."""
-    portfolio_dir = tmp_path / "portfolio"
-    portfolio_dir.mkdir()
-    (tmp_path / "analysis" / "watchlist").mkdir(parents=True)
-    tracker = PortfolioTracker(portfolio_dir=portfolio_dir)
-    # Override watchlist path resolution by monkeypatching
-    # The tracker uses relative paths from cwd for watchlists; use the helper method directly
-    return tracker
+def other_tracker(tmp_path) -> PortfolioTracker:
+    """Second user on the same DB — used for isolation tests."""
+    return PortfolioTracker(db_path=str(tmp_path / "test.db"), user_id="otheruser")
 
 
 # ---------------------------------------------------------------------------
-# add_holding
+# add_holding / get_holdings
 # ---------------------------------------------------------------------------
 
-def test_add_holding_writes_formatted_row(tmp_portfolio):
-    """add_holding should write a properly formatted table row."""
-    tracker = tmp_portfolio
-    tracker.add_holding(
+
+@pytest.mark.asyncio
+async def test_add_holding_and_retrieve(tracker):
+    await tracker.add_holding(
         ticker="RELIANCE",
         avg_cost=2800.0,
         quantity=100,
@@ -47,67 +35,60 @@ def test_add_holding_writes_formatted_row(tmp_portfolio):
         allocation_pct=5.0,
         company_name="Reliance Industries",
     )
-
-    holdings_file = tracker.portfolio_dir / "holdings.md"
-    assert holdings_file.exists()
-    content = holdings_file.read_text()
-    assert "RELIANCE" in content
-    assert "2800.00" in content
-    assert "100" in content
-    assert "2026-05-15" in content
-    assert "5.0%" in content
-
-
-def test_add_holding_appends_multiple_rows(tmp_portfolio):
-    """Multiple holdings should be appended, not overwritten."""
-    tracker = tmp_portfolio
-    tracker.add_holding("RELIANCE", 2800.0, 100, date(2026, 1, 1), 5.0)
-    tracker.add_holding("HDFC", 1700.0, 50, date(2026, 2, 1), 3.0)
-
-    content = (tracker.portfolio_dir / "holdings.md").read_text()
-    assert "RELIANCE" in content
-    assert "HDFC" in content
+    holdings = await tracker.get_holdings()
+    assert len(holdings) == 1
+    h = holdings[0]
+    assert h["ticker"] == "RELIANCE"
+    assert h["avg_cost"] == pytest.approx(2800.0)
+    assert h["quantity"] == 100
+    assert h["purchase_date"] == "2026-05-15"
+    assert h["allocation_pct"] == pytest.approx(5.0)
+    assert h["company_name"] == "Reliance Industries"
 
 
-# ---------------------------------------------------------------------------
-# get_holdings
-# ---------------------------------------------------------------------------
-
-def test_get_holdings_parses_correctly(tmp_portfolio):
-    """get_holdings should parse the table and return a list of dicts."""
-    tracker = tmp_portfolio
-    holdings_file = tracker.portfolio_dir / "holdings.md"
-    holdings_file.write_text(
-        "| Ticker | Company | Avg Cost | Qty | Purchase Date | Allocation % |\n"
-        "| --- | --- | --- | --- | --- | --- |\n"
-        "| RELIANCE | Reliance Industries | ₹2800.00 | 100 | 2026-05-15 | 5.0% |\n"
-        "| HDFC | HDFC Bank | ₹1700.00 | 50 | 2026-02-01 | 3.0% |\n",
-        encoding="utf-8",
-    )
-
-    holdings = tracker.get_holdings()
+@pytest.mark.asyncio
+async def test_add_multiple_holdings(tracker):
+    await tracker.add_holding("RELIANCE", 2800.0, 100, date(2026, 1, 1), 5.0)
+    await tracker.add_holding("HDFCBANK", 1700.0, 50, date(2026, 2, 1), 3.0)
+    holdings = await tracker.get_holdings()
     assert len(holdings) == 2
-    assert holdings[0]["ticker"] == "RELIANCE"
-    assert holdings[0]["avg_cost"] == pytest.approx(2800.0)
-    assert holdings[0]["quantity"] == 100
-    assert holdings[1]["ticker"] == "HDFC"
-    assert holdings[1]["allocation_pct"] == pytest.approx(3.0)
+    tickers = [h["ticker"] for h in holdings]
+    assert "RELIANCE" in tickers
+    assert "HDFCBANK" in tickers
 
 
-def test_get_holdings_returns_empty_for_missing_file(tmp_portfolio):
-    """get_holdings returns empty list when file doesn't exist."""
-    holdings = tmp_portfolio.get_holdings()
-    assert holdings == []
+@pytest.mark.asyncio
+async def test_get_holdings_empty(tracker):
+    assert await tracker.get_holdings() == []
 
 
 # ---------------------------------------------------------------------------
-# add_transaction
+# User isolation
 # ---------------------------------------------------------------------------
 
-def test_add_transaction_writes_row(tmp_portfolio):
-    """add_transaction should append a formatted row to transaction-log.md."""
-    tracker = tmp_portfolio
-    tracker.add_transaction(
+
+@pytest.mark.asyncio
+async def test_holdings_isolated_by_user(tracker, other_tracker):
+    await tracker.add_holding("RELIANCE", 2800.0, 10, date(2026, 5, 1), 5.0)
+    await other_tracker.add_holding("INFY", 1900.0, 20, date(2026, 5, 1), 4.0)
+
+    my_holdings = await tracker.get_holdings()
+    other_holdings = await other_tracker.get_holdings()
+
+    assert len(my_holdings) == 1
+    assert my_holdings[0]["ticker"] == "RELIANCE"
+    assert len(other_holdings) == 1
+    assert other_holdings[0]["ticker"] == "INFY"
+
+
+# ---------------------------------------------------------------------------
+# add_transaction / get_transactions
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_add_transaction_and_retrieve(tracker):
+    await tracker.add_transaction(
         ticker="RELIANCE",
         action="BUY",
         price=2850.0,
@@ -115,42 +96,62 @@ def test_add_transaction_writes_row(tmp_portfolio):
         txn_date=date(2026, 5, 15),
         notes="Tranche 1 entry",
     )
+    txns = await tracker.get_transactions()
+    assert len(txns) == 1
+    t = txns[0]
+    assert t["ticker"] == "RELIANCE"
+    assert t["action"] == "BUY"
+    assert t["price"] == pytest.approx(2850.0)
+    assert t["quantity"] == 50
+    assert t["notes"] == "Tranche 1 entry"
 
-    txn_file = tracker.portfolio_dir / "transaction-log.md"
-    assert txn_file.exists()
-    content = txn_file.read_text()
-    assert "RELIANCE" in content
-    assert "BUY" in content
-    assert "2850.00" in content
-    assert "Tranche 1 entry" in content
+
+@pytest.mark.asyncio
+async def test_action_uppercased(tracker):
+    await tracker.add_transaction("HDFC", "buy", 1700.0, 30, date(2026, 5, 1))
+    txns = await tracker.get_transactions()
+    assert txns[0]["action"] == "BUY"
 
 
-def test_add_transaction_action_uppercased(tmp_portfolio):
-    """Action should be uppercased in transaction log."""
-    tracker = tmp_portfolio
-    tracker.add_transaction("HDFC", "buy", 1700.0, 30, date(2026, 5, 1))
-    content = (tracker.portfolio_dir / "transaction-log.md").read_text()
-    assert "BUY" in content
+@pytest.mark.asyncio
+async def test_get_transactions_filter_by_ticker(tracker):
+    await tracker.add_transaction("RELIANCE", "BUY", 2800.0, 10, date(2026, 1, 1))
+    await tracker.add_transaction("INFY", "BUY", 1900.0, 5, date(2026, 2, 1))
+    rel_txns = await tracker.get_transactions(ticker="RELIANCE")
+    assert len(rel_txns) == 1
+    assert rel_txns[0]["ticker"] == "RELIANCE"
+
+
+@pytest.mark.asyncio
+async def test_transactions_isolated_by_user(tracker, other_tracker):
+    await tracker.add_transaction("RELIANCE", "BUY", 2800.0, 10, date(2026, 5, 1))
+    assert await other_tracker.get_transactions() == []
 
 
 # ---------------------------------------------------------------------------
-# update_tax_tracker
+# add_tax_entry
 # ---------------------------------------------------------------------------
 
-def test_update_tax_tracker_writes_entry(tmp_portfolio):
-    """update_tax_tracker should append LTCG eligibility entry."""
-    tracker = tmp_portfolio
-    tracker.update_tax_tracker(
+
+@pytest.mark.asyncio
+async def test_add_tax_entry(tracker):
+    import aiosqlite
+
+    await tracker.add_tax_entry(
         ticker="RELIANCE",
         purchase_date=date(2026, 5, 15),
         ltcg_date=date(2027, 5, 15),
         avg_cost=2850.0,
     )
-
-    tax_file = tracker.portfolio_dir / "tax-tracker.md"
-    assert tax_file.exists()
-    content = tax_file.read_text()
-    assert "RELIANCE" in content
-    assert "2026-05-15" in content
-    assert "2027-05-15" in content
-    assert "2850.00" in content
+    # Verify directly in DB
+    async with aiosqlite.connect(tracker.db_path) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM portfolio_tax WHERE user_id=? AND ticker=?",
+            (tracker.user_id, "RELIANCE"),
+        ) as cur:
+            row = await cur.fetchone()
+    assert row is not None
+    assert row["purchase_date"] == "2026-05-15"
+    assert row["ltcg_date"] == "2027-05-15"
+    assert row["avg_cost"] == pytest.approx(2850.0)

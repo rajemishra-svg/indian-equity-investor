@@ -7,9 +7,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from src.agent.steps.step1_governance import Step1Governance
-from src.models import AnalysisState, GateResult, GovernanceData
+from src.models import AnalysisState, FinancialMetrics, GateResult, GovernanceData
 from tests.fixtures.sample_data import (
     BAD_GOVERNANCE,
+    SAMPLE_FINANCIALS,
     SAMPLE_GOVERNANCE,
     SAMPLE_QUOTE,
 )
@@ -31,6 +32,7 @@ def make_step(capital_alloc_score: int = 3):
 # ---------------------------------------------------------------------------
 # Pledging scoring
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_zero_pledging_scores_3_points():
@@ -67,6 +69,7 @@ async def test_pledging_above_10_percent_immediate_fail():
 # ---------------------------------------------------------------------------
 # Immediate triggers
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_going_concern_qualification_triggers_fail():
@@ -119,6 +122,7 @@ async def test_sebi_fraud_investigation_triggers_fail():
 # ---------------------------------------------------------------------------
 # Score thresholds
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_score_12_or_above_pass_green():
@@ -205,12 +209,13 @@ async def test_missing_pledging_data_adds_flag():
 # New governance checks
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_pledging_trend_increasing_adds_concern():
     """Increasing pledging trend → concern added even if absolute % is low."""
     gov = GovernanceData(
         promoter_holding_pct=52.0,
-        promoter_pledging_pct=4.0,   # Low absolute (2pts) but increasing
+        promoter_pledging_pct=4.0,  # Low absolute (2pts) but increasing
         promoter_pledging_trend=[1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.0],
         pledging_trend_direction="increasing",
         auditor_name="Price Waterhouse",
@@ -233,15 +238,141 @@ async def test_pledging_trend_increasing_adds_concern():
 
 
 @pytest.mark.asyncio
-async def test_high_contingent_liabilities_adds_flag():
-    """Contingent liabilities > 100% of net worth → HIGH RISK flag."""
+async def test_high_contingent_liabilities_hard_gate_fires():
+    """CL > net profit (via ROE proxy) → IMMEDIATE TRIGGER → FAIL."""
+    # SAMPLE_FINANCIALS has roe_5y_avg=22.4.
+    # CL=80% of net worth > ROE=22.4% → CL > Net Profit → gate fires.
     gov = GovernanceData(
         promoter_holding_pct=50.0,
         promoter_pledging_pct=0.0,
         auditor_name="Deloitte",
         audit_qualifications=[],
         rpt_pct_revenue=5.0,
-        contingent_liabilities_pct_networth=150.0,  # Extremely high
+        contingent_liabilities_pct_networth=80.0,
+        sebi_record_clean=True,
+        sebi_orders=[],
+        capital_allocation_description="Decent track record.",
+    )
+    state = AnalysisState(ticker="CLGATE")
+    state.quote = SAMPLE_QUOTE
+    state.financials = SAMPLE_FINANCIALS  # roe_5y_avg=22.4
+    state.governance_data = gov
+
+    step = make_step(capital_alloc_score=3)
+    state = await step.run(state)
+
+    assert state.governance.gate == GateResult.FAIL
+    assert state.is_terminated
+    assert state.recommendation_type == "REJECT"
+    assert any("contingent_liabilities_exceed_net_profit" in t for t in state.governance.immediate_triggers)
+    assert any("HARD GATE" in f for f in state.all_data_flags)
+
+
+@pytest.mark.asyncio
+async def test_contingent_liabilities_below_net_profit_passes():
+    """CL < net profit (via ROE proxy) → no trigger fired, pipeline continues."""
+    # SAMPLE_FINANCIALS has roe_5y_avg=22.4.
+    # CL=10% of net worth < ROE=22.4% → CL < Net Profit → passes.
+    gov = GovernanceData(
+        promoter_holding_pct=55.0,
+        promoter_pledging_pct=0.0,
+        auditor_name="Price Waterhouse",
+        audit_qualifications=[],
+        rpt_pct_revenue=4.0,
+        contingent_liabilities_pct_networth=10.0,
+        sebi_record_clean=True,
+        sebi_orders=[],
+        capital_allocation_description="Strong track record.",
+    )
+    state = AnalysisState(ticker="CLPASS")
+    state.quote = SAMPLE_QUOTE
+    state.financials = SAMPLE_FINANCIALS
+    state.governance_data = gov
+
+    step = make_step(capital_alloc_score=3)
+    state = await step.run(state)
+
+    assert state.governance.gate == GateResult.PASS_GREEN
+    assert not state.is_terminated
+    assert not any("HARD GATE" in f for f in state.all_data_flags)
+
+
+@pytest.mark.asyncio
+async def test_contingent_liabilities_elevated_but_below_gate_soft_warns():
+    """CL elevated (50–75% of net worth) but below net profit → soft concern, no gate."""
+    # No financials set → roe_proxy fallback = 15.0.
+    # CL=60% > 15% fallback → gate fires with fallback.
+    # To test the soft-warn path, supply financials with high ROE so CL < ROE.
+    high_roe_financials = FinancialMetrics(
+        revenue_cagr_5y=20.0,
+        pat_cagr_5y=22.0,
+        roe_5y_avg=80.0,  # Very high ROE → threshold = 80%; CL=60% passes
+        roce_5y_avg=85.0,
+        cfo_net_profit_3y_avg=90.0,
+        debt_to_equity=0.1,
+        interest_coverage=20.0,
+        data_flags=[],
+    )
+    gov = GovernanceData(
+        promoter_holding_pct=55.0,
+        promoter_pledging_pct=0.0,
+        auditor_name="Deloitte",
+        audit_qualifications=[],
+        rpt_pct_revenue=4.0,
+        contingent_liabilities_pct_networth=60.0,  # elevated but < 80% threshold
+        sebi_record_clean=True,
+        sebi_orders=[],
+        capital_allocation_description="Good track record.",
+    )
+    state = AnalysisState(ticker="CLWARN")
+    state.quote = SAMPLE_QUOTE
+    state.financials = high_roe_financials
+    state.governance_data = gov
+
+    step = make_step(capital_alloc_score=3)
+    state = await step.run(state)
+
+    assert not state.is_terminated
+    assert not any("HARD GATE" in f for f in state.all_data_flags)
+    # Concern should mention elevated CL
+    assert any("contingent" in c.lower() for c in state.governance.concerns)
+
+
+@pytest.mark.asyncio
+async def test_contingent_liabilities_missing_adds_unverified_flag():
+    """CL data not available → DATA UNVERIFIED flag, pipeline not terminated."""
+    gov = GovernanceData(
+        promoter_holding_pct=55.0,
+        promoter_pledging_pct=0.0,
+        auditor_name="Price Waterhouse",
+        audit_qualifications=[],
+        rpt_pct_revenue=4.0,
+        contingent_liabilities_pct_networth=None,  # not available
+        sebi_record_clean=True,
+        sebi_orders=[],
+        capital_allocation_description="Good.",
+    )
+    state = AnalysisState(ticker="CLMISS")
+    state.quote = SAMPLE_QUOTE
+    state.governance_data = gov
+
+    step = make_step(capital_alloc_score=3)
+    state = await step.run(state)
+
+    assert not state.is_terminated
+    assert any("contingent_liabilities" in f.lower() and "UNVERIFIED" in f for f in state.all_data_flags)
+
+
+@pytest.mark.asyncio
+async def test_high_contingent_liabilities_adds_flag():
+    """Legacy test: CL=150% of net worth → hard gate fires (CL >> net profit)."""
+    gov = GovernanceData(
+        promoter_holding_pct=50.0,
+        promoter_pledging_pct=0.0,
+        auditor_name="Deloitte",
+        audit_qualifications=[],
+        rpt_pct_revenue=5.0,
+        contingent_liabilities_pct_networth=150.0,  # Extremely high → triggers hard gate
         sebi_record_clean=True,
         sebi_orders=[],
         capital_allocation_description="Decent track record.",
@@ -253,12 +384,20 @@ async def test_high_contingent_liabilities_adds_flag():
     step = make_step(capital_alloc_score=2)
     state = await step.run(state)
 
-    assert any("HIGH RISK" in f or "contingent" in f.lower() for f in state.all_data_flags)
+    # Hard gate fires: flag contains "contingent" and pipeline is terminated
+    assert any("contingent" in f.lower() for f in state.all_data_flags)
+    assert state.is_terminated
 
 
 @pytest.mark.asyncio
 async def test_sebi_record_not_clean_no_orders_returns_low_score():
-    """sebi_record_clean=False but no orders listed → conservative score 1, not 2."""
+    """sebi_record_clean=False but no specific orders → treated as DATA UNVERIFIED (score 2).
+
+    When enrichment returns not-clean but finds no specific orders, this is a model
+    uncertainty gap rather than confirmed fraud. Score 2 (same as unchecked) rather
+    than 1 (confirmed dirty) — manual verification is required but pipeline is not
+    terminated on ambiguous data alone.
+    """
     gov = GovernanceData(
         promoter_holding_pct=50.0,
         promoter_pledging_pct=0.0,
@@ -266,7 +405,7 @@ async def test_sebi_record_not_clean_no_orders_returns_low_score():
         audit_qualifications=[],
         rpt_pct_revenue=5.0,
         sebi_record_clean=False,  # flagged as not clean
-        sebi_orders=[],           # but no specific orders listed
+        sebi_orders=[],  # but no specific orders listed
         capital_allocation_description="Good.",
     )
     state = AnalysisState(ticker="REGTEST")
@@ -276,9 +415,10 @@ async def test_sebi_record_not_clean_no_orders_returns_low_score():
     step = make_step(capital_alloc_score=3)
     state = await step.run(state)
 
-    # Regulatory score should be 1 (suspicious gap), not 2 or 3
-    assert state.governance.sub_scores["regulatory"] == 1
-    # Should add a data flag explaining the gap
+    # Score 2: treated as unverified (not confirmed dirty) — model expressed doubt
+    # but found no specific orders, so we give benefit of the doubt
+    assert state.governance.sub_scores["regulatory"] == 2
+    # Should add a DATA UNVERIFIED flag explaining the gap
     assert any("sebi_record" in f.lower() for f in state.all_data_flags)
 
 

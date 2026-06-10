@@ -1,8 +1,6 @@
 """Step 1 — Governance & Management Gate (deterministic + Claude for narrative)."""
 from __future__ import annotations
 
-import json
-
 import anthropic
 
 from src.agent.steps.base import BaseStep
@@ -10,7 +8,6 @@ from src.agent.tools import TOOLS
 from src.config import settings
 from src.models import AnalysisState, GateResult, GovernanceScore
 from src.sector.profiles import get_sector_profile
-
 
 # Immediate rejection triggers — any single one fails the gate
 IMMEDIATE_TRIGGER_CHECKS = [
@@ -22,10 +19,11 @@ IMMEDIATE_TRIGGER_CHECKS = [
     ),
     (
         "active_sebi_ed_fraud_investigation",
-        # Fire when explicit orders are present (from any source) OR when enrichment
-        # ran and confirmed not-clean.  Does NOT fire on the conservative False default
-        # before any SEBI data has been fetched (sebi_record_checked=False, orders=[]).
-        lambda g: bool(g.sebi_orders) or (g.sebi_record_checked and not g.sebi_record_clean),
+        # Fire ONLY when actual SEBI/ED orders are on record.
+        # "sebi_record_clean=False with no orders" means the enrichment model expressed
+        # doubt but found nothing specific — treat as DATA UNVERIFIED, not confirmed fraud.
+        # Confirmed fraud requires explicit orders (sebi_orders non-empty).
+        lambda g: bool(g.sebi_orders),
     ),
     (
         "rpt > 20% of revenue (unexplained)",
@@ -72,6 +70,10 @@ class Step1Governance(BaseStep):
         data_flags: list[str] = []
         concerns: list[str] = []
 
+        # Initialise immediate_triggers early so CL gate can append before the
+        # IMMEDIATE_TRIGGER_CHECKS loop runs below.
+        immediate_triggers: list[str] = []
+
         # --- 1. Pledging score (0–3) ---
         pledging_score = self._score_pledging(g, data_flags)
         sub_scores["pledging"] = pledging_score
@@ -85,17 +87,61 @@ class Step1Governance(BaseStep):
                 "rising pledging signals promoter stress."
             )
 
-        # --- 1c. Contingent liabilities check ---
+        # --- 1c. Contingent liabilities — soft warnings + hard gate ---
+        #
+        # Hard gate (Rule #3): Contingent Liabilities must be < Net Profit.
+        #
+        # We store CL as % of net worth.  Net Profit / Net Worth = ROE / 100,
+        # so the net-worth denominator cancels:
+        #   CL > Net Profit  ⟺  cl_pct_networth > roe_5y_avg
+        #
+        # When ROE data is unavailable, fall back to the 15% minimum hurdle so
+        # the gate still fires at the most lenient reasonable threshold.
         if g is not None and g.contingent_liabilities_pct_networth is not None:
             cl = g.contingent_liabilities_pct_networth
-            if cl > 100:
-                # Contingent liabilities exceed net worth — existential risk if triggered
-                data_flags.append(
-                    f"[HIGH RISK: contingent_liabilities = {cl:.0f}% of net worth — manual verification required]"
+            f_now = state.financials
+            roe_proxy = (
+                f_now.roe_5y_avg
+                if f_now and f_now.roe_5y_avg is not None
+                else 15.0  # minimum hurdle — conservative fallback
+            )
+            roe_source = "5Y avg ROE" if (f_now and f_now.roe_5y_avg is not None) else "default 15% hurdle"
+
+            # Hard gate: CL exceeds net profit in absolute terms
+            if cl > roe_proxy:
+                trigger_msg = (
+                    f"contingent_liabilities_exceed_net_profit "
+                    f"(CL = {cl:.0f}% of net worth, {roe_source} = {roe_proxy:.1f}% → "
+                    f"CL > Net Profit)"
                 )
-                concerns.append(f"Contingent liabilities extremely high: {cl:.0f}% of net worth")
-            elif cl > 50:
-                concerns.append(f"Contingent liabilities elevated: {cl:.0f}% of net worth")
+                immediate_triggers.append(trigger_msg)
+                data_flags.append(
+                    f"[HARD GATE: contingent_liabilities = {cl:.0f}% of net worth "
+                    f"exceeds net profit proxy ({roe_source} = {roe_proxy:.1f}%) — "
+                    "pipeline terminated; hidden liability could wipe out a year of earnings]"
+                )
+            else:
+                # Soft warnings for elevated-but-passing CL
+                if cl > 75:
+                    data_flags.append(
+                        f"[HIGH RISK: contingent_liabilities = {cl:.0f}% of net worth "
+                        f"(below net profit threshold of {roe_proxy:.1f}% but elevated) — "
+                        "manual verification required]"
+                    )
+                    concerns.append(
+                        f"Contingent liabilities very elevated: {cl:.0f}% of net worth "
+                        f"(net profit proxy: {roe_proxy:.1f}%)"
+                    )
+                elif cl > 50:
+                    concerns.append(
+                        f"Contingent liabilities elevated: {cl:.0f}% of net worth "
+                        f"(net profit proxy: {roe_proxy:.1f}%)"
+                    )
+        elif g is not None and g.contingent_liabilities_pct_networth is None:
+            data_flags.append(
+                "[DATA UNVERIFIED: contingent_liabilities — could not determine from filings; "
+                "verify manually before investing]"
+            )
 
         # --- 2. Audit quality score (0–3) ---
         audit_score = self._score_audit(g, data_flags, concerns)
@@ -129,8 +175,7 @@ class Step1Governance(BaseStep):
 
         total_score = sum(sub_scores.values())
 
-        # --- Immediate trigger check ---
-        immediate_triggers: list[str] = []
+        # --- Immediate trigger check (extends list started above for CL gate) ---
         if g is not None:
             for trigger_name, checker in IMMEDIATE_TRIGGER_CHECKS:
                 try:
@@ -488,8 +533,10 @@ class Step1Governance(BaseStep):
             concerns.append(f"SEBI orders on record: {g.sebi_orders}")
             return 2
         elif not g.sebi_record_clean:
-            # enrichment ran and confirmed not clean but gave no specific orders
-            flags.append("[DATA UNVERIFIED: sebi_record — marked not-clean but no orders listed; manual verification required]")
-            return 1  # conservative until verified
+            # Enrichment ran but expressed doubt without finding specific orders.
+            # This is a data quality gap (model uncertainty), not confirmed fraud.
+            # Score same as "unchecked" — flag for manual verification but don't penalise.
+            flags.append("[DATA UNVERIFIED: sebi_record — enrichment returned not-clean but no orders found; manual verification required]")
+            return 2  # treat as unverified, not confirmed dirty
         else:
             return 3  # clean record, no orders

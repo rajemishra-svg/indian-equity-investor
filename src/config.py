@@ -61,6 +61,10 @@ class Settings(BaseSettings):
 
     db_path: str = "investor.db"  # SQLite database file
 
+    # Default user identity for portfolio commands.
+    # Override via INVESTOR_USER env var or --user CLI option.
+    investor_user: str = "default"
+
     # --- DCF WACC base rates by cap size (%) ---
     # Sector profiles add an adjustment on top via wacc_adjustment.
     wacc_large_cap: float = 13.0

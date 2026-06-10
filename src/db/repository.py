@@ -11,14 +11,13 @@ can be imported and called directly by the pipeline::
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timezone
-from typing import Any, Optional
+from datetime import UTC, date, datetime
+from typing import Any
 
 import aiosqlite
 
 from src.db.schema import CREATE_TABLES_SQL
 from src.models import AnalysisState
-
 
 # ---------------------------------------------------------------------------
 # Public class (thin wrapper for backwards-compat; pipeline uses free functions)
@@ -37,7 +36,7 @@ class AnalysisRepository:
     async def save(self, state: AnalysisState) -> None:
         await save_analysis(self.db_path, state)
 
-    async def get_latest(self, ticker: str) -> Optional[dict]:
+    async def get_latest(self, ticker: str) -> dict | None:
         return await get_latest_analysis(self.db_path, ticker)
 
     async def history(self, ticker: str, limit: int = 10) -> list[dict]:
@@ -56,9 +55,22 @@ class AnalysisRepository:
 
 
 async def init_db(db_path: str) -> None:
-    """Create tables and indexes if they do not yet exist."""
+    """Create tables/indexes if they do not yet exist, then apply column migrations."""
     async with aiosqlite.connect(db_path) as db:
         await db.executescript(CREATE_TABLES_SQL)
+        await db.commit()
+        # Idempotent column migrations — safe to run on every startup
+        migrations = [
+            ("analyses", "target_buy_price", "ALTER TABLE analyses ADD COLUMN target_buy_price REAL"),
+            ("analyses", "allocation_pct",   "ALTER TABLE analyses ADD COLUMN allocation_pct REAL"),
+        ]
+        for table, column, ddl in migrations:
+            async with db.execute(
+                f"SELECT 1 FROM pragma_table_info('{table}') WHERE name=?", (column,)  # noqa: S608
+            ) as cur:
+                exists = await cur.fetchone()
+            if not exists:
+                await db.execute(ddl)
         await db.commit()
 
 
@@ -114,7 +126,7 @@ async def save_analysis(db_path: str, state: AnalysisState) -> None:
     # target = DCF intrinsic × (1 - required MoS %) — the price at which the
     # required safety margin is just met.  Stored so watchlist-alerts can compare
     # live CMP without re-running the full pipeline.
-    target_buy_price: Optional[float] = None
+    target_buy_price: float | None = None
     if (
         state.recommendation_type == "WATCHLIST"
         and state.valuation
@@ -233,7 +245,7 @@ async def get_fresh_snapshot(
     ticker: str,
     data_type: str,
     max_age_hours: int = 24,
-) -> Optional[dict]:
+) -> dict | None:
     """Return the most recent snapshot for ``ticker`` / ``data_type`` if it is
     fresher than ``max_age_hours``, otherwise ``None``.
 
@@ -273,11 +285,11 @@ async def get_fresh_snapshot(
     # Parse the stored ISO timestamp and compare age
     raw_ts: str = row["created_at"]  # e.g. "2026-05-18 09:30:00"
     try:
-        stored_at = datetime.fromisoformat(raw_ts).replace(tzinfo=timezone.utc)
+        stored_at = datetime.fromisoformat(raw_ts).replace(tzinfo=UTC)
     except ValueError:
         return None  # unparseable timestamp — treat as stale
 
-    age_hours = (datetime.now(timezone.utc) - stored_at).total_seconds() / 3600
+    age_hours = (datetime.now(UTC) - stored_at).total_seconds() / 3600
     if age_hours > max_age_hours:
         return None  # too old
 
@@ -287,7 +299,7 @@ async def get_fresh_snapshot(
         return None
 
 
-async def get_latest_analysis(db_path: str, ticker: str) -> Optional[dict]:
+async def get_latest_analysis(db_path: str, ticker: str) -> dict | None:
     """Return the most recent analysis row for ``ticker``, or ``None``."""
     await init_db(db_path)
     async with aiosqlite.connect(db_path) as db:
@@ -450,6 +462,144 @@ async def get_summary(db_path: str) -> list[dict]:
             async for row in cursor:
                 rows.append(_row_to_dict(row))
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Portfolio write operations
+# ---------------------------------------------------------------------------
+
+
+async def add_holding(
+    db_path: str,
+    user_id: str,
+    ticker: str,
+    company_name: str,
+    avg_cost: float,
+    quantity: int,
+    purchase_date: str,
+    allocation_pct: float = 0.0,
+) -> None:
+    """Append a holding row for ``user_id``."""
+    await init_db(db_path)
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            """
+            INSERT INTO portfolio_holdings
+                (user_id, ticker, company_name, avg_cost, quantity, purchase_date, allocation_pct)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, ticker.upper(), company_name, avg_cost, quantity, purchase_date, allocation_pct),
+        )
+        await db.commit()
+
+
+async def add_transaction(
+    db_path: str,
+    user_id: str,
+    ticker: str,
+    action: str,
+    price: float,
+    quantity: int,
+    txn_date: str,
+    notes: str = "",
+) -> None:
+    """Append a transaction row for ``user_id``."""
+    await init_db(db_path)
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            """
+            INSERT INTO portfolio_transactions
+                (user_id, ticker, action, price, quantity, txn_date, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, ticker.upper(), action.upper(), price, quantity, txn_date, notes),
+        )
+        await db.commit()
+
+
+async def add_tax_entry(
+    db_path: str,
+    user_id: str,
+    ticker: str,
+    purchase_date: str,
+    ltcg_date: str,
+    avg_cost: float = 0.0,
+) -> None:
+    """Append an LTCG eligibility row for ``user_id``."""
+    await init_db(db_path)
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            """
+            INSERT INTO portfolio_tax
+                (user_id, ticker, purchase_date, ltcg_date, avg_cost)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (user_id, ticker.upper(), purchase_date, ltcg_date, avg_cost),
+        )
+        await db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Portfolio read operations
+# ---------------------------------------------------------------------------
+
+
+async def get_holdings(db_path: str, user_id: str) -> list[dict]:
+    """Return all holdings for ``user_id``, ordered by purchase_date."""
+    await init_db(db_path)
+    rows = []
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT ticker, company_name, avg_cost, quantity, purchase_date, allocation_pct
+            FROM portfolio_holdings
+            WHERE user_id = ?
+            ORDER BY purchase_date ASC, ticker ASC
+            """,
+            (user_id,),
+        ) as cursor:
+            async for row in cursor:
+                rows.append(dict(row))
+    return rows
+
+
+async def get_transactions(
+    db_path: str, user_id: str, ticker: str | None = None
+) -> list[dict]:
+    """Return transactions for ``user_id``, optionally filtered by ticker."""
+    await init_db(db_path)
+    rows = []
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        if ticker:
+            sql = (
+                "SELECT * FROM portfolio_transactions "
+                "WHERE user_id = ? AND ticker = ? ORDER BY txn_date DESC"
+            )
+            params = (user_id, ticker.upper())
+        else:
+            sql = (
+                "SELECT * FROM portfolio_transactions "
+                "WHERE user_id = ? ORDER BY txn_date DESC"
+            )
+            params = (user_id,)
+        async with db.execute(sql, params) as cursor:
+            async for row in cursor:
+                rows.append(dict(row))
+    return rows
+
+
+async def clear_portfolio(db_path: str, user_id: str) -> dict[str, int]:
+    """Delete all portfolio data for ``user_id``. Returns row counts deleted."""
+    await init_db(db_path)
+    counts: dict[str, int] = {}
+    async with aiosqlite.connect(db_path) as db:
+        for table in ("portfolio_holdings", "portfolio_transactions", "portfolio_tax"):
+            cur = await db.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))  # noqa: S608
+            counts[table] = cur.rowcount
+        await db.commit()
+    return counts
 
 
 # ---------------------------------------------------------------------------

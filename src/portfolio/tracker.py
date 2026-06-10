@@ -1,95 +1,88 @@
-"""Portfolio state management — reads and writes portfolio markdown files.
+"""Portfolio state management — async DB-backed per-user operations.
 
-Tracks actual trade records (holdings, transactions, tax) in the portfolio/
-directory.  Watchlist and rejection data are stored in the SQLite database
-(investor.db) — use ``src.db.repository`` for those queries.
+Each user's holdings, transactions, and tax records are stored in the shared
+SQLite database (investor.db) under their own user_id.  The default user_id
+comes from settings.investor_user (env var INVESTOR_USER, default 'default').
+
+Watchlist and rejection data are stored separately in the analyses table —
+use src.db.repository for those queries.
 """
 from __future__ import annotations
 
 from datetime import date
-from pathlib import Path
-from typing import List, Optional
 
+from src.config import settings
+from src.db.repository import (
+    add_holding as _db_add_holding,
+)
+from src.db.repository import (
+    add_tax_entry as _db_add_tax_entry,
+)
+from src.db.repository import (
+    add_transaction as _db_add_transaction,
+)
+from src.db.repository import (
+    get_holdings as _db_get_holdings,
+)
+from src.db.repository import (
+    get_transactions as _db_get_transactions,
+)
 from src.logging_config import get_logger
 
 
 class PortfolioTracker:
-    """Reads and writes the portfolio markdown files in portfolio/ directory."""
+    """Async DB-backed portfolio tracker.  All methods are coroutines."""
 
-    HOLDINGS_FILE = "holdings.md"
-    TRANSACTIONS_FILE = "transaction-log.md"
-    EXIT_FILE = "exit-tracker.md"
-    TAX_FILE = "tax-tracker.md"
-
-    def __init__(self, portfolio_dir: Optional[Path] = None) -> None:
-        self.portfolio_dir = portfolio_dir or Path("portfolio")
+    def __init__(
+        self,
+        db_path: str | None = None,
+        user_id: str | None = None,
+    ) -> None:
+        self.db_path = db_path or settings.db_path
+        self.user_id = user_id or settings.investor_user
         self.log = get_logger("portfolio")
 
     # ------------------------------------------------------------------
     # Holdings
     # ------------------------------------------------------------------
 
-    def add_holding(
+    async def add_holding(
         self,
         ticker: str,
         avg_cost: float,
         quantity: int,
         purchase_date: date,
-        allocation_pct: float,
+        allocation_pct: float = 0.0,
         company_name: str = "",
     ) -> None:
-        """Append a new holding to holdings.md.
-
-        Maintains the table format:
-        | Ticker | Company | Avg Cost | Qty | Purchase Date | Allocation % |
-        """
-        path = self.portfolio_dir / self.HOLDINGS_FILE
-        row = (
-            f"| {ticker} | {company_name or ticker} | ₹{avg_cost:.2f} "
-            f"| {quantity} | {purchase_date.isoformat()} | {allocation_pct:.1f}% |"
+        """Insert a new holding row for this user."""
+        await _db_add_holding(
+            db_path=self.db_path,
+            user_id=self.user_id,
+            ticker=ticker,
+            company_name=company_name or ticker,
+            avg_cost=avg_cost,
+            quantity=quantity,
+            purchase_date=purchase_date.isoformat(),
+            allocation_pct=allocation_pct,
         )
-        self._append_line(path, row)
         self.log.info(
             "holding_added",
+            user=self.user_id,
             ticker=ticker,
             avg_cost=avg_cost,
             quantity=quantity,
         )
 
-    def get_holdings(self) -> List[dict]:
-        """Parse holdings.md and return list of holding dicts."""
-        path = self.portfolio_dir / self.HOLDINGS_FILE
-        if not path.exists():
-            return []
-
-        holdings = []
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line.startswith("|") or "---" in line or "Ticker" in line:
-                continue
-            cells = [c.strip() for c in line.strip("|").split("|")]
-            if len(cells) >= 6:
-                try:
-                    holdings.append(
-                        {
-                            "ticker": cells[0],
-                            "company_name": cells[1],
-                            "avg_cost": float(cells[2].replace("₹", "").replace(",", "")),
-                            "quantity": int(cells[3]),
-                            "purchase_date": cells[4],
-                            "allocation_pct": float(cells[5].replace("%", "").strip()),
-                        }
-                    )
-                except (ValueError, IndexError):
-                    pass
-
-        return holdings
+    async def get_holdings(self) -> list[dict]:
+        """Return all holdings for this user."""
+        return await _db_get_holdings(self.db_path, self.user_id)
 
     # ------------------------------------------------------------------
     # Transactions
     # ------------------------------------------------------------------
 
-    def add_transaction(
+    async def add_transaction(
         self,
         ticker: str,
         action: str,
@@ -98,61 +91,54 @@ class PortfolioTracker:
         txn_date: date,
         notes: str = "",
     ) -> None:
-        """Append a transaction to transaction-log.md.
-
-        Format: | Date | Ticker | Action | Price | Qty | Notes |
-        """
-        path = self.portfolio_dir / self.TRANSACTIONS_FILE
-        row = (
-            f"| {txn_date.isoformat()} | {ticker} | {action.upper()} "
-            f"| ₹{price:.2f} | {quantity} | {notes} |"
+        """Insert a transaction row for this user."""
+        await _db_add_transaction(
+            db_path=self.db_path,
+            user_id=self.user_id,
+            ticker=ticker,
+            action=action.upper(),
+            price=price,
+            quantity=quantity,
+            txn_date=txn_date.isoformat(),
+            notes=notes,
         )
-        self._append_line(path, row)
         self.log.info(
             "transaction_added",
+            user=self.user_id,
             ticker=ticker,
-            action=action,
+            action=action.upper(),
             price=price,
             quantity=quantity,
         )
+
+    async def get_transactions(self, ticker: str | None = None) -> list[dict]:
+        """Return transactions for this user, optionally filtered by ticker."""
+        return await _db_get_transactions(self.db_path, self.user_id, ticker)
 
     # ------------------------------------------------------------------
     # Tax tracker
     # ------------------------------------------------------------------
 
-    def update_tax_tracker(
+    async def add_tax_entry(
         self,
         ticker: str,
         purchase_date: date,
         ltcg_date: date,
         avg_cost: float = 0.0,
     ) -> None:
-        """Append LTCG eligibility entry to tax-tracker.md.
-
-        Format: | Ticker | Purchase Date | LTCG Eligible Date | Avg Cost |
-        """
-        path = self.portfolio_dir / self.TAX_FILE
-        row = (
-            f"| {ticker} | {purchase_date.isoformat()} "
-            f"| {ltcg_date.isoformat()} | ₹{avg_cost:.2f} |"
+        """Insert an LTCG eligibility row for this user."""
+        await _db_add_tax_entry(
+            db_path=self.db_path,
+            user_id=self.user_id,
+            ticker=ticker,
+            purchase_date=purchase_date.isoformat(),
+            ltcg_date=ltcg_date.isoformat(),
+            avg_cost=avg_cost,
         )
-        self._append_line(path, row)
         self.log.info(
-            "tax_tracker_updated",
+            "tax_entry_added",
+            user=self.user_id,
             ticker=ticker,
             purchase_date=purchase_date.isoformat(),
             ltcg_date=ltcg_date.isoformat(),
         )
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
-    def _append_line(self, path: Path, line: str) -> None:
-        """Append a line to a file, creating it if necessary."""
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if not path.exists():
-            # Create with a minimal header for the table
-            path.write_text("", encoding="utf-8")
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(line + "\n")

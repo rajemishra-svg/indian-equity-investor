@@ -66,4 +66,42 @@ CREATE INDEX IF NOT EXISTS idx_analyses_ticker ON analyses(ticker);
 CREATE INDEX IF NOT EXISTS idx_analyses_date ON analyses(analysis_date);
 CREATE INDEX IF NOT EXISTS idx_analyses_recommendation ON analyses(recommendation);
 CREATE INDEX IF NOT EXISTS idx_snapshots_ticker_date ON data_snapshots(ticker, snapshot_date);
+
+CREATE TABLE IF NOT EXISTS portfolio_holdings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL DEFAULT 'default',
+    ticker TEXT NOT NULL,
+    company_name TEXT NOT NULL DEFAULT '',
+    avg_cost REAL NOT NULL,
+    quantity INTEGER NOT NULL,
+    purchase_date TEXT NOT NULL,            -- ISO date YYYY-MM-DD
+    allocation_pct REAL NOT NULL DEFAULT 0.0,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS portfolio_transactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL DEFAULT 'default',
+    ticker TEXT NOT NULL,
+    action TEXT NOT NULL,                   -- 'BUY' | 'SELL'
+    price REAL NOT NULL,
+    quantity INTEGER NOT NULL,
+    txn_date TEXT NOT NULL,                 -- ISO date YYYY-MM-DD
+    notes TEXT NOT NULL DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS portfolio_tax (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL DEFAULT 'default',
+    ticker TEXT NOT NULL,
+    purchase_date TEXT NOT NULL,            -- ISO date YYYY-MM-DD
+    ltcg_date TEXT NOT NULL,               -- 1 year after purchase_date
+    avg_cost REAL NOT NULL DEFAULT 0.0,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_holdings_user    ON portfolio_holdings(user_id);
+CREATE INDEX IF NOT EXISTS idx_transactions_user ON portfolio_transactions(user_id, txn_date);
+CREATE INDEX IF NOT EXISTS idx_tax_user         ON portfolio_tax(user_id);
 """

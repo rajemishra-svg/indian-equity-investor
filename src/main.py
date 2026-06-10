@@ -99,13 +99,20 @@ def _save_report(ticker: str, state: AnalysisState) -> None:
 
 
 @cli.command()
-def portfolio() -> None:
+@click.option(
+    "--user",
+    "user_id",
+    default=None,
+    envvar="INVESTOR_USER",
+    help="Portfolio user ID (default: settings.investor_user / INVESTOR_USER env var).",
+)
+def portfolio(user_id: str | None) -> None:
     """Show current portfolio holdings and summary."""
-    tracker = PortfolioTracker()
-    holdings = tracker.get_holdings()
+    tracker = PortfolioTracker(user_id=user_id)
+    holdings = asyncio.run(tracker.get_holdings())
 
     if not holdings:
-        console.print("[yellow]No holdings found in portfolio/holdings.md[/yellow]")
+        console.print(f"[yellow]No holdings found for user '{tracker.user_id}'.[/yellow]")
         return
 
     table = Table(title="Portfolio Holdings", show_header=True, header_style="bold cyan")
@@ -141,41 +148,54 @@ def portfolio() -> None:
 @click.argument("ticker")
 @click.argument("action", type=click.Choice(["BUY", "SELL"], case_sensitive=False))
 @click.argument("qty", type=int)
-@click.argument("price", type=float)
+@click.argument("price", type=str)  # str so we can strip commas before converting
 @click.option(
     "--date",
     "txn_date",
     default=None,
     help="Trade date in YYYY-MM-DD format (default: today).",
 )
-@click.option("--company", default="", help="Company name (used only when adding a new BUY holding).")
+@click.option("--company", default="", help="Company name (BUY only).")
 @click.option("--allocation", "allocation_pct", default=0.0, type=float, help="Allocation % of portfolio (BUY only).")
 @click.option("--notes", default="", help="Optional notes recorded in the transaction log.")
+@click.option(
+    "--user",
+    "user_id",
+    default=None,
+    envvar="INVESTOR_USER",
+    help="Portfolio user ID.",
+)
 def add_trade(
     ticker: str,
     action: str,
     qty: int,
-    price: float,
+    price: str,
     txn_date: str | None,
     company: str,
     allocation_pct: float,
     notes: str,
+    user_id: str | None,
 ) -> None:
-    """Record a BUY or SELL transaction.
-
-    Updates transaction-log.md and (for BUY) adds a row to holdings.md and
-    tax-tracker.md so LTCG eligibility is tracked automatically.
+    """Record a BUY or SELL transaction in the portfolio database.
 
     \b
     Examples:
       investor add-trade RELIANCE BUY 10 2850.50
       investor add-trade INFY SELL 5 1920.00 --date 2026-05-15 --notes "partial exit"
       investor add-trade HDFCBANK BUY 20 1650.00 --company "HDFC Bank" --allocation 5.0
+      investor add-trade RELIANCE BUY 10 2850.50 --user rm
     """
     ticker = _validate_ticker(ticker)
     action = action.upper()
 
-    # Parse / default the date
+    try:
+        price_f = float(price.replace(",", ""))
+    except ValueError:
+        raise click.BadParameter(
+            f"'{price}' is not a valid price. Use a number e.g. 1062.00 or 1,062.00",
+            param_hint="price",
+        )
+
     try:
         trade_date = date.fromisoformat(txn_date) if txn_date else date.today()
     except ValueError:
@@ -186,54 +206,43 @@ def add_trade(
 
     if qty <= 0:
         raise click.BadParameter("QTY must be a positive integer.", param_hint="qty")
-    if price <= 0:
+    if price_f <= 0:
         raise click.BadParameter("PRICE must be positive.", param_hint="price")
 
-    tracker = PortfolioTracker()
+    tracker = PortfolioTracker(user_id=user_id)
 
-    # Always log to transaction-log.md
-    tracker.add_transaction(
-        ticker=ticker,
-        action=action,
-        price=price,
-        quantity=qty,
-        txn_date=trade_date,
-        notes=notes,
-    )
+    async def _record() -> None:
+        await tracker.add_transaction(
+            ticker=ticker, action=action, price=price_f,
+            quantity=qty, txn_date=trade_date, notes=notes,
+        )
+        if action == "BUY":
+            await tracker.add_holding(
+                ticker=ticker, avg_cost=price_f, quantity=qty,
+                purchase_date=trade_date, allocation_pct=allocation_pct,
+                company_name=company or ticker,
+            )
+            ltcg_date = trade_date.replace(year=trade_date.year + 1)
+            await tracker.add_tax_entry(
+                ticker=ticker, purchase_date=trade_date,
+                ltcg_date=ltcg_date, avg_cost=price_f,
+            )
+
+    asyncio.run(_record())
+
     console.print(
-        f"[green]✓[/green] Transaction logged: {action} {qty} × {ticker} @ ₹{price:.2f} on {trade_date}"
+        f"[green]✓[/green] Transaction logged: {action} {qty} × {ticker} @ ₹{price_f:.2f} on {trade_date}"
+        f"  [dim](user: {tracker.user_id})[/dim]"
     )
-
     if action == "BUY":
-        # Add row to holdings.md
-        tracker.add_holding(
-            ticker=ticker,
-            avg_cost=price,
-            quantity=qty,
-            purchase_date=trade_date,
-            allocation_pct=allocation_pct,
-            company_name=company or ticker,
-        )
-        console.print(f"[green]✓[/green] Holding added to holdings.md")
-
-        # Add LTCG eligibility row (1 year from purchase date)
-        from datetime import timedelta
         ltcg_date = trade_date.replace(year=trade_date.year + 1)
-        tracker.update_tax_tracker(
-            ticker=ticker,
-            purchase_date=trade_date,
-            ltcg_date=ltcg_date,
-            avg_cost=price,
-        )
+        console.print("[green]✓[/green] Holding added to portfolio DB")
         console.print(
             f"[green]✓[/green] Tax tracker updated — LTCG eligible from {ltcg_date} "
             f"(gains > ₹1.25L taxed at 12.5% after that date)"
         )
-
     if action == "SELL":
-        console.print(
-            "[dim]Tip: update holdings.md manually to reflect reduced quantity / exit.[/dim]"
-        )
+        console.print("[dim]Tip: use 'investor portfolio' to review updated holdings.[/dim]")
 
 
 # ---------------------------------------------------------------------------
@@ -529,11 +538,15 @@ def scan(
     default=True,
     help="Save individual reports to analysis/reports/",
 )
-def portfolio_review(concurrency: int, save: bool) -> None:
+@click.option(
+    "--user",
+    "user_id",
+    default=None,
+    envvar="INVESTOR_USER",
+    help="Portfolio user ID.",
+)
+def portfolio_review(concurrency: int, save: bool, user_id: str | None) -> None:
     """Run a full 9-step analysis on every holding and recommend HOLD or SELL.
-
-    Reads portfolio/holdings.md, analyses each ticker via the investment
-    pipeline, then prints a ranked action table:
 
     \b
     - BUY    → HOLD + consider adding on dips
@@ -542,16 +555,34 @@ def portfolio_review(concurrency: int, save: bool) -> None:
 
     Reports are saved to analysis/reports/.
     """
-    import asyncio as _asyncio
     import time
 
-    tracker = PortfolioTracker()
-    holdings = tracker.get_holdings()
+    tracker = PortfolioTracker(user_id=user_id)
+
+    async def _run_all():
+        import asyncio as _aio
+
+        holdings = await tracker.get_holdings()
+        if not holdings:
+            return holdings, []
+        sem = _aio.Semaphore(concurrency)
+
+        async def _one(ticker: str):
+            async with sem:
+                return await InvestmentPipeline().analyze(ticker)
+
+        results = await _aio.gather(*[_one(h["ticker"]) for h in holdings], return_exceptions=True)
+        return holdings, list(results)
+
+    start = time.monotonic()
+    with console.status("[bold green]Analysing portfolio...[/bold green]"):
+        holdings, raw_results = asyncio.run(_run_all())
+    elapsed = time.monotonic() - start
 
     if not holdings:
         console.print(
-            "[yellow]No holdings found. "
-            "Add your Zerodha positions to portfolio/holdings.md first.[/yellow]"
+            f"[yellow]No holdings found for user '{tracker.user_id}'. "
+            "Add positions with: investor add-trade TICKER BUY QTY PRICE[/yellow]"
         )
         return
 
@@ -562,23 +593,6 @@ def portfolio_review(concurrency: int, save: bool) -> None:
         f"[bold cyan]Portfolio Review — {len(tickers)} holdings[/bold cyan]\n"
         f"[dim]Running full 9-step analysis on: {', '.join(tickers)}[/dim]\n"
     )
-
-    async def _run_all():
-        import asyncio
-        sem = asyncio.Semaphore(concurrency)
-
-        async def _analyse_one(ticker: str):
-            async with sem:
-                pipeline = InvestmentPipeline()
-                return await pipeline.analyze(ticker)
-
-        tasks = [_analyse_one(t) for t in tickers]
-        return await asyncio.gather(*tasks, return_exceptions=True)
-
-    start = time.monotonic()
-    with console.status("[bold green]Analysing portfolio...[/bold green]"):
-        raw_results = asyncio.run(_run_all())
-    elapsed = time.monotonic() - start
 
     # Build result table
     action_table = Table(
@@ -1105,8 +1119,8 @@ def watchlist_alerts() -> None:
             f"Run full analysis on: {', '.join(f'investor analyze {t}' for t in enter_zone)}"
         )
     console.print(
-        f"\n[dim]Prices via Yahoo Finance (~15-20 min delayed). "
-        f"Targets derived from DCF intrinsic at time of last analysis.[/dim]"
+        "\n[dim]Prices via Yahoo Finance (~15-20 min delayed). "
+        "Targets derived from DCF intrinsic at time of last analysis.[/dim]"
     )
 
 
@@ -1285,6 +1299,476 @@ def surveillance(days_since: int) -> None:
         f"Stale threshold: {days_since} days. "
         f"DB: {settings.db_path}[/dim]"
     )
+
+
+# ---------------------------------------------------------------------------
+# import-pnl command
+# ---------------------------------------------------------------------------
+
+
+@cli.command("import-pnl")
+@click.argument("xlsx_file", type=click.Path(exists=True, dir_okay=False))
+@click.option("--user", "user_id", default=None, envvar="INVESTOR_USER", help="Portfolio user ID.")
+@click.option("--dry-run", is_flag=True, default=False, help="Preview without writing to DB.")
+@click.option("--clear", is_flag=True, default=False, help="Clear existing portfolio data first.")
+def import_pnl(xlsx_file: str, user_id: str | None, dry_run: bool, clear: bool) -> None:
+    """Import holdings and BUY transactions from a Zerodha P&L Excel report.
+
+    Extracts two things from the Equity sheet:
+      - Open positions  → portfolio_holdings  (avg_cost = open_value / open_qty)
+      - Traded stocks   → BUY transactions    (avg_price = buy_value / quantity)
+
+    Sell transactions should be imported separately via import-tradebook.
+
+    \b
+    Example:
+      investor import-pnl ~/Downloads/pnl-UTT486.xlsx --user rm --clear
+    """
+    import openpyxl
+
+    tracker = PortfolioTracker(user_id=user_id)
+
+    wb = openpyxl.load_workbook(xlsx_file, data_only=True)
+    ws = wb["Equity"]
+
+    # Locate header row (contains 'Symbol')
+    header_row = None
+    for row in ws.iter_rows(values_only=True):
+        if row[1] == "Symbol":
+            header_row = row
+            break
+    if header_row is None:
+        console.print("[red]Could not find header row in Equity sheet.[/red]")
+        raise SystemExit(1)
+
+    # Parse period from sheet for use as BUY date placeholder
+    period_start = date(2025, 6, 1)
+    for row in ws.iter_rows(values_only=True):
+        if row[1] and isinstance(row[1], str) and "P&L Statement" in row[1]:
+            import re as _re
+            m = _re.search(r"from (\d{4}-\d{2}-\d{2})", row[1])
+            if m:
+                period_start = date.fromisoformat(m.group(1))
+            break
+
+    holdings, buy_txns = [], []
+    past_header = False
+    for row in ws.iter_rows(min_row=1, values_only=True):
+        if row[1] == "Symbol":
+            past_header = True
+            continue
+        if not past_header:
+            continue
+        symbol = row[1]
+        if not symbol or not isinstance(symbol, str) or symbol.strip() == "":
+            continue
+        try:
+            qty        = float(row[3] or 0)   # col D: Quantity (traded)
+            buy_val    = float(row[4] or 0)   # col E: Buy Value
+            open_qty   = float(row[9] or 0) if row[9] not in ("", None) else 0.0   # col J
+            open_val   = float(row[11] or 0) if row[11] not in ("", None) else 0.0  # col L
+        except (TypeError, ValueError):
+            continue
+
+        ticker = symbol.upper().strip()
+
+        # Open position → holding
+        if open_qty > 0 and open_val > 0:
+            avg_cost = round(open_val / open_qty, 4)
+            holdings.append({
+                "ticker": ticker,
+                "qty": int(open_qty),
+                "avg_cost": avg_cost,
+                "open_val": open_val,
+            })
+
+        # Traded position → BUY transaction
+        if qty > 0 and buy_val > 0:
+            avg_buy = round(buy_val / qty, 4)
+            buy_txns.append({
+                "ticker": ticker,
+                "qty": int(qty),
+                "avg_buy": avg_buy,
+                "buy_val": buy_val,
+            })
+
+    # ── Preview tables ────────────────────────────────────────────────────
+    h_table = Table(
+        title=f"Holdings (open positions) — {len(holdings)} stocks",
+        header_style="bold cyan",
+    )
+    h_table.add_column("Ticker", style="bold", width=16)
+    h_table.add_column("Qty", justify="right", width=6)
+    h_table.add_column("Avg Cost ₹", justify="right", width=12)
+    h_table.add_column("Value ₹", justify="right", width=12)
+    for h in sorted(holdings, key=lambda x: x["ticker"]):
+        h_table.add_row(h["ticker"], str(h["qty"]), f"{h['avg_cost']:,.2f}", f"{h['open_val']:,.0f}")
+    console.print(h_table)
+
+    b_table = Table(
+        title=f"BUY Transactions — {len(buy_txns)} stocks",
+        header_style="bold green",
+    )
+    b_table.add_column("Ticker", style="bold", width=16)
+    b_table.add_column("Qty", justify="right", width=6)
+    b_table.add_column("Avg Buy ₹", justify="right", width=12)
+    b_table.add_column("Buy Value ₹", justify="right", width=12)
+    for t in sorted(buy_txns, key=lambda x: x["ticker"]):
+        b_table.add_row(t["ticker"], str(t["qty"]), f"{t['avg_buy']:,.2f}", f"{t['buy_val']:,.0f}")
+    console.print(b_table)
+    console.print(f"[dim]BUY date placeholder: {period_start} (P&L period start)[/dim]")
+
+    if dry_run:
+        console.print("[yellow]Dry run — nothing written to DB.[/yellow]")
+        return
+
+    # ── Clear if requested ────────────────────────────────────────────────
+    if clear:
+        from src.db.repository import clear_portfolio
+        counts = asyncio.run(clear_portfolio(settings.db_path, tracker.user_id))
+        console.print(f"[yellow]Cleared {sum(counts.values())} rows for user [bold]{tracker.user_id}[/bold][/yellow]")
+
+    # ── Insert ────────────────────────────────────────────────────────────
+    async def _insert() -> None:
+        for h in holdings:
+            await tracker.add_holding(
+                ticker=h["ticker"],
+                avg_cost=h["avg_cost"],
+                quantity=h["qty"],
+                purchase_date=period_start,
+                allocation_pct=0.0,
+                company_name=h["ticker"],
+            )
+        for t in buy_txns:
+            await tracker.add_transaction(
+                ticker=t["ticker"],
+                action="BUY",
+                price=t["avg_buy"],
+                quantity=t["qty"],
+                txn_date=period_start,
+                notes=f"P&L import (buy_val={t['buy_val']:.2f})",
+            )
+
+    asyncio.run(_insert())
+    console.print(
+        f"\n[green]✓[/green] {len(holdings)} holdings + {len(buy_txns)} BUY transactions "
+        f"imported for user [bold]{tracker.user_id}[/bold] → {settings.db_path}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# import-tradebook command
+# ---------------------------------------------------------------------------
+
+
+@cli.command("import-tradebook")
+@click.argument("csv_file", type=click.Path(exists=True, dir_okay=False))
+@click.option(
+    "--user",
+    "user_id",
+    default=None,
+    envvar="INVESTOR_USER",
+    help="Portfolio user ID.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Preview aggregated transactions without writing to DB.",
+)
+@click.option(
+    "--clear",
+    is_flag=True,
+    default=False,
+    help="Delete all existing portfolio data for this user before importing.",
+)
+def import_tradebook(csv_file: str, user_id: str | None, dry_run: bool, clear: bool) -> None:
+    """Import a Zerodha tradebook CSV into the portfolio database.
+
+    Zerodha splits large orders across multiple fill rows sharing the same
+    order_id.  This command aggregates fills into one logical transaction per
+    order (weighted-average price, summed quantity) before inserting.
+
+    \b
+    Example:
+      investor import-tradebook ~/Downloads/tradebook-UTT486-EQ.csv --user rm
+      investor import-tradebook ~/Downloads/tradebook.csv --user rm --dry-run
+    """
+    import csv
+    from collections import defaultdict
+
+    tracker = PortfolioTracker(user_id=user_id)
+
+    # ── 1. Parse CSV and group fills by order_id ──────────────────────────
+    orders: dict[str, list[dict]] = defaultdict(list)
+    with open(csv_file, newline="", encoding="utf-8-sig") as fh:
+        for row in csv.DictReader(fh):
+            orders[row["order_id"]].append(row)
+
+    # ── 2. Aggregate fills into one logical transaction per order ─────────
+    txns = []
+    for order_id, fills in orders.items():
+        total_qty = sum(float(f["quantity"]) for f in fills)
+        total_value = sum(float(f["quantity"]) * float(f["price"]) for f in fills)
+        avg_price = total_value / total_qty if total_qty else 0.0
+
+        first = fills[0]
+        symbol = first["symbol"].upper().strip()
+        action = first["trade_type"].upper()  # BUY / SELL
+        trade_date = first["trade_date"]      # YYYY-MM-DD
+
+        txns.append({
+            "order_id": order_id,
+            "ticker": symbol,
+            "action": action,
+            "qty": int(total_qty),
+            "avg_price": round(avg_price, 4),
+            "date": trade_date,
+            "fills": len(fills),
+        })
+
+    txns.sort(key=lambda t: (t["date"], t["ticker"]))
+
+    # ── 3. Preview table ──────────────────────────────────────────────────
+    table = Table(
+        title=f"Tradebook — {len(txns)} orders from {csv_file}",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    table.add_column("Date", width=12)
+    table.add_column("Ticker", style="bold", width=16)
+    table.add_column("Action", width=6)
+    table.add_column("Qty", justify="right", width=6)
+    table.add_column("Avg Price ₹", justify="right", width=12)
+    table.add_column("Value ₹", justify="right", width=12)
+    table.add_column("Fills", justify="right", width=5)
+
+    for t in txns:
+        colour = "green" if t["action"] == "BUY" else "red"
+        table.add_row(
+            t["date"],
+            t["ticker"],
+            f"[{colour}]{t['action']}[/{colour}]",
+            str(t["qty"]),
+            f"{t['avg_price']:,.2f}",
+            f"{t['qty'] * t['avg_price']:,.0f}",
+            str(t["fills"]),
+        )
+
+    console.print(table)
+
+    if dry_run:
+        console.print("[yellow]Dry run — nothing written to DB.[/yellow]")
+        return
+
+    # ── 4. Clear existing data if requested ───────────────────────────────
+    if clear:
+        from src.db.repository import clear_portfolio
+        counts = asyncio.run(clear_portfolio(settings.db_path, tracker.user_id))
+        total_cleared = sum(counts.values())
+        console.print(
+            f"[yellow]Cleared {total_cleared} existing rows for user "
+            f"[bold]{tracker.user_id}[/bold][/yellow]"
+        )
+
+    # ── 5. Insert ─────────────────────────────────────────────────────────
+    async def _insert() -> None:
+        for t in txns:
+            await tracker.add_transaction(
+                ticker=t["ticker"],
+                action=t["action"],
+                price=t["avg_price"],
+                quantity=t["qty"],
+                txn_date=date.fromisoformat(t["date"]),
+                notes=f"Zerodha order {t['order_id']} ({t['fills']} fill{'s' if t['fills'] > 1 else ''})",
+            )
+
+    asyncio.run(_insert())
+    console.print(
+        f"\n[green]✓[/green] {len(txns)} transactions imported for user "
+        f"[bold]{tracker.user_id}[/bold] → {settings.db_path}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# clear-portfolio command
+# ---------------------------------------------------------------------------
+
+
+@cli.command("clear-portfolio")
+@click.option(
+    "--user",
+    "user_id",
+    default=None,
+    envvar="INVESTOR_USER",
+    help="Portfolio user ID whose data will be deleted.",
+)
+@click.confirmation_option(prompt="Delete ALL portfolio data for this user?")
+def clear_portfolio_cmd(user_id: str | None) -> None:
+    """Delete all holdings, transactions, and tax records for a user.
+
+    \b
+    Example:
+      investor clear-portfolio --user rm
+    """
+    from src.db.repository import clear_portfolio
+
+    uid = user_id or settings.investor_user
+    counts = asyncio.run(clear_portfolio(settings.db_path, uid))
+    total = sum(counts.values())
+    console.print(
+        f"[green]✓[/green] Cleared {total} rows for user [bold]{uid}[/bold] "
+        f"(holdings={counts['portfolio_holdings']}, "
+        f"transactions={counts['portfolio_transactions']}, "
+        f"tax={counts['portfolio_tax']})"
+    )
+
+
+# ---------------------------------------------------------------------------
+# migrate-portfolio command
+# ---------------------------------------------------------------------------
+
+
+@cli.command("migrate-portfolio")
+@click.option(
+    "--user",
+    "user_id",
+    required=True,
+    envvar="INVESTOR_USER",
+    help="User ID to assign all migrated records (e.g. 'rm').",
+)
+@click.option(
+    "--portfolio-dir",
+    default="portfolio",
+    show_default=True,
+    help="Directory containing the legacy markdown files.",
+)
+def migrate_portfolio(user_id: str, portfolio_dir: str) -> None:
+    """Migrate legacy portfolio markdown files into the SQLite database.
+
+    Reads holdings.md, transaction-log.md, and tax-tracker.md from
+    --portfolio-dir and inserts every row into the DB under --user.
+    Safe to re-run: duplicate rows are inserted as additional records
+    (not upserted), so run only once per file.
+
+    \b
+    Example:
+      investor migrate-portfolio --user rm
+    """
+    from pathlib import Path
+
+    import aiosqlite
+
+    from src.db.repository import init_db
+
+    pdir = Path(portfolio_dir)
+
+    async def _migrate() -> dict[str, int]:
+        await init_db(settings.db_path)
+        counts: dict[str, int] = {"holdings": 0, "transactions": 0, "tax": 0}
+
+        # --- holdings.md ---
+        hfile = pdir / "holdings.md"
+        if hfile.exists():
+            async with aiosqlite.connect(settings.db_path) as db:
+                for line in hfile.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if not line.startswith("|") or "---" in line or "Ticker" in line:
+                        continue
+                    cells = [c.strip() for c in line.strip("|").split("|")]
+                    if len(cells) < 6:
+                        continue
+                    try:
+                        await db.execute(
+                            "INSERT INTO portfolio_holdings "
+                            "(user_id,ticker,company_name,avg_cost,quantity,purchase_date,allocation_pct) "
+                            "VALUES (?,?,?,?,?,?,?)",
+                            (
+                                user_id,
+                                cells[0].upper(),
+                                cells[1],
+                                float(cells[2].replace("₹", "").replace(",", "")),
+                                int(cells[3]),
+                                cells[4],
+                                float(cells[5].replace("%", "").strip()),
+                            ),
+                        )
+                        counts["holdings"] += 1
+                    except (ValueError, IndexError):
+                        pass
+                await db.commit()
+
+        # --- transaction-log.md ---
+        tfile = pdir / "transaction-log.md"
+        if tfile.exists():
+            async with aiosqlite.connect(settings.db_path) as db:
+                for line in tfile.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if not line.startswith("|") or "---" in line or "Date" in line:
+                        continue
+                    cells = [c.strip() for c in line.strip("|").split("|")]
+                    if len(cells) < 5:
+                        continue
+                    try:
+                        await db.execute(
+                            "INSERT INTO portfolio_transactions "
+                            "(user_id,txn_date,ticker,action,price,quantity,notes) "
+                            "VALUES (?,?,?,?,?,?,?)",
+                            (
+                                user_id,
+                                cells[0],
+                                cells[1].upper(),
+                                cells[2].upper(),
+                                float(cells[3].replace("₹", "").replace(",", "")),
+                                int(cells[4]),
+                                cells[5] if len(cells) > 5 else "",
+                            ),
+                        )
+                        counts["transactions"] += 1
+                    except (ValueError, IndexError):
+                        pass
+                await db.commit()
+
+        # --- tax-tracker.md ---
+        xfile = pdir / "tax-tracker.md"
+        if xfile.exists():
+            async with aiosqlite.connect(settings.db_path) as db:
+                for line in xfile.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if not line.startswith("|") or "---" in line or "Ticker" in line:
+                        continue
+                    cells = [c.strip() for c in line.strip("|").split("|")]
+                    if len(cells) < 3:
+                        continue
+                    try:
+                        await db.execute(
+                            "INSERT INTO portfolio_tax "
+                            "(user_id,ticker,purchase_date,ltcg_date,avg_cost) "
+                            "VALUES (?,?,?,?,?)",
+                            (
+                                user_id,
+                                cells[0].upper(),
+                                cells[1],
+                                cells[2],
+                                float(cells[3].replace("₹", "").replace(",", "")) if len(cells) > 3 else 0.0,
+                            ),
+                        )
+                        counts["tax"] += 1
+                    except (ValueError, IndexError):
+                        pass
+                await db.commit()
+
+        return counts
+
+    counts = asyncio.run(_migrate())
+    console.print(f"[green]✓[/green] Migration complete for user [bold]{user_id}[/bold]:")
+    console.print(f"  Holdings:     {counts['holdings']} rows")
+    console.print(f"  Transactions: {counts['transactions']} rows")
+    console.print(f"  Tax entries:  {counts['tax']} rows")
+    if all(v == 0 for v in counts.values()):
+        console.print(
+            f"[dim]No markdown files found in '{portfolio_dir}/' or all files were empty.[/dim]"
+        )
 
 
 if __name__ == "__main__":
