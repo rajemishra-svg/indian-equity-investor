@@ -338,6 +338,37 @@ class YFinanceClient:
             log.warning("yfinance_valuation_failed", ticker=ticker, error=str(exc))
             return None
 
+    async def get_annualized_volatility(
+        self, ticker: str, period: str = "1y"
+    ) -> float | None:
+        """Annualized daily-return volatility for an NSE ticker, in percent.
+
+        Standard deviation of daily close-to-close returns over ``period``,
+        scaled by √252.  Used by Step 9 volatility-aware position sizing.
+        Returns None when history is too short (< 60 trading days) or on any
+        fetch failure — callers must treat None as "do not risk-adjust".
+        """
+        yf_symbol = _to_yf_symbol(ticker)
+
+        def _fetch() -> float | None:
+            try:
+                hist = yf.Ticker(yf_symbol).history(period=period, interval="1d")
+                if hist is None or len(hist) < 60:
+                    return None
+                returns = hist["Close"].pct_change().dropna()
+                if len(returns) < 60:
+                    return None
+                return round(float(returns.std() * (252**0.5) * 100), 2)
+            except Exception:
+                return None
+
+        vol = await asyncio.get_event_loop().run_in_executor(None, _fetch)
+        if vol is None:
+            log.warning("yfinance_volatility_unavailable", ticker=ticker, period=period)
+        else:
+            log.info("yfinance_volatility_ok", ticker=ticker, annualized_vol_pct=vol)
+        return vol
+
     async def get_close_series(
         self, yf_symbol: str, start: str
     ) -> dict[str, float] | None:

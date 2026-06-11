@@ -64,6 +64,9 @@ class Step9Output(BaseStep):
         # Set conviction and allocation
         self._set_conviction(state)
 
+        # Risk-adjust the allocation by realized volatility (BUY only)
+        await self._apply_volatility_sizing(state)
+
         # Build tranches
         self._build_tranches(state)
 
@@ -150,6 +153,60 @@ class Step9Output(BaseStep):
         is_pre_profit = any("EC-01" in flag for flag in state.all_data_flags)
         if is_pre_profit and state.suggested_allocation_pct and state.suggested_allocation_pct > 4.0:
             state.suggested_allocation_pct = 4.0
+
+    async def _apply_volatility_sizing(self, state: AnalysisState) -> None:
+        """Scale the suggested allocation by realized volatility (vol targeting).
+
+        allocation × clamp(target_vol / realized_vol, min_factor, 1.0) — a
+        stock at/below target volatility keeps its full conviction-based
+        allocation; riskier names are cut proportionally so a 50%-vol small
+        cap at HIGH conviction no longer gets the same weight as a 20%-vol
+        large cap.  Rounded to the nearest 0.5%, floored at 1%.
+
+        When volatility cannot be computed the allocation is left unchanged
+        and flagged — never silently risk-adjust on bad data.
+        """
+        if state.recommendation_type != "BUY" or not state.suggested_allocation_pct:
+            return
+        yf_client = self.clients.get("yfinance")
+        if yf_client is None:
+            return
+
+        try:
+            vol = await yf_client.get_annualized_volatility(state.ticker)
+        except Exception as exc:
+            self.log.warning("volatility_fetch_failed", ticker=state.ticker, error=str(exc))
+            vol = None
+        if not isinstance(vol, (int, float)) or vol <= 0:
+            state.add_flag(
+                "[DATA UNVERIFIED: realized volatility — allocation not risk-adjusted]"
+            )
+            return
+
+        target = settings.sizing_target_vol_pct
+        factor = max(settings.sizing_min_factor, min(1.0, target / vol))
+        if factor >= 0.999:
+            state.add_flag(
+                f"[VOLATILITY SIZING: {vol:.0f}% annualized vol ≤ {target:.0f}% target — "
+                "allocation unchanged]"
+            )
+            return
+
+        base_alloc = state.suggested_allocation_pct
+        scaled = max(1.0, round(base_alloc * factor * 2) / 2)  # nearest 0.5%, floor 1%
+        state.suggested_allocation_pct = scaled
+        state.add_flag(
+            f"[VOLATILITY SIZING: {vol:.0f}% annualized vol vs {target:.0f}% target → "
+            f"allocation {base_alloc:.1f}% → {scaled:.1f}%]"
+        )
+        self.log.info(
+            "volatility_sizing_applied",
+            ticker=state.ticker,
+            annualized_vol_pct=vol,
+            factor=round(factor, 3),
+            base_allocation_pct=base_alloc,
+            scaled_allocation_pct=scaled,
+        )
 
     def _build_tranches(self, state: AnalysisState) -> None:
         """Build tranche plan from technical signals using sector-aware discounts."""

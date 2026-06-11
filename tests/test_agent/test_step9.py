@@ -56,3 +56,74 @@ async def test_thesis_built_for_actionable_outcomes(rtype):
     state = await step.run(state)
 
     assert state.investment_thesis == "A durable compounding thesis."
+
+
+# ---------------------------------------------------------------------------
+# Volatility-aware position sizing
+# ---------------------------------------------------------------------------
+
+
+def _yf_with_vol(vol):
+    client = MagicMock()
+    client.get_annualized_volatility = AsyncMock(return_value=vol)
+    return client
+
+
+def _buy_state() -> AnalysisState:
+    return AnalysisState(ticker="GOODCO", recommendation_type="BUY")
+
+
+@pytest.mark.asyncio
+async def test_high_volatility_halves_allocation():
+    # Empty gate scores → LOW conviction → base allocation 2.0%
+    yf = _yf_with_vol(50.0)  # 2× the 25% target → factor 0.5
+    step = Step9Output(_thesis_claude(), {"yfinance": yf})
+    state = await step.run(_buy_state())
+
+    assert state.suggested_allocation_pct == pytest.approx(1.0)
+    assert any("VOLATILITY SIZING" in f and "2.0% → 1.0%" in f for f in state.all_data_flags)
+
+
+@pytest.mark.asyncio
+async def test_low_volatility_keeps_full_allocation():
+    yf = _yf_with_vol(18.0)  # below target — no cut
+    step = Step9Output(_thesis_claude(), {"yfinance": yf})
+    state = await step.run(_buy_state())
+
+    assert state.suggested_allocation_pct == pytest.approx(2.0)
+    assert any("allocation unchanged" in f for f in state.all_data_flags)
+
+
+@pytest.mark.asyncio
+async def test_extreme_volatility_clamped_at_min_factor():
+    yf = _yf_with_vol(200.0)  # raw factor 0.125 → clamped to 0.4 → 0.8 → floor 1.0
+    step = Step9Output(_thesis_claude(), {"yfinance": yf})
+    state = await step.run(_buy_state())
+
+    assert state.suggested_allocation_pct == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+async def test_missing_volatility_flags_and_keeps_allocation():
+    yf = _yf_with_vol(None)
+    step = Step9Output(_thesis_claude(), {"yfinance": yf})
+    state = await step.run(_buy_state())
+
+    assert state.suggested_allocation_pct == pytest.approx(2.0)
+    assert any("not risk-adjusted" in f for f in state.all_data_flags)
+
+
+@pytest.mark.asyncio
+async def test_no_volatility_fetch_for_non_buy():
+    yf = _yf_with_vol(50.0)
+    state = AnalysisState(
+        ticker="REJECTCO",
+        recommendation_type="REJECT",
+        terminated_at_step=1,
+        termination_reason="gate failure",
+    )
+    step = Step9Output(_refusing_claude(), {"yfinance": yf})
+    state = await step.run(state)
+
+    yf.get_annualized_volatility.assert_not_awaited()
+    assert state.suggested_allocation_pct is None

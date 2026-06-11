@@ -335,6 +335,10 @@ tranche_t3_discount  = 0.15   # 15% below CMP
 stop_loss_large_cap  = 0.82   # 18% below buy price
 stop_loss_mid_cap    = 0.75   # 25% below buy price
 stop_loss_small_cap  = 0.70   # 30% below buy price
+
+# Volatility-aware sizing (Step 9, BUY only)
+sizing_target_vol_pct = 25.0  # annualized vol at/below which allocation is untouched
+sizing_min_factor     = 0.4   # clamp so small caps aren't over-punished
 ```
 
 ---
@@ -363,6 +367,8 @@ These rules are baked into the step prompts and scoring logic — do not weaken 
 If Nifty data unavailable, defaults to Normal + adds `[MODE UNCONFIRMED]` flag.
 
 **Watchlist tiers**: Tier 1 = all steps passed + valuation in buy zone (max 15). Tier 2 = Steps 1–5 passed, valuation not attractive (max 30). Tier 3 = Steps 1–3 passed, research pending. All tiers persisted to `investor.db` — no markdown files.
+
+**Position sizing**: conviction sets the base allocation (HIGH 5% / MEDIUM 3% / LOW 2%), then Step 9 risk-adjusts BUYs by realized volatility: `allocation × clamp(sizing_target_vol_pct / annualized_vol, sizing_min_factor, 1.0)`, rounded to 0.5%, floored at 1%. Volatility comes from 1Y daily returns via yfinance (`get_annualized_volatility`); when unavailable the allocation is left unchanged and flagged `[DATA UNVERIFIED: realized volatility]`. EC-01 pre-profit cap (≤4%) applies before scaling.
 
 **Tranche plan** (always in BUY output): T1 40% @ CMP, T2 35% @ CMP×(1−tranche_t2_discount), T3 25% @ CMP×(1−tranche_t3_discount). Default discounts: 8%/15%. Sector profiles (e.g., `commodities_cyclical`) override these. Stop-loss thresholds: large-cap 18%, mid-cap 25%, small-cap 30% — all configurable via settings.
 

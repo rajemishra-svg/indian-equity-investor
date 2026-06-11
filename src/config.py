@@ -82,5 +82,13 @@ class Settings(BaseSettings):
     stop_loss_mid_cap: float = 0.75
     stop_loss_small_cap: float = 0.70
 
+    # --- Volatility-aware position sizing (Step 9) ---
+    # Allocation is scaled by clamp(target_vol / realized_vol, min_factor, 1.0):
+    # a stock at/below target volatility keeps its full conviction-based
+    # allocation; riskier names are cut proportionally. 25% ≈ typical Indian
+    # large-cap annualized vol; the floor prevents over-punishing small caps.
+    sizing_target_vol_pct: float = 25.0
+    sizing_min_factor: float = 0.4
+
 
 settings = Settings()
