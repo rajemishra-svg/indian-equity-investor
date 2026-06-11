@@ -228,3 +228,58 @@ async def test_page_cannot_close_untrusted_tag_early(monkeypatch):
     assert result.count("<untrusted_web_content>") == 1
     assert result.count("</untrusted_web_content>") == 1
     assert "[REDACTED]" in result
+
+
+# ---------------------------------------------------------------------------
+# Web search — two-frontend fallback
+# ---------------------------------------------------------------------------
+
+_DDG_HTML_PAGE = """<html><body>
+<div class="result">
+  <a class="result__a" href="#">RELIANCE Q4 results</a>
+  <a class="result__snippet" href="#">Reliance posts record quarterly profit.</a>
+</div>
+</body></html>"""
+
+_DDG_LITE_PAGE = """<html><body><table>
+<tr><td><a class="result-link" href="#">RELIANCE concall transcript</a></td></tr>
+<tr><td class="result-snippet">Management discussed capex plans.</td></tr>
+</table></body></html>"""
+
+
+@pytest.mark.asyncio
+async def test_web_search_uses_html_frontend_first(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "html.duckduckgo.com":
+            return httpx.Response(200, text=_DDG_HTML_PAGE)
+        raise AssertionError("lite frontend must not be hit when html works")
+
+    _patched_client(monkeypatch, handler)
+    result = await tools_mod._web_search("reliance results")
+    assert "RELIANCE Q4 results" in result
+    assert result.startswith("<untrusted_web_content>")
+
+
+@pytest.mark.asyncio
+async def test_web_search_falls_back_to_lite_frontend(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "html.duckduckgo.com":
+            return httpx.Response(200, text="<html><body>layout changed</body></html>")
+        if request.url.host == "lite.duckduckgo.com":
+            return httpx.Response(200, text=_DDG_LITE_PAGE)
+        raise AssertionError(f"unexpected host {request.url.host}")
+
+    _patched_client(monkeypatch, handler)
+    result = await tools_mod._web_search("reliance concall")
+    assert "RELIANCE concall transcript" in result
+    assert "capex plans" in result
+
+
+@pytest.mark.asyncio
+async def test_web_search_reports_when_both_frontends_empty(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html><body>nothing here</body></html>")
+
+    _patched_client(monkeypatch, handler)
+    result = await tools_mod._web_search("obscure query")
+    assert result == "[NO RESULTS FOUND]"

@@ -38,8 +38,18 @@ async def _noop(value):
 class InvestmentPipeline:
     """Orchestrates the 9-step investment analysis pipeline."""
 
-    def __init__(self) -> None:
-        self.claude = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key.get_secret_value())
+    def __init__(self, claude: anthropic.AsyncAnthropic | None = None) -> None:
+        """
+        Args:
+            claude: Optional shared AsyncAnthropic client. The batch scanner
+                passes one client for all Phase 3 pipelines (it is stateless
+                and concurrency-safe) instead of building one per candidate.
+                HTTP clients stay per-pipeline — their async context-manager
+                lifecycle is owned by each analyze() call.
+        """
+        self.claude = claude or anthropic.AsyncAnthropic(
+            api_key=settings.anthropic_api_key.get_secret_value()
+        )
         self.nse = NSEClient()
         self.screener = ScreenerClient()
         self.bse = BSEClient()

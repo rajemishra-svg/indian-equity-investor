@@ -283,3 +283,10 @@ async def test_mode_detection_sets_market_mode(mock_pipeline_env):
 
     assert state.mode == MarketMode.CORRECTION
     assert state.nifty_decline_pct == pytest.approx(12.5, rel=0.01)
+
+
+def test_pipeline_accepts_shared_claude_client():
+    """The batch scanner shares one AsyncAnthropic client across Phase 3 pipelines."""
+    sentinel = object()
+    pipeline = InvestmentPipeline(claude=sentinel)  # type: ignore[arg-type]
+    assert pipeline.claude is sentinel

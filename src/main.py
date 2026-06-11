@@ -106,8 +106,14 @@ def _save_report(ticker: str, state: AnalysisState) -> None:
     envvar="INVESTOR_USER",
     help="Portfolio user ID (default: settings.investor_user / INVESTOR_USER env var).",
 )
-def portfolio(user_id: str | None) -> None:
-    """Show current portfolio holdings and summary."""
+@click.option(
+    "--lots",
+    is_flag=True,
+    default=False,
+    help="Show individual purchase lots instead of per-ticker totals.",
+)
+def portfolio(user_id: str | None, lots: bool) -> None:
+    """Show current portfolio holdings — per-ticker totals, or raw lots with --lots."""
     tracker = PortfolioTracker(user_id=user_id)
     holdings = asyncio.run(tracker.get_holdings())
 
@@ -115,25 +121,80 @@ def portfolio(user_id: str | None) -> None:
         console.print(f"[yellow]No holdings found for user '{tracker.user_id}'.[/yellow]")
         return
 
-    table = Table(title="Portfolio Holdings", show_header=True, header_style="bold cyan")
-    table.add_column("Ticker", style="bold")
-    table.add_column("Company")
-    table.add_column("Avg Cost", justify="right")
-    table.add_column("Qty", justify="right")
-    table.add_column("Purchase Date")
-    table.add_column("Allocation %", justify="right")
-
     total_alloc = 0.0
-    for h in holdings:
-        table.add_row(
-            h["ticker"],
-            h.get("company_name", ""),
-            f"₹{h['avg_cost']:.2f}",
-            str(h["quantity"]),
-            h.get("purchase_date", ""),
-            f"{h['allocation_pct']:.1f}%",
+
+    if lots:
+        table = Table(
+            title="Portfolio Holdings — purchase lots",
+            show_header=True,
+            header_style="bold cyan",
         )
-        total_alloc += h["allocation_pct"]
+        table.add_column("Ticker", style="bold")
+        table.add_column("Company")
+        table.add_column("Lot Cost", justify="right")
+        table.add_column("Qty", justify="right")
+        table.add_column("Purchase Date")
+        table.add_column("Allocation %", justify="right")
+
+        for h in holdings:
+            table.add_row(
+                h["ticker"],
+                h.get("company_name", ""),
+                f"₹{h['avg_cost']:.2f}",
+                str(h["quantity"]),
+                h.get("purchase_date", ""),
+                f"{h['allocation_pct']:.1f}%",
+            )
+            total_alloc += h["allocation_pct"]
+    else:
+        # Per-ticker rollup: quantity-weighted average cost across FIFO lots
+        agg: dict[str, dict] = {}
+        for h in holdings:
+            entry = agg.setdefault(
+                h["ticker"],
+                {
+                    "company": h.get("company_name", ""),
+                    "qty": 0,
+                    "cost": 0.0,
+                    "lots": 0,
+                    "first_buy": h.get("purchase_date", ""),
+                    "alloc": 0.0,
+                },
+            )
+            entry["qty"] += h["quantity"]
+            entry["cost"] += h["avg_cost"] * h["quantity"]
+            entry["lots"] += 1
+            first = h.get("purchase_date", "")
+            if first and (not entry["first_buy"] or first < entry["first_buy"]):
+                entry["first_buy"] = first
+            entry["alloc"] += h["allocation_pct"]
+
+        table = Table(
+            title="Portfolio Holdings — per ticker (use --lots for purchase lots)",
+            show_header=True,
+            header_style="bold cyan",
+        )
+        table.add_column("Ticker", style="bold")
+        table.add_column("Company")
+        table.add_column("Lots", justify="right")
+        table.add_column("Total Qty", justify="right")
+        table.add_column("W.Avg Cost", justify="right")
+        table.add_column("First Buy")
+        table.add_column("Allocation %", justify="right")
+
+        for ticker in sorted(agg):
+            entry = agg[ticker]
+            w_avg = entry["cost"] / entry["qty"] if entry["qty"] else 0.0
+            table.add_row(
+                ticker,
+                entry["company"],
+                str(entry["lots"]),
+                str(entry["qty"]),
+                f"₹{w_avg:.2f}",
+                entry["first_buy"],
+                f"{entry['alloc']:.1f}%",
+            )
+            total_alloc += entry["alloc"]
 
     console.print(table)
     console.print(f"\n[bold]Total Allocation: {total_alloc:.1f}%[/bold]")

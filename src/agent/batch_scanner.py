@@ -295,8 +295,16 @@ class BatchScanner:
             return summaries, []
 
         # Phase 3: full pipeline — bounded concurrency (3 parallel analyses).
-        # Each pipeline manages its own HTTP sessions; Screener's module-level
-        # semaphore caps domain-level request rate independently.
+        # One AsyncAnthropic client is shared by every pipeline (stateless,
+        # concurrency-safe — avoids a connection pool per candidate); HTTP
+        # clients stay per-pipeline because each analyze() owns their async
+        # context-manager lifecycle. Screener's module-level semaphore caps
+        # domain-level request rate independently.
+        import anthropic
+
+        shared_claude = anthropic.AsyncAnthropic(
+            api_key=settings.anthropic_api_key.get_secret_value()
+        )
         pipeline_concurrency = 3
         pipeline_sem = asyncio.Semaphore(pipeline_concurrency)
 
@@ -308,7 +316,7 @@ class BatchScanner:
                     prescreen_score=summary.score,
                 )
                 try:
-                    pipeline = InvestmentPipeline()
+                    pipeline = InvestmentPipeline(claude=shared_claude)
                     return await pipeline.analyze(summary.ticker)
                 except Exception as exc:
                     log.warning("full_analysis_failed", ticker=summary.ticker, error=str(exc))

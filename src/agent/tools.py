@@ -273,34 +273,69 @@ def _wrap_untrusted(text: str) -> str:
     return f"<{UNTRUSTED_TAG}>\n{text}\n</{UNTRUSTED_TAG}>"
 
 
-async def _web_search(query: str) -> str:
-    """Perform a web search via DuckDuckGo lite."""
-    url = f"https://html.duckduckgo.com/html/?{urlencode({'q': query})}"
-    try:
-        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-            resp = await client.get(
-                url,
-                headers={
-                    "User-Agent": (
-                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                        "AppleWebKit/537.36"
-                    )
-                },
+async def _ddg_html_results(client: httpx.AsyncClient, query: str) -> list[str]:
+    """Parse the html.duckduckgo.com frontend (div.result layout)."""
+    resp = await client.get(f"https://html.duckduckgo.com/html/?{urlencode({'q': query})}")
+    soup = BeautifulSoup(resp.text, "lxml")
+    results: list[str] = []
+    for result in soup.find_all("div", class_="result")[:5]:
+        title_tag = result.find("a", class_="result__a")
+        snippet_tag = result.find("a", class_="result__snippet")
+        if title_tag:
+            title = title_tag.get_text(strip=True)
+            snippet = snippet_tag.get_text(strip=True) if snippet_tag else ""
+            results.append(
+                _sanitize_web_text(f"TITLE: {title}\nSNIPPET: {snippet}", max_chars=500)
             )
-        soup = BeautifulSoup(resp.text, "lxml")
-        results = []
-        for result in soup.find_all("div", class_="result")[:5]:
-            title_tag = result.find("a", class_="result__a")
-            snippet_tag = result.find("a", class_="result__snippet")
-            if title_tag:
-                title = title_tag.get_text(strip=True)
-                snippet = snippet_tag.get_text(strip=True) if snippet_tag else ""
-                entry = f"TITLE: {title}\nSNIPPET: {snippet}"
-                results.append(_sanitize_web_text(entry, max_chars=500))
+    return results
+
+
+async def _ddg_lite_results(client: httpx.AsyncClient, query: str) -> list[str]:
+    """Parse the lite.duckduckgo.com frontend (plain-table layout)."""
+    resp = await client.get(f"https://lite.duckduckgo.com/lite/?{urlencode({'q': query})}")
+    soup = BeautifulSoup(resp.text, "lxml")
+    links = soup.find_all("a", class_="result-link")[:5]
+    snippets = soup.find_all("td", class_="result-snippet")
+    results: list[str] = []
+    for i, link in enumerate(links):
+        title = link.get_text(strip=True)
+        snippet = snippets[i].get_text(strip=True) if i < len(snippets) else ""
+        results.append(
+            _sanitize_web_text(f"TITLE: {title}\nSNIPPET: {snippet}", max_chars=500)
+        )
+    return results
+
+
+async def _web_search(query: str) -> str:
+    """Web search via DuckDuckGo with a two-frontend fallback.
+
+    Scraped HTML layouts break silently when the provider changes markup or
+    rate-limits one frontend.  Trying html.duckduckgo.com first and falling
+    back to lite.duckduckgo.com (independent layout) makes quiet degradation
+    of Step 2 moat research much less likely, and both failure paths log a
+    structured warning so a dead search backend is visible in the logs.
+    """
+    try:
+        async with httpx.AsyncClient(
+            timeout=15.0,
+            follow_redirects=True,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36"
+                )
+            },
+        ) as client:
+            results = await _ddg_html_results(client, query)
+            if not results:
+                log.warning("web_search_html_layout_empty", query=query, fallback="lite")
+                results = await _ddg_lite_results(client, query)
         if results:
             return _wrap_untrusted("\n\n".join(results))
+        log.warning("web_search_no_results_any_frontend", query=query)
         return "[NO RESULTS FOUND]"
     except Exception as exc:
+        log.warning("web_search_failed", query=query, error=str(exc))
         return f"[SEARCH ERROR: {exc}]"
 
 
