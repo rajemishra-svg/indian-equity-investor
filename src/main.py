@@ -1306,6 +1306,37 @@ def surveillance(days_since: int) -> None:
 
     console.print(table)
 
+    # Fundamental drift — diff the two most recent snapshots per ticker.
+    # Catches what price drift can't: pledging creep, ROCE/CFO deterioration,
+    # leverage building toward hard-trigger levels.
+    from src.monitor.deltas import scan_fundamental_drift
+
+    with console.status("[bold green]Checking fundamental drift between snapshots...[/bold green]"):
+        drift = asyncio.run(scan_fundamental_drift(settings.db_path, tickers))
+
+    if drift:
+        drift_table = Table(
+            title="Fundamental Drift — latest snapshot vs prior",
+            show_header=True,
+            header_style="bold cyan",
+        )
+        drift_table.add_column("Ticker", style="bold", width=12)
+        drift_table.add_column("Severity", width=8)
+        drift_table.add_column("Change", width=70)
+
+        for ticker, alerts in drift.items():
+            for alert in alerts:
+                colour = "red" if alert.severity == "HIGH" else "yellow"
+                drift_table.add_row(
+                    ticker,
+                    f"[{colour}]{alert.severity}[/{colour}]",
+                    alert.message,
+                )
+            if any(a.severity == "HIGH" for a in alerts):
+                re_analyse.append(ticker)
+
+        console.print(drift_table)
+
     # Summary actions
     if enter_zone:
         console.print(
@@ -1326,6 +1357,7 @@ def surveillance(days_since: int) -> None:
     console.print(
         f"\n[dim]Prices via Yahoo Finance (~15-20 min delayed). "
         f"Stale threshold: {days_since} days. "
+        f"Fundamental drift compares the two most recent stored snapshots. "
         f"DB: {settings.db_path}[/dim]"
     )
 

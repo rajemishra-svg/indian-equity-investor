@@ -41,7 +41,7 @@ uv run investor correction-scan                            # market mode + Tier-
 
 # CLI — post-buy monitoring
 uv run investor watchlist-alerts                           # live CMP vs DCF target price
-uv run investor surveillance                               # sweep all BUY+WATCHLIST for drift/staleness
+uv run investor surveillance                               # staleness + price drift + fundamental drift sweep
 uv run investor surveillance --days-since 14              # flag analyses older than 14 days
 
 # CLI — backtesting (validate the gates against history; no Claude calls)
@@ -229,7 +229,7 @@ Also exposes `is_conglomerate(company_name, ticker)` — checks against `_CONGLO
 | P1-2 PE percentile | `yfinance_client.py` | `_compute_pe_percentile()` builds 5Y trailing-PE series; used as Step 5 Method 1 |
 | P1-3 Working capital | `screener.py` + Step 3 | Debtor/inventory days computed; >30% deterioration flagged |
 | P1-4 Earnings quality | `screener.py` + Step 3 | Other income > 15% of revenue flagged |
-| P2-1 Surveillance | `main.py` + `repository.py` | `investor surveillance` sweeps all BUY+WATCHLIST for staleness/price drift |
+| P2-1 Surveillance | `main.py` + `repository.py` + `monitor/deltas.py` | `investor surveillance` sweeps all BUY+WATCHLIST for staleness/price drift AND fundamental drift (diffs the two most recent financials/governance snapshots; HIGH severity when a metric crosses a pipeline hard-trigger level — pledging > 10%, CFO/NP < 50%, D/E > 3, ICR < 3 — and HIGH alerts join the re-analysis list) |
 | P2-2 Watchlist alerts | `main.py` + `repository.py` | `investor watchlist-alerts` compares live CMP vs stored DCF target price |
 | P2-3 ROCE/ROE trends | `screener.py` + Step 3 | Recent 2Y vs prior 3Y delta; deteriorating/improving flagged |
 | P3-1 Concall quality | Step 2 system prompt | Claude searches concall transcripts; `management_guidance_reliability` stored on `MoatAssessment` |

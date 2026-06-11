@@ -306,6 +306,36 @@ async def get_fresh_snapshot(
         return None
 
 
+async def get_latest_two_snapshots(
+    db_path: str, ticker: str, data_type: str
+) -> list[tuple[str, dict]]:
+    """Return up to two most recent snapshots for ``ticker``/``data_type``.
+
+    Newest first: ``[(new_date, new_data), (old_date, old_data)]``.  Used by
+    the surveillance fundamental-drift check.  Unparseable rows are skipped.
+    """
+    await init_db(db_path)
+    out: list[tuple[str, dict]] = []
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT snapshot_date, data_json
+            FROM data_snapshots
+            WHERE ticker = ? AND data_type = ?
+            ORDER BY snapshot_date DESC
+            LIMIT 2
+            """,
+            (ticker.upper(), data_type),
+        ) as cursor:
+            async for row in cursor:
+                try:
+                    out.append((row["snapshot_date"], json.loads(row["data_json"])))
+                except (json.JSONDecodeError, TypeError):
+                    continue
+    return out
+
+
 async def get_snapshot_groups_before(
     db_path: str, cutoff_date: str, ticker: str | None = None
 ) -> list[dict]:
