@@ -1,8 +1,6 @@
 """Step 6 — Technical Entry Confirmation (deterministic)."""
 from __future__ import annotations
 
-from typing import Optional
-
 import anthropic
 
 from src.agent.steps.base import BaseStep

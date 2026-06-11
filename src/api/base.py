@@ -1,8 +1,6 @@
 """Base async HTTP client with retry logic."""
 from __future__ import annotations
 
-from typing import Optional
-
 import httpx
 import structlog
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
@@ -13,13 +11,13 @@ from src.config import settings
 class BaseHTTPClient:
     """Async HTTP client with retry and session management."""
 
-    def __init__(self, base_url: str, timeout: Optional[float] = None):
+    def __init__(self, base_url: str, timeout: float | None = None):
         self.base_url = base_url
         self.timeout = timeout or settings.http_timeout
-        self._client: Optional[httpx.AsyncClient] = None
+        self._client: httpx.AsyncClient | None = None
         self.log = structlog.get_logger(self.__class__.__name__)
 
-    async def __aenter__(self) -> "BaseHTTPClient":
+    async def __aenter__(self) -> BaseHTTPClient:
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
             timeout=self.timeout,

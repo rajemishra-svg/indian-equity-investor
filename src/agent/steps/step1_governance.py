@@ -372,12 +372,12 @@ class Step1Governance(BaseStep):
                 insider_raw = None
             if isinstance(insider_raw, str):
                 # Normalise short-form variants the model sometimes returns
-                _INSIDER_ALIASES = {
+                insider_aliases = {
                     "NET_BUYING": "NET_BUYING", "BUYING": "NET_BUYING",
                     "NET_SELLING": "NET_SELLING", "SELLING": "NET_SELLING",
                     "NEUTRAL": "NEUTRAL", "NONE": "NEUTRAL",
                 }
-                normalised = _INSIDER_ALIASES.get(insider_raw.upper())
+                normalised = insider_aliases.get(insider_raw.upper())
                 if normalised:
                     g.insider_net_buying_3m = normalised
             # JSON null or unrecognised → leave as None (not populated)

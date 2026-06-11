@@ -235,7 +235,7 @@ class BatchScanner:
             raw = await asyncio.gather(*tasks, return_exceptions=True)
 
         summaries: list[PreScreenSummary] = []
-        for ticker, result in zip(tickers, raw):
+        for ticker, result in zip(tickers, raw, strict=True):
             if isinstance(result, Exception):
                 log.warning("prescreen_error", ticker=ticker, error=str(result))
                 summaries.append(
@@ -297,8 +297,8 @@ class BatchScanner:
         # Phase 3: full pipeline — bounded concurrency (3 parallel analyses).
         # Each pipeline manages its own HTTP sessions; Screener's module-level
         # semaphore caps domain-level request rate independently.
-        _PIPELINE_CONCURRENCY = 3
-        pipeline_sem = asyncio.Semaphore(_PIPELINE_CONCURRENCY)
+        pipeline_concurrency = 3
+        pipeline_sem = asyncio.Semaphore(pipeline_concurrency)
 
         async def _run_one(summary: PreScreenSummary) -> AnalysisState | None:
             async with pipeline_sem:

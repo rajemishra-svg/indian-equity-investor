@@ -1,8 +1,6 @@
 """BSE India API client for shareholding patterns."""
 from __future__ import annotations
 
-from typing import Optional
-
 import httpx
 
 from src.api.base import BaseHTTPClient
@@ -25,7 +23,7 @@ class BSEClient(BaseHTTPClient):
         )
         return headers
 
-    async def _get_scripcode(self, ticker: str) -> Optional[str]:
+    async def _get_scripcode(self, ticker: str) -> str | None:
         """Look up BSE scripcode from ticker symbol.
 
         Args:
@@ -50,7 +48,7 @@ class BSEClient(BaseHTTPClient):
             self.log.warning("bse_scripcode_lookup_failed", ticker=ticker, error=str(exc))
         return None
 
-    async def get_shareholding(self, ticker: str) -> Optional[GovernanceData]:
+    async def get_shareholding(self, ticker: str) -> GovernanceData | None:
         """Fetch promoter holding and pledging data from BSE.
 
         Fetches 8 quarters of data to establish pledging trend.
@@ -92,8 +90,8 @@ class BSEClient(BaseHTTPClient):
     ) -> GovernanceData:
         """Parse shareholding pattern API response into GovernanceData."""
         flags: list[str] = []
-        promoter_holding: Optional[float] = None
-        promoter_pledging: Optional[float] = None
+        promoter_holding: float | None = None
+        promoter_pledging: float | None = None
         pledging_trend: list[float] = []
 
         # BSE returns a dict with shareholding by category
@@ -117,7 +115,7 @@ class BSEClient(BaseHTTPClient):
                     pass
 
         # Determine pledging trend direction
-        trend_direction: Optional[str] = None
+        trend_direction: str | None = None
         if len(pledging_trend) >= 2:
             if pledging_trend[-1] > pledging_trend[0]:
                 trend_direction = "increasing"

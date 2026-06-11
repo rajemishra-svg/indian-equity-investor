@@ -306,7 +306,6 @@ async def test_revenue_deceleration_adds_concern():
     # Score should still be 7 (all hurdles pass)
     assert state.financial_gate.score == 7
     # Deceleration concern should appear in flags
-    all_flags = "\n".join(state.all_data_flags)
     # The concern is logged but not in all_data_flags — verify the step doesn't break
     assert state.financial_gate.gate == GateResult.PASS_GREEN
 

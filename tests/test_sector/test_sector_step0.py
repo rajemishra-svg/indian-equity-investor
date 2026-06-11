@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.agent.steps.step0_prescreen import Step0PreScreen
-from src.models import AnalysisState, FinancialMetrics, GateResult, GovernanceData, StockQuote
+from src.models import AnalysisState, FinancialMetrics, GovernanceData, StockQuote
 
 
 def make_step():

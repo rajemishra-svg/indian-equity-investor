@@ -1,14 +1,12 @@
 """Step 0 — Quantitative Pre-Screen (deterministic, no Claude needed)."""
 from __future__ import annotations
 
-from typing import Optional
-
 import anthropic
 
 from src.agent.steps.base import BaseStep
-from src.models import AnalysisState, GateResult, GovernanceData, PreScreenResult
+from src.models import AnalysisState, GateResult, PreScreenResult
 from src.sector.classifier import classify_sector
-from src.sector.profiles import SectorProfile, get_sector_profile
+from src.sector.profiles import get_sector_profile
 
 
 class Step0PreScreen(BaseStep):
@@ -58,8 +56,8 @@ class Step0PreScreen(BaseStep):
 
         def _eval(
             metric_name: str,
-            value: Optional[float],
-            threshold: Optional[float],
+            value: float | None,
+            threshold: float | None,
             op: str = ">=",
         ) -> None:
             """Record pass/fail for one metric into the shared dicts."""

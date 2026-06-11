@@ -1,5 +1,5 @@
 """Realistic sample data for tests — RELIANCE NSE."""
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from src.models import (
     FinancialMetrics,
@@ -22,7 +22,7 @@ SAMPLE_QUOTE = StockQuote(
     dma_200=2650.00,
     market_cap_cr=1_931_000.0,  # ~₹19.3 lakh crore — large cap
     exchange="NSE",
-    data_timestamp=datetime(2026, 5, 15, 9, 30, 0, tzinfo=timezone.utc),
+    data_timestamp=datetime(2026, 5, 15, 9, 30, 0, tzinfo=UTC),
     is_stale=False,
 )
 

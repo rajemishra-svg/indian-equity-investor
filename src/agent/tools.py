@@ -246,7 +246,7 @@ def _sanitize_web_text(text: str, max_chars: int = 3500) -> str:
     # Strip common prompt-injection openers (case-insensitive).
     # "act as " is intentionally narrowed to AI/chatbot variants to avoid
     # redacting legitimate financial phrases like "act as a catalyst".
-    _INJECTION_PATTERNS = [
+    injection_patterns = [
         r"ignore (all |your )?(previous|prior|above) instructions?",
         r"disregard (all |your )?(previous|prior|above) instructions?",
         r"you are now ",
@@ -260,7 +260,7 @@ def _sanitize_web_text(text: str, max_chars: int = 3500) -> str:
         rf"</?\s*{UNTRUSTED_TAG}\s*>",
     ]
     cleaned = text
-    for pat in _INJECTION_PATTERNS:
+    for pat in injection_patterns:
         cleaned = _re.sub(pat, "[REDACTED]", cleaned, flags=_re.IGNORECASE)
     return cleaned[:max_chars]
 

@@ -8,7 +8,6 @@ import pytest
 from src.agent.steps.step0_prescreen import Step0PreScreen
 from src.models import AnalysisState, FinancialMetrics, GateResult, GovernanceData, StockQuote
 from tests.fixtures.sample_data import (
-    BAD_GOVERNANCE,
     SAMPLE_FINANCIALS,
     SAMPLE_GOVERNANCE,
     SAMPLE_QUOTE,

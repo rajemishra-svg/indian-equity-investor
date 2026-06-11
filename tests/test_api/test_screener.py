@@ -1,15 +1,12 @@
 """Tests for ScreenerClient."""
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
-
 import httpx
 import pytest
 import respx
 
 from src.api.screener import ScreenerClient
 from src.models import FinancialMetrics
-
 
 # ---------------------------------------------------------------------------
 # Minimal realistic Screener HTML (simplified)

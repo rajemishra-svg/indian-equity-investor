@@ -5,7 +5,6 @@ import pytest
 
 from src.sector.classifier import classify_sector
 
-
 # ---------------------------------------------------------------------------
 # Financial services detection
 # ---------------------------------------------------------------------------

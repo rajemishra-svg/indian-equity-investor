@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import re
-from typing import Optional
 
 from bs4 import BeautifulSoup
 
@@ -21,7 +20,7 @@ class TrendlyneClient(BaseHTTPClient):
         headers["Referer"] = "https://trendlyne.com"
         return headers
 
-    async def get_valuation_data(self, ticker: str) -> Optional[ValuationData]:
+    async def get_valuation_data(self, ticker: str) -> ValuationData | None:
         """Fetch valuation multiples and historical ranges from Trendlyne.
 
         Args:
@@ -52,11 +51,11 @@ class TrendlyneClient(BaseHTTPClient):
         self, soup: BeautifulSoup, ticker: str, flags: list[str]
     ) -> ValuationData:
         """Parse valuation metrics from Trendlyne HTML."""
-        pe_current: Optional[float] = None
-        ev_ebitda_current: Optional[float] = None
-        pbv_current: Optional[float] = None
-        pe_10y_low: Optional[float] = None
-        pe_10y_high: Optional[float] = None
+        pe_current: float | None = None
+        ev_ebitda_current: float | None = None
+        pbv_current: float | None = None
+        pe_10y_low: float | None = None
+        pe_10y_high: float | None = None
 
         # Look for ratio cards / metric tables
         for element in soup.find_all(class_=re.compile(r"ratio|metric|valuation", re.I)):
@@ -102,7 +101,7 @@ class TrendlyneClient(BaseHTTPClient):
                         pass
 
         # Compute 10Y percentile
-        pe_10y_percentile: Optional[float] = None
+        pe_10y_percentile: float | None = None
         if (
             pe_10y_low is not None
             and pe_10y_high is not None
@@ -127,7 +126,7 @@ class TrendlyneClient(BaseHTTPClient):
             data_flags=flags,
         )
 
-    async def get_governance_data(self, ticker: str) -> Optional[GovernanceData]:
+    async def get_governance_data(self, ticker: str) -> GovernanceData | None:
         """Fetch governance data from Trendlyne fundamentals/governance page.
 
         Extracts auditor name, promoter pledging %, and governance scores.
@@ -157,9 +156,9 @@ class TrendlyneClient(BaseHTTPClient):
         self, soup: BeautifulSoup, ticker: str, flags: list[str]
     ) -> GovernanceData:
         """Parse auditor, pledging, and governance score from Trendlyne HTML."""
-        auditor_name: Optional[str] = None
-        promoter_holding: Optional[float] = None
-        promoter_pledging: Optional[float] = None
+        auditor_name: str | None = None
+        promoter_holding: float | None = None
+        promoter_pledging: float | None = None
 
         full_text = soup.get_text(separator=" ", strip=True)
 

@@ -8,9 +8,6 @@ Usage::
 """
 from __future__ import annotations
 
-from typing import Optional
-
-
 # ---------------------------------------------------------------------------
 # Keyword sets for each sector (checked against company_name.lower())
 # Order matters — more specific checks first.
@@ -118,7 +115,7 @@ def classify_sector(
     company_name: str,
     ticker: str = "",
     moat_narrative: str = "",
-    listing_years: Optional[float] = None,
+    listing_years: float | None = None,
 ) -> str:
     """Return the sector name string for the given company.
 
@@ -143,7 +140,7 @@ def classify_sector_with_confidence(
     company_name: str,
     ticker: str = "",
     moat_narrative: str = "",
-    listing_years: Optional[float] = None,
+    listing_years: float | None = None,
 ) -> tuple[str, float]:
     """Return (sector_name, confidence) for the given company.
 

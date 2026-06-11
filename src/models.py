@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from enum import Enum
+from enum import Enum, StrEnum
 
 from pydantic import BaseModel, Field
 
@@ -11,20 +11,20 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------------
 
 
-class MarketMode(str, Enum):
+class MarketMode(StrEnum):
     NORMAL = "normal"
     CORRECTION = "correction"
     MAXIMUM_OPPORTUNITY = "maximum_opportunity"
 
 
-class GateResult(str, Enum):
+class GateResult(StrEnum):
     PASS_GREEN = "pass_green"
     PASS_CONDITIONAL = "pass_conditional"
     FAIL = "fail"
     NOT_RUN = "not_run"
 
 
-class ConvictionLevel(str, Enum):
+class ConvictionLevel(StrEnum):
     HIGH = "high"
     MEDIUM = "medium"
     LOW = "low"
@@ -36,7 +36,7 @@ class WatchlistTier(int, Enum):
     TIER_3 = 3
 
 
-class MoatType(str, Enum):
+class MoatType(StrEnum):
     BRAND = "brand"
     NETWORK_EFFECT = "network_effect"
     COST_LEADERSHIP = "cost_leadership"
@@ -47,13 +47,13 @@ class MoatType(str, Enum):
     NONE = "none"
 
 
-class TailwindType(str, Enum):
+class TailwindType(StrEnum):
     STRUCTURAL = "structural"
     POLICY_DRIVEN = "policy_driven"
     CYCLICAL = "cyclical"
 
 
-class CyclePosition(str, Enum):
+class CyclePosition(StrEnum):
     EARLY = "early"
     MID = "mid"
     LATE = "late"

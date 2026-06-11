@@ -3,12 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import time
-from pathlib import Path
 
 import anthropic
 
 from src.agent.mode_detector import detect_mode
-from src.sector.classifier import classify_sector_with_confidence as _reclassify
 from src.agent.steps import (
     Step0PreScreen,
     Step1Governance,
@@ -372,8 +370,9 @@ class InvestmentPipeline:
         # Fix 1.3: governance source is "bse" when BSE provided data, "screener" only when
         #          BSE failed AND Screener succeeded (not when ER-04 fired — that means NO
         #          data was saved, so the guard below skips the save anyway).
-        from src.db.repository import save_snapshot
         from datetime import date as _date
+
+        from src.db.repository import save_snapshot
         today_str = _date.today().isoformat()
 
         async def _save_snap(data_type: str, data: dict, source: str) -> bool:

@@ -12,7 +12,7 @@ TTLs are intentionally conservative:
 from __future__ import annotations
 
 import time
-from typing import Any, Optional, TypeVar
+from typing import Any, TypeVar
 
 from src.logging_config import get_logger
 
@@ -34,7 +34,7 @@ class DataCache:
     def __init__(self) -> None:
         self._store: dict[str, _CacheEntry] = {}
 
-    def get(self, key: str) -> Optional[Any]:
+    def get(self, key: str) -> Any | None:
         entry = self._store.get(key)
         if entry is None:
             return None

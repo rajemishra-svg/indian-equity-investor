@@ -377,7 +377,6 @@ class Step9Output(BaseStep):
         cmp_str = f"₹{q.cmp:.2f}" if q else "[NOT AVAILABLE]"
         w52h_str = f"₹{q.w52_high:.2f}" if q else "[NOT AVAILABLE]"
         w52l_str = f"₹{q.w52_low:.2f}" if q else "[NOT AVAILABLE]"
-        dma_str = f"₹{q.dma_200:.2f}" if q and q.dma_200 else "[NOT AVAILABLE]"
 
         if rtype == "BUY":
             lines = [

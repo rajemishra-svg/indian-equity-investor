@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 
 import pytest
 
@@ -20,16 +19,13 @@ from src.models import (
     AnalysisState,
     ConvictionLevel,
     FinancialGateResult,
-    FinancialMetrics,
     GateResult,
-    GovernanceData,
     GovernanceScore,
     MarketMode,
     PreScreenResult,
     StockQuote,
     ValuationResult,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -260,8 +256,9 @@ async def test_json_fields_deserialised(db_path):
 @pytest.mark.asyncio
 async def test_history_returns_multiple_dates(db_path):
     """History query should return rows across different analysis dates."""
+    from datetime import date
+
     import aiosqlite
-    from datetime import date, timedelta
 
     state = _make_minimal_state("MARUTI")
     await save_analysis(db_path, state)
@@ -285,11 +282,10 @@ async def test_history_returns_multiple_dates(db_path):
 @pytest.mark.asyncio
 async def test_history_limit_respected(db_path):
     """History should respect the limit parameter."""
+
     import aiosqlite
-    from datetime import date
 
     await init_db(db_path)  # ensure tables exist before raw INSERT
-    today = date.today().isoformat()
     async with aiosqlite.connect(db_path) as db:
         for i in range(5):
             await db.execute(
@@ -359,8 +355,9 @@ async def test_summary_ordering(db_path):
 @pytest.mark.asyncio
 async def test_save_and_retrieve_snapshot(db_path):
     """save_snapshot should persist raw data as JSON."""
-    import aiosqlite
     from datetime import date
+
+    import aiosqlite
 
     today = date.today().isoformat()
     payload = {"cmp": 2850.0, "market_cap_cr": 19000.0, "is_stale": False}
@@ -382,8 +379,9 @@ async def test_save_and_retrieve_snapshot(db_path):
 @pytest.mark.asyncio
 async def test_snapshot_upsert_on_same_day(db_path):
     """Saving snapshot for same ticker/date/type twice should update, not duplicate."""
-    import aiosqlite
     from datetime import date
+
+    import aiosqlite
 
     today = date.today().isoformat()
     await save_snapshot(db_path, "TCS", today, "financials", {"roe": 25.0}, "screener")
@@ -403,8 +401,9 @@ async def test_snapshot_upsert_on_same_day(db_path):
 @pytest.mark.asyncio
 async def test_snapshot_different_data_types_stored_separately(db_path):
     """Different data_type values for the same ticker should be separate rows."""
-    import aiosqlite
     from datetime import date
+
+    import aiosqlite
 
     today = date.today().isoformat()
     await save_snapshot(db_path, "HDFC", today, "quote", {"cmp": 1700.0}, "nse")

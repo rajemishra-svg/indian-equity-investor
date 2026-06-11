@@ -1,14 +1,13 @@
 """Tests for YFinanceClient — mocks yfinance.Ticker to avoid real network calls."""
 from __future__ import annotations
 
-from datetime import timezone
+from datetime import UTC
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from src.api.yfinance_client import YFinanceClient, _safe_float, _to_yf_symbol
 from src.models import StockQuote, ValuationData
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -93,7 +92,7 @@ async def test_get_stock_quote_returns_stock_quote():
     assert quote.dma_200 == pytest.approx(3200.0)
     assert quote.exchange == "NSE"
     assert quote.is_stale is True  # Yahoo data is delayed
-    assert quote.data_timestamp.tzinfo == timezone.utc
+    assert quote.data_timestamp.tzinfo == UTC
 
 
 @pytest.mark.asyncio

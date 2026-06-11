@@ -9,13 +9,10 @@ from src.agent.batch_scanner import BatchScanner, PreScreenSummary, rank_results
 from src.models import (
     AnalysisState,
     ConvictionLevel,
-    FinancialMetrics,
     GateResult,
-    GovernanceData,
-    PreScreenResult,
-    StockQuote,
-    ValuationResult,
     GovernanceScore,
+    PreScreenResult,
+    ValuationResult,
 )
 from tests.fixtures.sample_data import SAMPLE_FINANCIALS, SAMPLE_GOVERNANCE, SAMPLE_QUOTE
 
@@ -121,8 +118,8 @@ async def test_get_universe_returns_nse_tickers_on_success():
     scanner = BatchScanner(concurrency=2)
     expected = ["TCS", "HDFCBANK", "INFY"]
 
-    with patch("src.agent.batch_scanner.NSEClient") as MockNSE:
-        MockNSE.return_value = _mock_nse_client(return_value=expected)
+    with patch("src.agent.batch_scanner.NSEClient") as mock_nse_cls:
+        mock_nse_cls.return_value = _mock_nse_client(return_value=expected)
         tickers = await scanner.get_universe("NIFTY 50")
 
     assert tickers == expected
@@ -134,9 +131,9 @@ async def test_get_universe_falls_back_to_archives_on_nse_failure():
     scanner = BatchScanner(concurrency=2)
     archives_tickers = ["RELIANCE", "TCS", "HDFCBANK"]
 
-    with patch("src.agent.batch_scanner.NSEClient") as MockNSE, \
+    with patch("src.agent.batch_scanner.NSEClient") as mock_nse_cls, \
          patch("src.agent.batch_scanner._fetch_constituents_from_archives", AsyncMock(return_value=archives_tickers)):
-        MockNSE.return_value = _mock_nse_client(side_effect=ValueError("403 Forbidden"))
+        mock_nse_cls.return_value = _mock_nse_client(side_effect=ValueError("403 Forbidden"))
         tickers = await scanner.get_universe("NIFTY 50")
 
     assert tickers == archives_tickers
@@ -147,9 +144,9 @@ async def test_get_universe_falls_back_to_hardcoded_when_both_fail():
     """NSE API + archives both fail → hardcoded Nifty 50 list."""
     scanner = BatchScanner(concurrency=2)
 
-    with patch("src.agent.batch_scanner.NSEClient") as MockNSE, \
+    with patch("src.agent.batch_scanner.NSEClient") as mock_nse_cls, \
          patch("src.agent.batch_scanner._fetch_constituents_from_archives", AsyncMock(side_effect=Exception("timeout"))):
-        MockNSE.return_value = _mock_nse_client(side_effect=ValueError("403 Forbidden"))
+        mock_nse_cls.return_value = _mock_nse_client(side_effect=ValueError("403 Forbidden"))
         tickers = await scanner.get_universe("NIFTY 500")
 
     assert len(tickers) == 50

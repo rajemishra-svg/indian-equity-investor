@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import time
-from typing import Optional
 
 from src.api.cache import data_cache
 from src.api.nse import NSEClient
@@ -15,10 +14,10 @@ log = get_logger("mode_detector")
 # Module-level cache for Nifty mode — valid for 15 minutes.
 # Avoids a fresh HTTP call on every analysis during batch scans.
 _MODE_CACHE_TTL = 900  # 15 minutes
-_cached_mode: Optional[MarketMode] = None
-_cached_nifty_level: Optional[float] = None
-_cached_nifty_peak: Optional[float] = None
-_cached_decline_pct: Optional[float] = None
+_cached_mode: MarketMode | None = None
+_cached_nifty_level: float | None = None
+_cached_nifty_peak: float | None = None
+_cached_decline_pct: float | None = None
 _cache_expires_at: float = 0.0
 
 

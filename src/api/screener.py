@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import random
 import re
-from typing import Optional
 
 import httpx
 from bs4 import BeautifulSoup
@@ -28,7 +27,7 @@ class ScreenerClient(BaseHTTPClient):
         headers["Referer"] = "https://www.screener.in"
         return headers
 
-    async def get_financials(self, ticker: str) -> Optional[FinancialMetrics]:
+    async def get_financials(self, ticker: str) -> FinancialMetrics | None:
         """Scrape financial metrics from Screener.in consolidated page.
 
         Args:
@@ -39,7 +38,6 @@ class ScreenerClient(BaseHTTPClient):
         """
         ticker = ticker.upper().strip()
         url = f"/company/{ticker}/consolidated/"
-        flags: list[str] = []
 
         try:
             resp = await self._fetch_with_rate_limit_handling(url)
@@ -53,7 +51,7 @@ class ScreenerClient(BaseHTTPClient):
         soup = BeautifulSoup(resp.text, "lxml")
         return self._parse_financials(soup, ticker)
 
-    async def _fetch_with_rate_limit_handling(self, url: str) -> Optional[httpx.Response]:
+    async def _fetch_with_rate_limit_handling(self, url: str) -> httpx.Response | None:
         """Fetch with exponential back-off + jitter on Screener.in 429 responses.
 
         Back-off schedule (base seconds, ±20 % jitter):
@@ -65,10 +63,10 @@ class ScreenerClient(BaseHTTPClient):
         This recovers 3–8× faster on brief rate-limit windows while still
         honouring Screener's throttle on sustained hammering.
         """
-        _BACKOFF_BASE = [10, 30, 90]  # seconds before each retry
+        backoff_base = [10, 30, 90]  # seconds before each retry
 
         async with _SCREENER_SEMAPHORE:
-            for attempt, base_wait in enumerate(_BACKOFF_BASE):
+            for attempt, base_wait in enumerate(backoff_base):
                 try:
                     return await self.get(url)
                 except httpx.HTTPStatusError as exc:
@@ -80,7 +78,7 @@ class ScreenerClient(BaseHTTPClient):
                         "screener_rate_limited",
                         wait_seconds=wait,
                         attempt=attempt + 1,
-                        max_attempts=len(_BACKOFF_BASE) + 1,
+                        max_attempts=len(backoff_base) + 1,
                     )
                     await asyncio.sleep(wait)
 
@@ -296,7 +294,6 @@ class ScreenerClient(BaseHTTPClient):
             header_row = table.find("tr")
             if not header_row:
                 continue
-            headers = [th.get_text(strip=True) for th in header_row.find_all("th")]
             for row in table.find_all("tr")[1:]:
                 cells = row.find_all("td")
                 if not cells:
@@ -406,9 +403,9 @@ class ScreenerClient(BaseHTTPClient):
         compute debtor days and inventory days.
         """
         result: dict = {}
-        borrowings: Optional[float] = None
-        equity_capital: Optional[float] = None
-        reserves: Optional[float] = None
+        borrowings: float | None = None
+        equity_capital: float | None = None
+        reserves: float | None = None
         receivables_vals: list[float] = []
         inventory_vals: list[float] = []
 
@@ -508,7 +505,7 @@ class ScreenerClient(BaseHTTPClient):
 
         return result
 
-    async def get_shareholding(self, ticker: str) -> Optional[GovernanceData]:
+    async def get_shareholding(self, ticker: str) -> GovernanceData | None:
         """Scrape promoter holding from Screener.in (fallback source).
 
         Primary source is BSE; this is used as fallback.
@@ -533,8 +530,8 @@ class ScreenerClient(BaseHTTPClient):
 
     def _parse_shareholding(self, soup: BeautifulSoup, flags: list[str]) -> GovernanceData:
         """Parse promoter shareholding from Screener HTML."""
-        promoter_holding: Optional[float] = None
-        promoter_pledging: Optional[float] = None
+        promoter_holding: float | None = None
+        promoter_pledging: float | None = None
 
         sh_section = soup.find("section", id="shareholding")
         if sh_section:

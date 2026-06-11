@@ -194,7 +194,7 @@ def add_trade(
         raise click.BadParameter(
             f"'{price}' is not a valid price. Use a number e.g. 1062.00 or 1,062.00",
             param_hint="price",
-        )
+        ) from None
 
     try:
         trade_date = date.fromisoformat(txn_date) if txn_date else date.today()
@@ -202,7 +202,7 @@ def add_trade(
         raise click.BadParameter(
             f"'{txn_date}' is not a valid date. Use YYYY-MM-DD format.",
             param_hint="--date",
-        )
+        ) from None
 
     if qty <= 0:
         raise click.BadParameter("QTY must be a positive integer.", param_hint="qty")
@@ -650,7 +650,7 @@ def portfolio_review(concurrency: int, save: bool, user_id: str | None) -> None:
 
     holds, sells, errors = [], [], []
 
-    for ticker, result in zip(tickers, raw_results):
+    for ticker, result in zip(tickers, raw_results, strict=True):
         h = holding_map[ticker]
 
         if isinstance(result, Exception):

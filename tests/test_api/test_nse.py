@@ -1,15 +1,12 @@
 """Tests for NSEClient."""
 from __future__ import annotations
 
-import json
-
 import httpx
 import pytest
 import respx
 
 from src.api.nse import NSEClient
 from src.models import StockQuote
-
 
 # --- Sample NSE API responses ---
 
@@ -108,7 +105,7 @@ async def test_get_stock_quote_symbol_uppercased():
     with respx.mock(base_url="https://www.nseindia.com") as mock:
         mock.get("/").mock(return_value=httpx.Response(200, text="<html></html>"))
         # Should be called with RELIANCE (uppercase)
-        route = mock.get("/api/quote-equity", params={"symbol": "RELIANCE"}).mock(
+        mock.get("/api/quote-equity", params={"symbol": "RELIANCE"}).mock(
             return_value=httpx.Response(200, json=NSE_QUOTE_RESPONSE)
         )
 

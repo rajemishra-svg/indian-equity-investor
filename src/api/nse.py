@@ -2,8 +2,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 import httpx
 
@@ -34,7 +33,7 @@ class NSEClient(BaseHTTPClient):
         self._session_established = True
         self.log.info("nse_session_established")
 
-    async def get_stock_quote(self, symbol: str) -> Optional[StockQuote]:
+    async def get_stock_quote(self, symbol: str) -> StockQuote | None:
         """Fetch equity quote for a symbol from NSE.
 
         Args:
@@ -64,7 +63,7 @@ class NSEClient(BaseHTTPClient):
         market_cap_cr = raw_mc / 1e7  # convert rupees to crores
 
         # NSE does not reliably expose 200DMA in the quote endpoint; fetched separately via get_200dma
-        dma_200: Optional[float] = None
+        dma_200: float | None = None
 
         return StockQuote(
             ticker=symbol,
@@ -75,7 +74,7 @@ class NSEClient(BaseHTTPClient):
             dma_200=dma_200,
             market_cap_cr=market_cap_cr,
             exchange="NSE",
-            data_timestamp=datetime.now(timezone.utc),
+            data_timestamp=datetime.now(UTC),
             is_stale=False,
         )
 
@@ -128,7 +127,7 @@ class NSEClient(BaseHTTPClient):
         self.log.info("index_constituents_fetched", index=index, count=len(tickers))
         return tickers
 
-    async def get_shareholding(self, symbol: str) -> Optional[GovernanceData]:
+    async def get_shareholding(self, symbol: str) -> GovernanceData | None:
         """Fetch promoter holding and pledging from NSE shareholding pattern API.
 
         Uses the existing NSE session (no extra cookie round-trip needed).
@@ -162,15 +161,15 @@ class NSEClient(BaseHTTPClient):
 
     def _parse_shareholding(
         self, data: dict, symbol: str, flags: list[str]
-    ) -> Optional[GovernanceData]:
+    ) -> GovernanceData | None:
         """Parse NSE shareholding pattern JSON into GovernanceData.
 
         NSE returns an array of quarterly snapshots. Each snapshot has categories
         (Promoter, Public, etc.) and a separate pledged-shares figure. We take the
         most-recent quarter for headline numbers and build a trend from all quarters.
         """
-        promoter_holding: Optional[float] = None
-        promoter_pledging: Optional[float] = None
+        promoter_holding: float | None = None
+        promoter_pledging: float | None = None
         pledging_trend: list[float] = []
 
         # NSE returns different shapes depending on endpoint version.
@@ -227,7 +226,7 @@ class NSEClient(BaseHTTPClient):
                     promoter_pledging = pct
 
         # Determine trend direction from collected quarterly pledge figures
-        trend_direction: Optional[str] = None
+        trend_direction: str | None = None
         if len(pledging_trend) >= 2:
             if pledging_trend[-1] > pledging_trend[0]:
                 trend_direction = "increasing"
@@ -256,7 +255,7 @@ class NSEClient(BaseHTTPClient):
             data_flags=flags,
         )
 
-    async def get_200dma(self, symbol: str) -> Optional[float]:
+    async def get_200dma(self, symbol: str) -> float | None:
         """Fetch 200-day moving average for a symbol.
 
         NSE provides historical price data which we use to compute DMA.
@@ -269,8 +268,6 @@ class NSEClient(BaseHTTPClient):
         try:
             resp = await self.get(f"/api/quote-equity?symbol={symbol}&section=trade_info")
             data = resp.json()
-            # Check for DMA in different possible locations
-            tech = data.get("priceInfo", {})
             # Some NSE endpoints provide a summary with DMA
             summary = data.get("metadata", {})
             dma_str = summary.get("pdSymbolPe", None)

@@ -1,13 +1,12 @@
 """Tests for sector-aware Step 3 financial scoring."""
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
 from src.agent.steps.step3_financials import Step3Financials
-from src.models import AnalysisState, FinancialMetrics, GateResult, StockQuote
-from tests.fixtures.sample_data import SAMPLE_QUOTE
+from src.models import AnalysisState, FinancialMetrics, StockQuote
 
 
 def make_step():

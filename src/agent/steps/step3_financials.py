@@ -6,14 +6,11 @@ touching this file — just add a profile to ``src/sector/profiles.py``.
 """
 from __future__ import annotations
 
-from typing import Optional
-
 import anthropic
 
 from src.agent.steps.base import BaseStep
 from src.models import AnalysisState, FinancialGateResult, FinancialMetrics, GateResult
-from src.sector.profiles import SectorProfile, get_sector_profile
-
+from src.sector.profiles import get_sector_profile
 
 # ---------------------------------------------------------------------------
 # Soft quality checks — non-scoring diagnostics
@@ -278,8 +275,8 @@ class Step3Financials(BaseStep):
         # ------------------------------------------------------------------
         def _eval_hurdle(
             hurdle_name: str,
-            value: Optional[float],
-            threshold: Optional[float],
+            value: float | None,
+            threshold: float | None,
             op: str = ">=",
         ) -> bool:
             """Return True if hurdle passes (including when waived by sector profile)."""

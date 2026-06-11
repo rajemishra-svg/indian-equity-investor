@@ -12,8 +12,7 @@ Usage::
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
 
 
 @dataclass
@@ -29,28 +28,28 @@ class SectorProfile:
 
     # ── Step 0 / Step 3 hurdle overrides ──────────────────────────────────
     # None = waive the check (evaluator always returns True for this metric)
-    min_revenue_cagr_5y: Optional[float] = 12.0
-    min_pat_cagr_5y: Optional[float] = 15.0
-    min_roe_5y_avg: Optional[float] = 15.0
-    min_roce_5y_avg: Optional[float] = 18.0
-    min_cfo_np_pct: Optional[float] = 70.0     # Step 0 threshold
-    min_cfo_np_pct_s3: Optional[float] = 80.0  # Step 3 hurdle (slightly higher)
-    max_de_ratio: Optional[float] = 1.0
-    min_icr: Optional[float] = 6.0
-    min_promoter_holding: Optional[float] = 40.0
+    min_revenue_cagr_5y: float | None = 12.0
+    min_pat_cagr_5y: float | None = 15.0
+    min_roe_5y_avg: float | None = 15.0
+    min_roce_5y_avg: float | None = 18.0
+    min_cfo_np_pct: float | None = 70.0     # Step 0 threshold
+    min_cfo_np_pct_s3: float | None = 80.0  # Step 3 hurdle (slightly higher)
+    max_de_ratio: float | None = 1.0
+    min_icr: float | None = 6.0
+    min_promoter_holding: float | None = 40.0
 
     # ── Step 3 hard trigger overrides ─────────────────────────────────────
     # None = waive this hard trigger entirely
-    hard_trigger_cfo_np_min: Optional[float] = 50.0
-    hard_trigger_de_max: Optional[float] = 3.0
-    hard_trigger_icr_min: Optional[float] = 3.0
+    hard_trigger_cfo_np_min: float | None = 50.0
+    hard_trigger_de_max: float | None = 3.0
+    hard_trigger_icr_min: float | None = 3.0
 
     # ── Step 5 valuation adjustments ──────────────────────────────────────
     wacc_adjustment: float = 0.0            # added to base WACC (e.g. +1.0 for higher risk)
     ev_ebitda_applicable: bool = True        # False for financial services
 
     # Extra PE band for financial sector (price-to-book more relevant)
-    pb_band_excellent: Optional[float] = None   # e.g. 1.5 for banks
+    pb_band_excellent: float | None = None   # e.g. 1.5 for banks
 
     # ── EC-02: Cyclical EBITDA normalization ──────────────────────────────
     # When True, Step 5 DCF uses the 5Y average EBITDA margin (from Screener)
@@ -69,8 +68,8 @@ class SectorProfile:
 
     # ── Step 9: sector-aware tranche discounts ────────────────────────────
     # None means: use settings.tranche_t2/t3_discount (global defaults)
-    tranche_t2_discount: Optional[float] = None  # None → use settings default
-    tranche_t3_discount: Optional[float] = None  # None → use settings default
+    tranche_t2_discount: float | None = None  # None → use settings default
+    tranche_t3_discount: float | None = None  # None → use settings default
 
 
 SECTOR_PROFILES: dict[str, SectorProfile] = {
@@ -230,7 +229,7 @@ SECTOR_PROFILES: dict[str, SectorProfile] = {
 DEFAULT_PROFILE = SECTOR_PROFILES["default"]
 
 
-def get_sector_profile(sector_name: Optional[str]) -> SectorProfile:
+def get_sector_profile(sector_name: str | None) -> SectorProfile:
     """Return the sector profile for the given name, defaulting to the standard profile."""
     if sector_name is None:
         return DEFAULT_PROFILE
