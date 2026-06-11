@@ -44,6 +44,11 @@ uv run investor watchlist-alerts                           # live CMP vs DCF tar
 uv run investor surveillance                               # sweep all BUY+WATCHLIST for drift/staleness
 uv run investor surveillance --days-since 14              # flag analyses older than 14 days
 
+# CLI — backtesting (validate the gates against history; no Claude calls)
+uv run investor backtest                            # replay all snapshots ≥ 90 days old
+uv run investor backtest --min-age-days 180
+uv run investor backtest --ticker RELIANCE
+
 # CLI — SQLite database queries
 uv run investor db-summary                          # all analyses ranked by recommendation
 uv run investor db-history RELIANCE                 # trend for one ticker (last 10 runs)
@@ -248,6 +253,10 @@ Gate: ≥2 methods in buy zone AND DCF MoS met → PASS_GREEN; ≥1 → PASS_CON
 WACC is risk-adjusted: 13% large-cap stable, 15% mid-cap, 16.5% small-cap, +1% for cyclical sectors.
 
 `target_buy_price` is computed at WATCHLIST save time as `dcf_intrinsic_weighted × (1 – required_mos_pct/100)` and stored in SQLite. `watchlist-alerts` uses this to fire entry alerts without re-running the pipeline.
+
+### Backtesting (`src/backtest/engine.py`)
+
+`investor backtest` replays every stored `data_snapshots` group (ticker, snapshot_date) older than `--min-age-days` through the **deterministic** gates only — Step 0 pre-screen, Step 3 financials, Step 5 valuation; zero LLM calls. Each sample's verdict bucket (`VALUATION_GREEN/CONDITIONAL/FAIL`, `REJECT_FINANCIALS/PRESCREEN`) is compared against the forward price return (snapshot CMP → live CMP) and the Nifty 50 over the same window (`^NSEI` series fetched once). `summarize()` reports per-bucket median/mean return, win rate, and median excess vs Nifty — if the gates carry signal, GREEN should beat FAIL/REJECT and the index; where it doesn't, re-tune thresholds. Limitations: Step 1/2 LLM judgments are not replayed and market mode defaults to NORMAL.
 
 ### BatchScanner (`src/agent/batch_scanner.py`)
 

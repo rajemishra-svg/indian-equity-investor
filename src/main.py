@@ -1800,5 +1800,98 @@ def migrate_portfolio(user_id: str, portfolio_dir: str) -> None:
         )
 
 
+
+# ---------------------------------------------------------------------------
+# backtest command
+# ---------------------------------------------------------------------------
+
+
+@cli.command("backtest")
+@click.option(
+    "--min-age-days",
+    default=90,
+    type=int,
+    help="Only replay snapshots at least this old (need elapsed time to measure returns).",
+)
+@click.option("--ticker", default=None, help="Restrict the backtest to one ticker.")
+def backtest_cmd(min_age_days: int, ticker: str | None) -> None:
+    """Replay stored snapshots through the deterministic gates and measure returns.
+
+    Reconstructs each historical (ticker, date) snapshot, re-runs Steps 0/3/5
+    (no Claude calls), and compares the verdict buckets against forward price
+    returns and the Nifty 50 over the same window. If the gates carry signal,
+    VALUATION_GREEN should beat VALUATION_FAIL/REJECT and the index.
+
+    \b
+    Examples:
+      investor backtest
+      investor backtest --min-age-days 180
+      investor backtest --ticker RELIANCE
+    """
+    from src.backtest.engine import run_backtest, summarize
+
+    if ticker:
+        ticker = _validate_ticker(ticker)
+
+    with console.status("[bold green]Replaying historical snapshots...[/bold green]"):
+        samples = asyncio.run(run_backtest(settings.db_path, min_age_days, ticker))
+
+    if not samples:
+        console.print(
+            f"[yellow]No replayable snapshots older than {min_age_days} days found in "
+            f"{settings.db_path}. Run scans/analyses and let them age, or lower "
+            "--min-age-days.[/yellow]"
+        )
+        return
+
+    rows = summarize(samples)
+
+    verdict_colours = {
+        "VALUATION_GREEN": "green",
+        "VALUATION_CONDITIONAL": "yellow",
+        "VALUATION_FAIL": "red",
+        "REJECT_FINANCIALS": "red",
+        "REJECT_PRESCREEN": "dim",
+    }
+
+    table = Table(
+        title=f"Backtest — {len(samples)} samples (snapshots ≥ {min_age_days} days old)",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    table.add_column("Verdict (replayed)", style="bold")
+    table.add_column("Samples", justify="right")
+    table.add_column("Priced", justify="right")
+    table.add_column("Median Fwd %", justify="right")
+    table.add_column("Mean Fwd %", justify="right")
+    table.add_column("Win Rate", justify="right")
+    table.add_column("Median vs Nifty", justify="right")
+    table.add_column("Avg Days", justify="right")
+
+    def _fmt(value: float | None, suffix: str = "%") -> str:
+        return f"{value:+.1f}{suffix}" if value is not None else "[dim]N/A[/dim]"
+
+    for r in rows:
+        colour = verdict_colours.get(r["verdict"], "white")
+        table.add_row(
+            f"[{colour}]{r['verdict']}[/{colour}]",
+            str(r["samples"]),
+            str(r["priced"]),
+            _fmt(r["median_return_pct"]),
+            _fmt(r["mean_return_pct"]),
+            f"{r['win_rate_pct']:.0f}%" if r["win_rate_pct"] is not None else "[dim]N/A[/dim]",
+            _fmt(r["median_excess_pct"]),
+            str(r["avg_holding_days"]),
+        )
+
+    console.print(table)
+    console.print(
+        "[dim]Deterministic replay only (Steps 0/3/5): governance/moat LLM judgments are "
+        "not re-run, and market mode defaults to NORMAL. Win rate = % of samples with a "
+        "positive absolute return; 'vs Nifty' compares each sample to the index over its "
+        "own holding window.[/dim]"
+    )
+
+
 if __name__ == "__main__":
     cli()

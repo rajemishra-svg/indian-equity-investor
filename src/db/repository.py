@@ -306,6 +306,45 @@ async def get_fresh_snapshot(
         return None
 
 
+async def get_snapshot_groups_before(
+    db_path: str, cutoff_date: str, ticker: str | None = None
+) -> list[dict]:
+    """Return historical snapshots grouped per (ticker, snapshot_date), oldest first.
+
+    Each group is ``{"ticker", "snapshot_date", "data": {data_type: parsed_json}}``.
+    Only groups dated on/before ``cutoff_date`` (ISO) are returned — the
+    backtester needs elapsed time to measure forward returns.  Unparseable
+    JSON rows are skipped.
+    """
+    await init_db(db_path)
+    sql = """
+        SELECT ticker, snapshot_date, data_type, data_json
+        FROM data_snapshots
+        WHERE snapshot_date <= ?
+        """
+    params: list = [cutoff_date]
+    if ticker:
+        sql += " AND ticker = ?"
+        params.append(ticker.upper())
+    sql += " ORDER BY snapshot_date ASC, ticker ASC"
+
+    groups: dict[tuple[str, str], dict] = {}
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(sql, params) as cursor:
+            async for row in cursor:
+                try:
+                    payload = json.loads(row["data_json"])
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                key = (row["ticker"], row["snapshot_date"])
+                groups.setdefault(
+                    key,
+                    {"ticker": row["ticker"], "snapshot_date": row["snapshot_date"], "data": {}},
+                )["data"][row["data_type"]] = payload
+    return list(groups.values())
+
+
 async def get_latest_analysis(db_path: str, ticker: str) -> dict | None:
     """Return the most recent analysis row for ``ticker``, or ``None``."""
     await init_db(db_path)

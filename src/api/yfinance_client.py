@@ -7,14 +7,12 @@ NSE tickers map to Yahoo Finance symbols by appending '.NS' (e.g. RELIANCE → R
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 import structlog
 import yfinance as yf
 
 from src.models import StockQuote, ValuationData
-
 
 log = structlog.get_logger(__name__)
 
@@ -26,8 +24,8 @@ def _compute_pe_percentile(
     price_hist: object,
     income_stmt: object,
     current_pe: float,
-    shares: Optional[float],
-) -> Optional[float]:
+    shares: float | None,
+) -> float | None:
     """Compute approximate 5Y trailing-PE percentile from historical data.
 
     Assigns each monthly closing price to the contemporaneous annual EPS
@@ -92,7 +90,7 @@ def _to_yf_symbol(ticker: str) -> str:
     return f"{ticker.upper()}.NS"
 
 
-def _safe_float(value: object) -> Optional[float]:
+def _safe_float(value: object) -> float | None:
     """Return float or None for missing/infinite Yahoo Finance values."""
     try:
         f = float(value)  # type: ignore[arg-type]
@@ -101,7 +99,7 @@ def _safe_float(value: object) -> Optional[float]:
         return None
 
 
-def _compute_volume_trend_sync(hist_30d: object) -> Optional[str]:
+def _compute_volume_trend_sync(hist_30d: object) -> str | None:
     """Determine whether volume is declining on down-price days (P3-4).
 
     Compares average volume on red-candle days (Close < Open) against the
@@ -147,7 +145,7 @@ class YFinanceClient:
     the asyncio event loop.
     """
 
-    async def get_stock_quote(self, ticker: str) -> Optional[StockQuote]:
+    async def get_stock_quote(self, ticker: str) -> StockQuote | None:
         """Fetch a stock quote for an NSE ticker via Yahoo Finance.
 
         Returns StockQuote or None on failure.  Also computes:
@@ -218,7 +216,7 @@ class YFinanceClient:
                 dma_200=dma_200,
                 market_cap_cr=market_cap_cr,
                 exchange="NSE",
-                data_timestamp=datetime.now(timezone.utc),
+                data_timestamp=datetime.now(UTC),
                 is_stale=True,
                 avg_daily_value_cr=avg_daily_value_cr,
                 volume_trend_down_days=volume_trend_down_days,
@@ -254,7 +252,7 @@ class YFinanceClient:
             log.warning("yfinance_nifty50_failed", error=str(exc))
             raise
 
-    async def get_valuation_data(self, ticker: str) -> Optional[ValuationData]:
+    async def get_valuation_data(self, ticker: str) -> ValuationData | None:
         """Fetch valuation multiples and compute 5Y PE percentile for an NSE ticker.
 
         Returns ValuationData with pe_current, pbv_current, peg_ratio, and
@@ -297,7 +295,7 @@ class YFinanceClient:
 
             # P1-2: Compute 5Y trailing-PE percentile from price history + EPS.
             # _compute_pe_percentile() is fully defensive — returns None on any failure.
-            pe_10y_percentile: Optional[float] = None
+            pe_10y_percentile: float | None = None
             if pe is not None and pe > 0:
                 pe_10y_percentile = _compute_pe_percentile(price_hist, income_stmt, pe, shares)
                 if pe_10y_percentile is not None:
@@ -340,8 +338,34 @@ class YFinanceClient:
             log.warning("yfinance_valuation_failed", ticker=ticker, error=str(exc))
             return None
 
+    async def get_close_series(
+        self, yf_symbol: str, start: str
+    ) -> dict[str, float] | None:
+        """Daily close prices from ``start`` (ISO date) to today, keyed by ISO date.
+
+        Takes a raw Yahoo symbol (``RELIANCE.NS``, ``^NSEI``) rather than an NSE
+        ticker so it works for indices too.  Used by the backtester for forward
+        returns and benchmark comparison.  Returns None on any failure.
+        """
+        def _fetch() -> dict[str, float] | None:
+            try:
+                hist = yf.Ticker(yf_symbol).history(start=start, interval="1d")
+                if hist is None or hist.empty:
+                    return None
+                return {
+                    idx.date().isoformat(): float(row["Close"])
+                    for idx, row in hist.iterrows()
+                }
+            except Exception:
+                return None
+
+        series = await asyncio.get_event_loop().run_in_executor(None, _fetch)
+        if series is None:
+            log.warning("yfinance_close_series_failed", symbol=yf_symbol, start=start)
+        return series
+
     # Context manager support (no-op: yfinance has no session to manage)
-    async def __aenter__(self) -> "YFinanceClient":
+    async def __aenter__(self) -> YFinanceClient:
         return self
 
     async def __aexit__(self, *_: object) -> None:
