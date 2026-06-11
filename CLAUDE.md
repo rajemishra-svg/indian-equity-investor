@@ -125,7 +125,7 @@ CLI (src/main.py)
 | 6 — Technical | Deterministic (no LLM) | — | Arithmetic from quote |
 | 7 — Peers | 1 Haiku call (peer identification) + deterministic comparison | `model_light` | Only peer *naming* needs an LLM; metric fetches (Screener + yfinance) and quality/valuation ranking + dominance test run in Python |
 | 8 — Premortem | Single Haiku call (no tools) | `model_light` | All risk context already in state |
-| 9 — Output | 1 Haiku call (thesis) + deterministic format | `model_light` | Narrative from existing state |
+| 9 — Output | 1 Haiku call (thesis; BUY/WATCHLIST only) + deterministic format | `model_light` | Narrative from existing state; REJECT/PEER_SWITCH templates show no thesis, so the call is skipped |
 
 `model_heavy = claude-sonnet-4-6`, `model_light = claude-haiku-4-5-20251001`. Both defined in `src/config.py`.
 
@@ -267,7 +267,7 @@ All clients except `YFinanceClient` extend `BaseHTTPClient` which provides `http
 
 **ScreenerClient** uses a module-level `asyncio.Semaphore(2)` (`_SCREENER_SEMAPHORE`) shared across all instances to prevent thundering-herd requests to Screener.in during batch scans.
 
-**Security**: Web content fetched via `tools.py` is always sanitized before being sent to Claude: BeautifulSoup strips all HTML tags (including `<script>`, `<style>`, `<noscript>`), and a regex pass removes prompt-injection patterns ("ignore all previous instructions", "act as", "system prompt:", etc.). Raw HTML is never forwarded to the LLM.
+**Security**: Web content fetched via `tools.py` is always sanitized before being sent to Claude: BeautifulSoup strips all HTML tags (including `<script>`, `<style>`, `<noscript>`), and a regex pass removes prompt-injection patterns ("ignore all previous instructions", "act as", "system prompt:", etc.). Raw HTML is never forwarded to the LLM. All web_fetch/web_search output is additionally wrapped in `<untrusted_web_content>` delimiters (escaped copies of the tag inside page text are redacted so a page cannot close the region early), and the Step 2 system prompt instructs Claude that content inside those tags is data, never instructions.
 
 **SSRF guard** (`tools.py`): before every `web_fetch` request the URL scheme must be http/https and the host is DNS-resolved and rejected if any resolved address is non-global (loopback, RFC1918, link-local/metadata, CGN, `0.0.0.0`, IPv6 loopback, decimal-encoded IPs, unresolvable hosts). Redirects are followed manually (max 5 hops) with the same validation per hop, so a public page cannot bounce the agent onto an internal endpoint. Known limitation: resolve-then-fetch is not atomic (DNS rebinding with a fast TTL could race the check).
 

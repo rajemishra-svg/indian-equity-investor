@@ -70,8 +70,10 @@ class Step9Output(BaseStep):
         # Build exit strategy (ask Claude)
         await self._build_exit_strategy(state)
 
-        # Build investment thesis if needed
-        if not state.investment_thesis:
+        # Build investment thesis only for actionable outcomes. The REJECT and
+        # PEER_SWITCH report templates never show a thesis, so the Haiku call
+        # would be pure waste there (and a scan produces mostly REJECTs).
+        if not state.investment_thesis and state.recommendation_type in ("BUY", "WATCHLIST"):
             state.investment_thesis = await self._build_thesis(state)
 
         # Format the final report

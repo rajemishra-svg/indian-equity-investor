@@ -231,6 +231,12 @@ async def execute_tool(tool_name: str, tool_input: dict[str, Any], clients: dict
         return f"[ERROR executing {tool_name}: {exc}]"
 
 
+# Delimiter wrapped around all external web content sent to Claude.  The Step 2
+# system prompt instructs the model that anything inside these tags is data,
+# never instructions — the structural defence that regex stripping can't give.
+UNTRUSTED_TAG = "untrusted_web_content"
+
+
 def _sanitize_web_text(text: str, max_chars: int = 3500) -> str:
     """Strip prompt-injection patterns from external web content before sending to Claude.
 
@@ -249,11 +255,22 @@ def _sanitize_web_text(text: str, max_chars: int = 3500) -> str:
         r"system prompt:",
         r"<\|im_start\|>",
         r"<\|im_end\|>",
+        # A page must not be able to close the wrapper tag early and smuggle
+        # text outside the "untrusted" region.
+        rf"</?\s*{UNTRUSTED_TAG}\s*>",
     ]
     cleaned = text
     for pat in _INJECTION_PATTERNS:
         cleaned = _re.sub(pat, "[REDACTED]", cleaned, flags=_re.IGNORECASE)
     return cleaned[:max_chars]
+
+
+def _wrap_untrusted(text: str) -> str:
+    """Wrap sanitized external content in the untrusted-data delimiter.
+
+    Applied after truncation so the closing tag is never cut off.
+    """
+    return f"<{UNTRUSTED_TAG}>\n{text}\n</{UNTRUSTED_TAG}>"
 
 
 async def _web_search(query: str) -> str:
@@ -281,7 +298,7 @@ async def _web_search(query: str) -> str:
                 entry = f"TITLE: {title}\nSNIPPET: {snippet}"
                 results.append(_sanitize_web_text(entry, max_chars=500))
         if results:
-            return "\n\n".join(results)
+            return _wrap_untrusted("\n\n".join(results))
         return "[NO RESULTS FOUND]"
     except Exception as exc:
         return f"[SEARCH ERROR: {exc}]"
@@ -327,7 +344,7 @@ async def _web_fetch(url: str, extract_text: bool = True) -> str:
         for tag in soup(["script", "style", "nav", "footer", "header", "noscript"]):
             tag.decompose()
         text = soup.get_text(separator="\n", strip=True)
-        return _sanitize_web_text(text, max_chars=3500)
+        return _wrap_untrusted(_sanitize_web_text(text, max_chars=3500))
     except Exception as exc:
         return f"[FETCH ERROR: {exc}]"
 
