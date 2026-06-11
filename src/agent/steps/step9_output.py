@@ -390,6 +390,11 @@ class Step9Output(BaseStep):
                     f"  Margin of Safety  : [NOT AVAILABLE] (Required: {v.required_mos_pct:.1f}%)",
                     f"  Methods in BZ     : {v.methods_in_buy_zone}/{v.max_methods}",
                 ]
+                if v.implied_growth_pct is not None and v.growth_anchor_pct is not None:
+                    lines.append(
+                        f"  Reverse DCF       : market implies {v.implied_growth_pct:.1f}% FCF growth "
+                        f"vs {v.growth_anchor_pct:.1f}% delivered [ESTIMATE]"
+                    )
 
             lines.append("──────────────────────────────────────────────────────────────────────────")
             lines.append("ENTRY PLAN")

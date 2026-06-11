@@ -258,6 +258,10 @@ class ValuationResult(BaseModel):
     margin_of_safety_pct: float | None = None
     required_mos_pct: float = 35.0
     mos_met: bool = False
+    # Reverse DCF (advisory, not a gate method): the FCF growth rate at which
+    # DCF intrinsic equals CMP, vs the historical anchor actually delivered.
+    implied_growth_pct: float | None = None
+    growth_anchor_pct: float | None = None
     methods_in_buy_zone: int = 0
     max_methods: int = 5  # total valuation methods evaluated (PE percentile, PEG, DCF, FCF yield, EV/EBITDA)
     pe_percentile_verdict: str | None = None  # EXCELLENT/FAIR/EXPENSIVE/AVOID

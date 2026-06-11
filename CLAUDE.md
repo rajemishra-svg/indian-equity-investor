@@ -243,6 +243,8 @@ Five methods, each scored as in-buy-zone or not:
 
 Gate: ≥2 methods in buy zone AND DCF MoS met → PASS_GREEN; ≥1 → PASS_CONDITIONAL; 0 → FAIL (Watchlist Tier 2).
 
+**Reverse DCF (advisory, not a gate method)**: `_implied_growth_pct()` bisects the same DCF engine (same base FCF incl. EC-02 normalization, same WACC/terminal growth) for the stage-1 growth rate at which intrinsic == CMP, clamped to [-20%, +60%]. Stored on `ValuationResult.implied_growth_pct` alongside `growth_anchor_pct` (the delivered PAT-checked anchor) and shown in the Step 9 report. Flags: implied > anchor + 5pp → expectations flag; implied < anchor − 5pp → `[POSITIVE — REVERSE DCF]`; implied ≥ 60% → extreme-expectations flag.
+
 WACC is risk-adjusted: 13% large-cap stable, 15% mid-cap, 16.5% small-cap, +1% for cyclical sectors.
 
 `target_buy_price` is computed at WATCHLIST save time as `dcf_intrinsic_weighted × (1 – required_mos_pct/100)` and stored in SQLite. `watchlist-alerts` uses this to fire entry alerts without re-running the pipeline.

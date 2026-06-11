@@ -176,7 +176,7 @@ def test_growth_anchor_cut_by_collapsing_margins():
         revenue_cagr_5y=20.0, revenue_cagr_3y=20.0,  # revenue blend 20%
         pat_cagr_5y=5.0, pat_cagr_3y=5.0,            # PAT blend 5%
     )
-    base, bull, bear, note = _derive_growth_rates(state)
+    base, bull, bear, anchor, note = _derive_growth_rates(state)
     # anchor = min(20, (20+5)/2) = 12.5 → base = 12.5 × 0.85
     assert base == pytest.approx(12.5 * 0.85)
     assert bear == pytest.approx(12.5 * 0.60)
@@ -191,7 +191,7 @@ def test_growth_anchor_does_not_extrapolate_margin_expansion():
         revenue_cagr_5y=15.0, revenue_cagr_3y=15.0,  # revenue blend 15%
         pat_cagr_5y=30.0, pat_cagr_3y=30.0,          # PAT blend 30%
     )
-    base, _, _, note = _derive_growth_rates(state)
+    base, _, _, _, note = _derive_growth_rates(state)
     assert base == pytest.approx(15.0 * 0.85)  # anchored to revenue, not PAT
     assert "PAT confirms" in note
 
@@ -200,7 +200,7 @@ def test_growth_anchor_falls_back_to_revenue_when_pat_missing():
     from src.agent.steps.step5_valuation import _derive_growth_rates
 
     state = _make_state(pat_cagr_5y=None, pat_cagr_3y=None)
-    base, _, _, note = _derive_growth_rates(state)
+    base, _, _, _, note = _derive_growth_rates(state)
     # revenue blend = 0.6×12 + 0.4×10 = 11.2 → base = 11.2 × 0.85
     assert base == pytest.approx(11.2 * 0.85)
     assert "PAT history unavailable" in note
@@ -220,3 +220,74 @@ def test_margin_collapse_lowers_dcf_intrinsic():
     iv_collapsing = _run_deterministic_dcf(collapsing, 13.0, 6.0)[3]
     assert iv_healthy is not None and iv_collapsing is not None
     assert iv_collapsing < iv_healthy
+
+
+# ---------------------------------------------------------------------------
+# Reverse DCF — implied growth vs delivered anchor
+# ---------------------------------------------------------------------------
+
+
+def test_implied_growth_recovers_known_rate():
+    """Setting CMP to the forward-DCF value at 15% growth must invert to ~15%."""
+    from src.agent.steps.step5_valuation import _dcf_single_scenario, _implied_growth_pct
+
+    state = _make_state()
+    iv_at_15 = _dcf_single_scenario(3_000.0, 15.0, 13.0, 6.0, 0.0, 500.0)
+    state.quote.cmp = iv_at_15
+    implied = _implied_growth_pct(state, 13.0, 6.0)
+    assert implied == pytest.approx(15.0, abs=0.05)
+
+
+def test_implied_growth_clamps_at_lower_bound_for_deep_value():
+    """CMP below even the shrinking-FCF scenario returns the -20% bound."""
+    from src.agent.steps.step5_valuation import _IMPLIED_GROWTH_LOW, _implied_growth_pct
+
+    state = _make_state(cmp=1.0)  # absurdly cheap vs ₹3,000 Cr FCF on 500 Cr shares
+    assert _implied_growth_pct(state, 13.0, 6.0) == _IMPLIED_GROWTH_LOW
+
+
+@pytest.mark.asyncio
+async def test_reverse_dcf_flags_excessive_expectations():
+    """CMP priced for growth far above delivered history must be flagged."""
+    from src.agent.steps.step5_valuation import _dcf_single_scenario
+
+    # anchor for default fins = min(11.2, (11.2+10.2)/2) = 10.7%
+    iv_at_25 = _dcf_single_scenario(3_000.0, 25.0, 13.0, 6.0, 0.0, 500.0)
+    state = _make_state(cmp=iv_at_25)
+    state = await Step5Valuation(None, {}).run(state)
+
+    assert state.valuation.implied_growth_pct == pytest.approx(25.0, abs=0.1)
+    assert state.valuation.growth_anchor_pct == pytest.approx(10.7, abs=0.05)
+    assert any(
+        "REVERSE DCF" in fl and "justify acceleration" in fl
+        for fl in state.all_data_flags
+    )
+
+
+@pytest.mark.asyncio
+async def test_reverse_dcf_flags_low_expectations_as_positive():
+    """CMP priced below delivered growth gets the [POSITIVE] flag."""
+    from src.agent.steps.step5_valuation import _dcf_single_scenario
+
+    iv_at_2 = _dcf_single_scenario(3_000.0, 2.0, 13.0, 6.0, 0.0, 500.0)
+    state = _make_state(cmp=iv_at_2)
+    state = await Step5Valuation(None, {}).run(state)
+
+    assert state.valuation.implied_growth_pct == pytest.approx(2.0, abs=0.1)
+    assert any(
+        "POSITIVE — REVERSE DCF" in fl for fl in state.all_data_flags
+    )
+
+
+@pytest.mark.asyncio
+async def test_reverse_dcf_flags_extreme_expectations_at_upper_bound():
+    from src.agent.steps.step5_valuation import _dcf_single_scenario
+
+    iv_at_60 = _dcf_single_scenario(3_000.0, 60.0, 13.0, 6.0, 0.0, 500.0)
+    state = _make_state(cmp=iv_at_60 * 2)  # beyond the searchable range
+    state = await Step5Valuation(None, {}).run(state)
+
+    assert state.valuation.implied_growth_pct == 60.0
+    assert any(
+        "extreme expectations" in fl for fl in state.all_data_flags
+    )

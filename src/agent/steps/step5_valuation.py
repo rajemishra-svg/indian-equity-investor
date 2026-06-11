@@ -253,7 +253,72 @@ def _derive_growth_rates(state: AnalysisState) -> tuple[float, float, float, str
     bull = min(anchor * 1.10, 35.0)
     bear = anchor * 0.60
 
-    return base, bull, bear, anchor_note
+    return base, bull, bear, anchor, anchor_note
+
+
+# ---------------------------------------------------------------------------
+# Reverse DCF — implied growth (expectations investing)
+# ---------------------------------------------------------------------------
+
+# Bisection search bounds for the implied growth rate (% per year).
+_IMPLIED_GROWTH_LOW = -20.0
+_IMPLIED_GROWTH_HIGH = 60.0
+
+
+def _implied_growth_pct(
+    state: AnalysisState,
+    wacc_pct: float,
+    terminal_growth_pct: float,
+    normalized_fcf_cr: float | None = None,
+) -> float | None:
+    """Reverse DCF: the stage-1 FCF growth rate at which intrinsic value == CMP.
+
+    Answers "what is the market pricing in?" — comparing the result against the
+    historically delivered growth anchor is one of the highest-signal valuation
+    checks available, and it reuses the exact forward-DCF machinery (same base
+    FCF including EC-02 normalization, same WACC and terminal growth), so the
+    two numbers are directly comparable.
+
+    Returns the clamped bound when CMP falls outside the searchable range
+    (≤ -20%: cheaper than even a shrinking-FCF scenario justifies;
+    ≥ +60%: extreme expectations).  None when DCF inputs are unavailable.
+    """
+    q = state.quote
+    if q is None or q.cmp <= 0:
+        return None
+    base_fcf = (
+        normalized_fcf_cr if normalized_fcf_cr is not None else _estimate_base_fcf(state)
+    )
+    shares = _get_shares_outstanding(state)
+    if base_fcf is None or shares is None:
+        return None
+    v = state.valuation_data
+    net_debt = (v.net_debt_cr or 0.0) if v else 0.0
+    cmp = q.cmp
+
+    def _value_at(growth_pct: float) -> float:
+        iv = _dcf_single_scenario(
+            base_fcf, growth_pct, wacc_pct, terminal_growth_pct, net_debt, shares
+        )
+        # Inputs are pre-validated, so None here means equity value ≤ 0
+        # (heavy net debt + shrinking FCF) — treat as a zero-value scenario
+        # so the bisection stays monotonic.
+        return iv if iv is not None else 0.0
+
+    lo, hi = _IMPLIED_GROWTH_LOW, _IMPLIED_GROWTH_HIGH
+    if _value_at(lo) >= cmp:
+        return lo
+    if _value_at(hi) <= cmp:
+        return hi
+    for _ in range(60):
+        mid = (lo + hi) / 2
+        if _value_at(mid) < cmp:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo < 0.01:
+            break
+    return round((lo + hi) / 2, 2)
 
 
 def _get_shares_outstanding(state: AnalysisState) -> float | None:
@@ -293,7 +358,7 @@ def _run_deterministic_dcf(
     v = state.valuation_data
     net_debt = (v.net_debt_cr or 0.0) if v else 0.0
 
-    growth_base, growth_bull, growth_bear, growth_anchor_note = _derive_growth_rates(state)
+    growth_base, growth_bull, growth_bear, _anchor, growth_anchor_note = _derive_growth_rates(state)
 
     iv_base = _dcf_single_scenario(base_fcf, growth_base, wacc_pct, terminal_growth_pct, net_debt, shares)
     iv_bull = _dcf_single_scenario(base_fcf, growth_bull, wacc_pct, terminal_growth_pct, net_debt, shares)
@@ -428,6 +493,8 @@ class Step5Valuation(BaseStep):
         dcf_bear: float | None = None
         dcf_weighted: float | None = None
         dcf_assumptions: str = ""
+        implied_growth: float | None = None
+        growth_anchor: float | None = None
         dcf_data_sufficient = f is not None and q is not None
 
         if is_pre_profit:
@@ -465,6 +532,32 @@ class Step5Valuation(BaseStep):
             )
             if dcf_weighted is None:
                 data_flags.append(f"[DATA UNVERIFIED: dcf_intrinsic — {dcf_assumptions}]")
+
+            # --- Reverse DCF (advisory): what growth is the market pricing in? ---
+            _, _, _, growth_anchor, _ = _derive_growth_rates(state)
+            implied_growth = _implied_growth_pct(
+                state, wacc, terminal_growth, normalized_fcf_cr=normalized_fcf
+            )
+            if implied_growth is not None and growth_anchor is not None:
+                expectation_gap = implied_growth - growth_anchor
+                if implied_growth >= _IMPLIED_GROWTH_HIGH:
+                    data_flags.append(
+                        f"[REVERSE DCF: CMP implies ≥{_IMPLIED_GROWTH_HIGH:.0f}% annual FCF "
+                        f"growth vs {growth_anchor:.1f}% delivered — extreme expectations; "
+                        "price embeds a story far beyond historical execution]"
+                    )
+                elif expectation_gap > 5.0:
+                    data_flags.append(
+                        f"[REVERSE DCF: CMP implies {implied_growth:.1f}% annual FCF growth vs "
+                        f"{growth_anchor:.1f}% delivered (+{expectation_gap:.1f}pp) — thesis must "
+                        "justify acceleration beyond history]"
+                    )
+                elif expectation_gap < -5.0:
+                    data_flags.append(
+                        f"[POSITIVE — REVERSE DCF: CMP implies only {implied_growth:.1f}% annual "
+                        f"FCF growth vs {growth_anchor:.1f}% delivered ({expectation_gap:.1f}pp); "
+                        "market expectations are below demonstrated execution]"
+                    )
 
         dcf_failed = dcf_weighted is None and not is_pre_profit and dcf_data_sufficient
 
@@ -545,6 +638,8 @@ class Step5Valuation(BaseStep):
             dcf_intrinsic_bull=dcf_bull,
             dcf_intrinsic_bear=dcf_bear,
             dcf_intrinsic_weighted=dcf_weighted,
+            implied_growth_pct=implied_growth,
+            growth_anchor_pct=growth_anchor,
             margin_of_safety_pct=mos,
             required_mos_pct=state.required_mos_pct,
             mos_met=mos_met,
