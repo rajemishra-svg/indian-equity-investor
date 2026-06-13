@@ -518,7 +518,8 @@ class ScreenerClient(BaseHTTPClient):
             resp = await self._fetch_with_rate_limit_handling(url)
         except Exception as exc:
             self.log.warning(
-                "screener_shareholding_failed", ticker=ticker, error=str(exc), error_tag="ER-04"
+                # No ER-04 here — only the pipeline knows whether every source failed.
+                "screener_shareholding_failed", ticker=ticker, error=str(exc)
             )
             return None
 

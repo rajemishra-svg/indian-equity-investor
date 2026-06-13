@@ -13,6 +13,7 @@ import asyncio
 import csv
 import io
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -51,6 +52,26 @@ _NSE_ARCHIVES_HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
     )
 }
+
+
+# NSE publishes corporate-action placeholder rows (e.g. DUMMYVEDL1) in its
+# index constituent lists. They are not tradeable symbols and 404 on every
+# downstream data source, so they are dropped before pre-screening.
+_PLACEHOLDER_TICKER_RE = re.compile(r"^DUMMY", re.IGNORECASE)
+
+
+def _drop_placeholder_tickers(tickers: list[str], source: str) -> list[str]:
+    """Remove NSE placeholder symbols (DUMMY*) from a universe list."""
+    kept = [t for t in tickers if not _PLACEHOLDER_TICKER_RE.match(t)]
+    dropped = len(tickers) - len(kept)
+    if dropped:
+        log.info(
+            "placeholder_tickers_dropped",
+            source=source,
+            dropped=dropped,
+            symbols=[t for t in tickers if _PLACEHOLDER_TICKER_RE.match(t)],
+        )
+    return kept
 
 
 async def _fetch_constituents_from_archives(index: str) -> list[str]:
@@ -196,7 +217,9 @@ class BatchScanner:
         """
         async with NSEClient() as nse:
             try:
-                tickers = await nse.get_index_constituents(index)
+                tickers = _drop_placeholder_tickers(
+                    await nse.get_index_constituents(index), source="nse_api"
+                )
                 log.info("universe_fetched", index=index, source="nse_api", count=len(tickers))
                 return tickers
             except Exception as exc:
@@ -208,7 +231,9 @@ class BatchScanner:
                 )
 
         try:
-            tickers = await _fetch_constituents_from_archives(index)
+            tickers = _drop_placeholder_tickers(
+                await _fetch_constituents_from_archives(index), source="nse_archives_csv"
+            )
             log.info("universe_fetched", index=index, source="nse_archives_csv", count=len(tickers))
             return tickers
         except Exception as exc:
@@ -454,7 +479,7 @@ async def _fetch_prescreen_data(state: AnalysisState, clients: dict) -> None:
         bse = clients.get("bse")
         result = await bse.get_shareholding(ticker) if bse is not None else None
         if result is None:
-            # BSE API commonly returns empty in non-browser environments; fall back to Screener
+            # Ticker not on BSE, fetch failed, or BSE circuit breaker open — fall back to Screener
             screener = clients.get("screener")
             if screener is not None:
                 result = await screener.get_shareholding(ticker)

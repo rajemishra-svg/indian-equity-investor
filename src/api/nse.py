@@ -153,7 +153,9 @@ class NSEClient(BaseHTTPClient):
             data = resp.json()
         except (httpx.HTTPStatusError, httpx.RequestError, ValueError) as exc:
             self.log.warning(
-                "nse_shareholding_failed", symbol=symbol, error=str(exc), error_tag="ER-04"
+                # No ER-04 here — that tag means ALL shareholding sources failed;
+                # the pipeline adds it after the BSE and Screener fallbacks also fail.
+                "nse_shareholding_failed", symbol=symbol, error=str(exc)
             )
             return None
 
