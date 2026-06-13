@@ -5,7 +5,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.agent.batch_scanner import BatchScanner, PreScreenSummary, rank_results
+from src.agent.batch_scanner import (
+    BatchScanner,
+    PreScreenSummary,
+    _drop_placeholder_tickers,
+    rank_results,
+)
 from src.models import (
     AnalysisState,
     ConvictionLevel,
@@ -151,6 +156,55 @@ async def test_get_universe_falls_back_to_hardcoded_when_both_fail():
 
     assert len(tickers) == 50
     assert "RELIANCE" in tickers
+
+
+# ---------------------------------------------------------------------------
+# Placeholder ticker filtering (NSE DUMMY* corporate-action rows)
+# ---------------------------------------------------------------------------
+
+
+def test_drop_placeholder_tickers_removes_dummy_rows():
+    tickers = ["TCS", "DUMMYVEDL1", "INFY", "DUMMYVEDL4", "RELIANCE"]
+    assert _drop_placeholder_tickers(tickers, source="test") == ["TCS", "INFY", "RELIANCE"]
+
+
+def test_drop_placeholder_tickers_is_case_insensitive():
+    assert _drop_placeholder_tickers(["dummyabc", "DummyXyz", "TCS"], source="test") == ["TCS"]
+
+
+def test_drop_placeholder_tickers_only_matches_prefix():
+    """DUMMY must be a prefix — symbols merely containing it are kept."""
+    assert _drop_placeholder_tickers(["INDUMMY", "TCS"], source="test") == ["INDUMMY", "TCS"]
+
+
+def test_drop_placeholder_tickers_noop_when_clean():
+    tickers = ["TCS", "INFY"]
+    assert _drop_placeholder_tickers(tickers, source="test") == tickers
+
+
+@pytest.mark.asyncio
+async def test_get_universe_filters_placeholders_from_nse_api():
+    scanner = BatchScanner(concurrency=2)
+    raw = ["TCS", "DUMMYVEDL1", "HDFCBANK", "DUMMYVEDL2"]
+
+    with patch("src.agent.batch_scanner.NSEClient") as mock_nse_cls:
+        mock_nse_cls.return_value = _mock_nse_client(return_value=raw)
+        tickers = await scanner.get_universe("NIFTY 500")
+
+    assert tickers == ["TCS", "HDFCBANK"]
+
+
+@pytest.mark.asyncio
+async def test_get_universe_filters_placeholders_from_archives_csv():
+    scanner = BatchScanner(concurrency=2)
+    raw = ["RELIANCE", "DUMMYVEDL3", "TCS"]
+
+    with patch("src.agent.batch_scanner.NSEClient") as mock_nse_cls, \
+         patch("src.agent.batch_scanner._fetch_constituents_from_archives", AsyncMock(return_value=raw)):
+        mock_nse_cls.return_value = _mock_nse_client(side_effect=ValueError("403 Forbidden"))
+        tickers = await scanner.get_universe("NIFTY 500")
+
+    assert tickers == ["RELIANCE", "TCS"]
 
 
 # ---------------------------------------------------------------------------
