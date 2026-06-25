@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import UTC, datetime
 
 import anthropic
 
+from src.agent.cost_tracker import reset_run_usage, run_usage
 from src.agent.mode_detector import detect_mode
 from src.agent.steps import (
     Step0PreScreen,
@@ -68,6 +70,8 @@ class InvestmentPipeline:
         """
         ticker = ticker.upper().strip()
         state = AnalysisState(ticker=ticker)
+        reset_run_usage()
+        _t_start = time.monotonic()
 
         async with self.nse, self.screener, self.bse, self.trendlyne, self.yfinance:
             clients = {
@@ -192,8 +196,27 @@ class InvestmentPipeline:
 
             # Persist result to SQLite (failures are non-fatal)
             try:
-                from src.db.repository import save_analysis
+                from src.db.repository import save_analysis, save_cost_record
                 await save_analysis(settings.db_path, state)
+                usage = run_usage()
+                await save_cost_record(
+                    settings.db_path,
+                    {
+                        "executed_at": datetime.now(UTC).isoformat(),
+                        "subcommand": "analyze",
+                        "ticker": ticker,
+                        "recommendation": state.recommendation_type,
+                        "cost_usd": round(usage["cost_usd"], 6),
+                        "cost_usd_sonnet": round(usage["cost_usd_sonnet"], 6),
+                        "cost_usd_haiku": round(usage["cost_usd_haiku"], 6),
+                        "input_tokens": usage["input_tokens"],
+                        "output_tokens": usage["output_tokens"],
+                        "cache_read_tokens": usage["cache_read_tokens"],
+                        "cache_write_tokens": usage["cache_write_tokens"],
+                        "elapsed_seconds": round(time.monotonic() - _t_start, 1),
+                        "status": "error" if state.error_tags else "success",
+                    },
+                )
             except Exception as db_exc:
                 self.log.warning(
                     "db_save_failed", ticker=ticker, error=str(db_exc)

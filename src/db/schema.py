@@ -32,6 +32,11 @@ CREATE TABLE IF NOT EXISTS analyses (
     required_mos_pct REAL,
     dcf_intrinsic_weighted REAL,
 
+    -- Growth mode fields
+    analysis_mode TEXT DEFAULT 'value',         -- 'value' | 'growth'
+    multibagger_total_score INTEGER,            -- 0-10 (growth mode only)
+    multibagger_verdict TEXT,                   -- MULTIBAGGER_CANDIDATE | GROWTH_BUY | ...
+
     -- Final outcome
     terminated_at_step INTEGER,
     termination_reason TEXT,
@@ -104,4 +109,27 @@ CREATE TABLE IF NOT EXISTS portfolio_tax (
 CREATE INDEX IF NOT EXISTS idx_holdings_user    ON portfolio_holdings(user_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_user ON portfolio_transactions(user_id, txn_date);
 CREATE INDEX IF NOT EXISTS idx_tax_user         ON portfolio_tax(user_id);
+
+CREATE TABLE IF NOT EXISTS llm_costs (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    executed_at        TEXT NOT NULL,          -- ISO datetime UTC
+    subcommand         TEXT,                   -- analyze / scan / scan-prescreen / surveillance / ...
+    ticker             TEXT,                   -- nullable; populated for analyze
+    index_name         TEXT,                   -- nullable; populated for scan
+    recommendation     TEXT,                   -- BUY / WATCHLIST / REJECT / PEER_SWITCH; nullable
+    num_tickers        INTEGER,                -- for scan: how many full analyses ran
+    cost_usd           REAL,
+    cost_usd_sonnet    REAL,
+    cost_usd_haiku     REAL,
+    input_tokens       INTEGER,
+    output_tokens      INTEGER,
+    cache_read_tokens  INTEGER,
+    cache_write_tokens INTEGER,
+    elapsed_seconds    REAL,
+    status             TEXT                    -- success / error / partial
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_costs_executed_at  ON llm_costs(executed_at);
+CREATE INDEX IF NOT EXISTS idx_llm_costs_subcommand   ON llm_costs(subcommand);
+CREATE INDEX IF NOT EXISTS idx_llm_costs_ticker       ON llm_costs(ticker);
 """
