@@ -107,6 +107,9 @@ class ScreenerClient(BaseHTTPClient):
             metrics.update(self._extract_balance_sheet(balance_section))
         if cashflow_section and pl_section:
             metrics.update(self._extract_cashflow_ratio(cashflow_section, pl_section))
+            metrics.update(self._extract_capex_and_da(cashflow_section))  # growth: capex + D&A
+        if pl_section:
+            metrics.update(self._extract_gross_margin(pl_section))        # growth: gross margin
 
         # P1-3: Working capital — cross-compute debtor/inventory days from
         # internal keys populated by _extract_pl_values + _extract_balance_sheet
@@ -135,6 +138,12 @@ class ScreenerClient(BaseHTTPClient):
         for key in required:
             if metrics.get(key) is None:
                 flags.append(f"[DATA UNVERIFIED: {key}]")
+
+        # Growth mode: compute EBIT from EBITDA - D&A when both available
+        ebitda_latest = metrics.get("ebitda_latest_cr")
+        da_latest = metrics.get("da_cr_latest")
+        if ebitda_latest is not None and da_latest is not None:
+            metrics["ebit_cr_latest"] = round(ebitda_latest - da_latest, 2)
 
         return FinancialMetrics(
             market_cap_cr=metrics.get("market_cap_cr"),
@@ -170,6 +179,15 @@ class ScreenerClient(BaseHTTPClient):
             ebitda_margin_5y_avg=metrics.get("ebitda_margin_5y_avg"),
             # Revenue (absolute) — used for P/S ratio on pre-profit companies
             trailing_revenue_cr=metrics.get("trailing_revenue_cr"),
+            # Growth mode: capex, D&A, EBIT, gross margin, prior revenue, cash
+            capex_cr_latest=metrics.get("capex_cr_latest"),
+            capex_cr_3y=metrics.get("capex_cr_3y", []),
+            da_cr_latest=metrics.get("da_cr_latest"),
+            ebit_cr_latest=metrics.get("ebit_cr_latest"),
+            gross_profit_margin_pct=metrics.get("gross_profit_margin_pct"),
+            gross_profit_margin_series=metrics.get("gross_profit_margin_series", []),
+            revenue_1y_ago_cr=metrics.get("revenue_1y_ago_cr"),
+            cash_cr_latest=metrics.get("cash_cr_latest"),
             data_flags=flags,
         )
 
@@ -277,6 +295,9 @@ class ScreenerClient(BaseHTTPClient):
             result["_sales_vals"] = sales_vals  # consumed later in _parse_financials
             # Expose latest annual revenue for P/S ratio computation
             result["trailing_revenue_cr"] = sales_vals[-1]
+            # Prior-year revenue for 1Y CAGR (growth pipeline)
+            if len(sales_vals) >= 2:
+                result["revenue_1y_ago_cr"] = sales_vals[-2]
 
         # Other income as % of revenue (latest year only)
         if other_income_vals and sales_vals and sales_vals[-1] > 0:
@@ -442,6 +463,13 @@ class ScreenerClient(BaseHTTPClient):
                 # P1-3: Inventory
                 elif label in ("inventories", "inventory", "stock"):
                     inventory_vals = vals
+                elif label in (
+                    "cash and cash equivalents", "cash and bank balances",
+                    "cash & cash equivalents", "cash & equivalents",
+                    "cash and equivalents", "cash",
+                ):
+                    if vals:
+                        result["cash_cr_latest"] = vals[-1]
 
         if borrowings is not None and equity_capital is not None and reserves is not None:
             total_equity = equity_capital + reserves
@@ -502,6 +530,142 @@ class ScreenerClient(BaseHTTPClient):
                     ratios.append((cfo / np_) * 100)
             if ratios:
                 result["cfo_net_profit_3y_avg"] = round(sum(ratios) / len(ratios), 1)
+
+        return result
+
+    def _extract_capex_and_da(self, cf_section: BeautifulSoup) -> dict:
+        """Extract capex (from investing activities) and D&A (from operating adjustments).
+
+        Capex appears as negative values under investing activities.  D&A appears
+        as a positive add-back under operating activity adjustments.
+
+        Screener label variants handled:
+          Capex: "purchase of fixed assets", "capital expenditure on fixed assets",
+                 "additions to fixed assets", "purchase of property plant and equipment",
+                 "purchase of tangible assets", "purchase of ppe"
+          D&A:   "depreciation", "depreciation and amortisation",
+                 "depreciation & amortisation", "amortisation", "d&a"
+        """
+        capex_labels = {
+            "purchase of fixed assets",
+            "capital expenditure on fixed assets",
+            "additions to fixed assets",
+            "purchase of property plant and equipment",
+            "purchase of property, plant and equipment",
+            "purchase of tangible assets",
+            "purchase of ppe",
+            "capex",
+            "capital expenditure",
+            "purchase of property and equipment",
+        }
+        da_labels = {
+            "depreciation",
+            "depreciation and amortisation",
+            "depreciation & amortisation",
+            "depreciation and amortization",
+            "depreciation & amortization",
+            "amortisation",
+            "amortization",
+            "d&a",
+            "depreciation / amortisation",
+        }
+
+        result: dict = {}
+        capex_vals: list[float] = []
+        da_vals: list[float] = []
+
+        for table in cf_section.find_all("table"):
+            for row in table.find_all("tr"):
+                cells = row.find_all("td")
+                if not cells:
+                    continue
+                label = cells[0].get_text(strip=True).lower().replace("+", "").strip()
+                vals: list[float] = []
+                for c in cells[1:]:
+                    try:
+                        vals.append(float(c.get_text(strip=True).replace(",", "")))
+                    except ValueError:
+                        pass
+
+                if not vals:
+                    continue
+
+                if label in capex_labels:
+                    # Screener shows capex as negative under investing; take abs
+                    capex_vals = [abs(v) for v in vals]
+                elif label in da_labels:
+                    da_vals = [abs(v) for v in vals]
+                elif "cash from operating" in label or "operating activities" in label:
+                    # Already captured in _extract_cashflow_ratio; ignore here
+                    pass
+
+        if capex_vals:
+            result["capex_cr_latest"] = capex_vals[-1]
+            result["capex_cr_3y"] = capex_vals[-3:] if len(capex_vals) >= 3 else capex_vals
+        if da_vals:
+            result["da_cr_latest"] = da_vals[-1]
+
+        return result
+
+    def _extract_gross_margin(self, pl_section: BeautifulSoup) -> dict:
+        """Extract gross profit margin series from P&L section.
+
+        Gross profit = Revenue - Raw Material / COGS.  On Screener, the main
+        data-table has rows for 'Raw Materials', 'Material Cost', or 'Cost of Goods
+        Sold'.  For service companies these rows don't exist — returns empty dict.
+        """
+        result: dict = {}
+        cogs_labels = {
+            "raw materials",
+            "material cost",
+            "material costs",
+            "cost of goods sold",
+            "cost of materials consumed",
+            "purchase of stock-in-trade",
+            "cost of raw materials",
+            "direct costs",
+            "cost of revenues",
+        }
+
+        main_pl = pl_section.find("table", class_=re.compile(r"data-table"))
+        if not main_pl:
+            return result
+
+        sales_vals: list[float] = []
+        cogs_vals: list[float] = []
+
+        for row in main_pl.find_all("tr"):
+            cells = row.find_all("td")
+            if not cells:
+                continue
+            label = cells[0].get_text(strip=True).lower().replace("+", "").strip()
+            vals: list[float] = []
+            for c in cells[1:]:
+                try:
+                    vals.append(float(c.get_text(strip=True).replace(",", "")))
+                except ValueError:
+                    pass
+
+            if not vals:
+                continue
+
+            if label in ("sales", "revenue from operations", "net sales", "revenue"):
+                sales_vals = vals
+            elif label in cogs_labels:
+                # Accumulate all COGS-like rows (some companies split them)
+                if cogs_vals:
+                    cogs_vals = [c + v for c, v in zip(cogs_vals, vals, strict=False)]
+                else:
+                    cogs_vals = vals
+
+        if sales_vals and cogs_vals and len(sales_vals) == len(cogs_vals):
+            margins = []
+            for s, c in zip(sales_vals, cogs_vals, strict=False):
+                if s > 0:
+                    margins.append(round((s - c) / s * 100, 1))
+            if margins:
+                result["gross_profit_margin_pct"] = margins[-1]
+                result["gross_profit_margin_series"] = margins
 
         return result
 

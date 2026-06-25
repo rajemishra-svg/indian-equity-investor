@@ -36,7 +36,7 @@ class Step8Premortem(BaseStep):
         )
         state.current_step = self.step_number
 
-        system = self._build_system_prompt()
+        system = self._build_system_prompt(state)
         message = self._build_message(state)
 
         try:
@@ -92,21 +92,54 @@ class Step8Premortem(BaseStep):
 
         return state
 
-    def _build_system_prompt(self) -> str:
-        return (
-            "You are a risk analyst specialising in Indian equities. "
-            "Perform a premortem analysis using ONLY the context provided — do not search the web.\n\n"
-            "RISK CLASSIFICATION:\n"
-            "- CYCLICAL_MANAGEABLE: temporary downturn, business intact, proceed=true\n"
-            "- STRUCTURAL_UNHEDGEABLE: permanent impairment, proceed=false\n\n"
+    def _build_system_prompt(self, state: AnalysisState | None = None) -> str:
+        is_growth = state is not None and state.analysis_mode == "growth"
+
+        base_categories = (
             "Categories to evaluate from the context:\n"
             "1. Business model disruption (check moat durability)\n"
             "2. Regulatory / policy reversal (check tailwind type)\n"
             "3. Promoter / governance failure (check governance flags)\n"
             "4. Balance sheet deterioration (check D/E, interest coverage)\n"
             "5. Competitive displacement (check moat and headwinds)\n"
-            "6. Macro / currency / sector collapse (check cycle position)\n\n"
-            "RULES:\n"
+            "6. Macro / currency / sector collapse (check cycle position)"
+        )
+
+        growth_categories = (
+            "GROWTH MODE — evaluate growth-specific risks first:\n"
+            "1. FAILS TO SCALE: unit economics don't hold at 5× current revenue — "
+            "gross margin compressing, CAC rising, ROIIC falling\n"
+            "2. COMPETITIVE DISRUPTION: better-funded player enters the TAM; "
+            "company's growth rate decelerates sharply before reaching scale\n"
+            "3. RE-RATING RISK: if growth slows even 5pp below expectations, "
+            "the high P/E multiple compresses 40-60% even if business is fine\n"
+            "4. PROMOTER DILUTION: equity raises erode per-share returns "
+            "even as headline revenue grows\n"
+            "5. TAM MIRAGE: addressable market is smaller than estimated; "
+            "penetration ceiling hit earlier than modelled\n"
+            "6. CASH RUNWAY: if FCF-negative, next equity raise may happen at "
+            "distressed terms or dilute existing holders heavily"
+        )
+
+        categories = growth_categories if is_growth else base_categories
+        question = (
+            "\nPerform a premortem: if this growth stock falls 60% in 2–3 years "
+            "(growth stocks de-rate sharply), what are the three most likely causes? "
+            "Return the JSON."
+            if is_growth else
+            "\nPerform a premortem: if this stock falls 50% in 2–3 years, "
+            "what are the three most likely causes based on the above context? "
+            "Return the JSON."
+        )
+
+        return (
+            "You are a risk analyst specialising in Indian equities. "
+            "Perform a premortem analysis using ONLY the context provided — do not search the web.\n\n"
+            "RISK CLASSIFICATION:\n"
+            "- CYCLICAL_MANAGEABLE: temporary downturn, business intact, proceed=true\n"
+            "- STRUCTURAL_UNHEDGEABLE: permanent impairment, proceed=false\n\n"
+            + categories
+            + "\n\nRULES:\n"
             "1. Use ONLY the provided context. No web searches.\n"
             "2. NEVER fabricate risks not supported by the evidence.\n"
             "3. Return ONLY valid JSON:\n"
@@ -118,6 +151,7 @@ class Step8Premortem(BaseStep):
             '  "proceed": <true|false>,\n'
             '  "data_flags": [<list of [DATA UNVERIFIED] flags>]\n'
             "}"
+            + f"\n\n{question}"
         )
 
     def _build_message(self, state: AnalysisState) -> str:
@@ -175,10 +209,26 @@ class Step8Premortem(BaseStep):
                 f"MoS={v.margin_of_safety_pct}%"
             )
 
+        # Growth mode: add growth-specific context
+        if state.analysis_mode == "growth" and state.growth_metrics:
+            gm = state.growth_metrics
+            parts.append(
+                f"Growth metrics: rev CAGR 3Y={getattr(state.financials, 'revenue_cagr_3y', None)}%, "
+                f"gross margin trend={gm.gross_margin_trend}, "
+                f"Rule of 40={gm.rule_of_40_score}, "
+                f"cash runway={gm.cash_runway_months} months, "
+                f"ROIIC={gm.roiic_3y or gm.roiic_proxy_cfo_revenue}%, "
+                f"TAM penetration={gm.tam_penetration_est_pct}%"
+            )
+            if state.multibagger_score:
+                ms = state.multibagger_score
+                parts.append(
+                    f"Multibagger score: {ms.total_score}/10 ({ms.verdict}); "
+                    f"valuation gap={ms.valuation_gap_score}/3"
+                )
+
         parts.append(
-            "\nPerform a premortem: if this stock falls 50% in 2–3 years, "
-            "what are the three most likely causes based on the above context? "
-            "Return the JSON."
+            "\nReturn the JSON with your premortem risk assessment."
         )
         return "\n".join(parts)
 
