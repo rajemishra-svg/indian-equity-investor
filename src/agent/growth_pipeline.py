@@ -112,6 +112,17 @@ def compute_growth_metrics(state: AnalysisState) -> None:
     # equity_dilution_3y_pct: requires historical shares outstanding — not yet tracked.
     # Left as None; Step 5M applies benefit of doubt.
 
+    # Estimate listing age from Screener financial history length.
+    # Screener only populates prior-year revenue (revenue_1y_ago_cr) for companies with
+    # ≥ 1 full fiscal year of listed data, and computes 3Y CAGR only after 3 years.
+    # These are conservative lower bounds — a company could have more history than Screener shows.
+    if f:
+        if f.revenue_1y_ago_cr is None:
+            gm.listing_years = 0.5   # no prior-year revenue → likely < 1 year listed
+        elif f.revenue_cagr_3y is None:
+            gm.listing_years = 2.0   # 1Y available but no 3Y CAGR → listed 1-3 years
+        # else: ≥ 3 years of data; listing_years stays None (not "recently listed")
+
     # Data quality flags for key unavailable metrics
     if gm.gross_margin_pct is None:
         gm.data_flags.append(
@@ -194,9 +205,13 @@ class GrowthPipeline(InvestmentPipeline):
                 Step3GrowthFinancials(self.claude, clients),
                 Step4Tailwinds(self.claude, clients),
                 Step5GrowthValuation(self.claude, clients),
+                # P2: run peer dominance check before Step 5M and Step 6.
+                # PEER_SWITCH terminates the pipeline, so running Step 7 here
+                # saves the 5M multibagger Haiku call, Step 6 Technical, and
+                # the full Step 7 fetch that would otherwise run anyway.
+                Step7Peers(self.claude, clients),
                 Step5MMultibagger(self.claude, clients),
                 Step6Technical(self.claude, clients),
-                Step7Peers(self.claude, clients),
                 Step8Premortem(self.claude, clients),
                 Step9Output(self.claude, clients),
             ]

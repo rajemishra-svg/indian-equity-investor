@@ -361,6 +361,9 @@ class GrowthMetrics(BaseModel):
     promoter_holding_trend_5y: str | None = None   # "increasing" | "stable" | "declining"
     equity_dilution_3y_pct: float | None = None    # % growth in shares outstanding over 3Y
 
+    # IPO / listing age — estimated from Screener financial history length
+    listing_years: float | None = None             # None = unknown (≥ 3Y assumed); < 1.0 = very recently listed
+
     data_flags: list[str] = Field(default_factory=list)
 
 

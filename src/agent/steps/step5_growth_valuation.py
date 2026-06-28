@@ -114,6 +114,24 @@ class Step5GrowthValuation(BaseStep):
         # Sector key for EV/Revenue bands
         sector_key = _GROWTH_SECTOR_MAP.get(state.sector_name or "", "default")
 
+        # P1a — EC-G2: Recently listed adjustment
+        # If listing_years < 1 (or sector is recently_listed), the IPO premium
+        # has not been fully corrected by market price discovery.  Require 50%
+        # more MoS on the forward DCF (20% → 30%) and flag it clearly.
+        recently_listed = (
+            state.sector_name == "recently_listed"
+            or (gm.listing_years is not None and gm.listing_years < 1.0)
+        )
+        dcf_mos_buy_threshold = 30.0 if recently_listed else 20.0
+        if recently_listed:
+            flag = (
+                "[EC-G2: RECENTLY LISTED — IPO price discovery incomplete; "
+                f"forward DCF MoS requirement raised from 20% to {dcf_mos_buy_threshold:.0f}%; "
+                "verify TAM and unit economics with CRISIL/IBEF/NASSCOM data before allocating]"
+            )
+            data_flags.append(flag)
+            state.add_flag(flag)
+
         # WACC for forward DCF (base + growth adjustment from profile)
         cap_size = state.cap_size
         wacc_base = {
@@ -213,17 +231,17 @@ class Step5GrowthValuation(BaseStep):
             result.dcf_intrinsic_weighted = round(intrinsic_per_share_rs, 2)
             result.margin_of_safety_pct = round(mos_pct, 1)
 
-            if mos_pct >= 20:
+            if mos_pct >= dcf_mos_buy_threshold:
                 methods_in_buy_zone += 1
                 data_flags.append(
                     f"[POSITIVE G5-3: Forward Revenue DCF — intrinsic ₹{intrinsic_per_share_rs:.0f}, "
-                    f"CMP ₹{cmp:.0f}, MoS {mos_pct:.1f}%]"
+                    f"CMP ₹{cmp:.0f}, MoS {mos_pct:.1f}% ≥ {dcf_mos_buy_threshold:.0f}% threshold]"
                 )
             elif mos_pct >= 0:
-                methods_in_buy_zone += 1
                 data_flags.append(
                     f"[G5-3: Forward Revenue DCF — intrinsic ₹{intrinsic_per_share_rs:.0f}, "
-                    f"CMP ₹{cmp:.0f}, MoS {mos_pct:.1f}% (thin but positive)]"
+                    f"CMP ₹{cmp:.0f}, MoS {mos_pct:.1f}% (below {dcf_mos_buy_threshold:.0f}% threshold; "
+                    f"{'EC-G2 raised bar' if recently_listed else 'thin margin'})]"
                 )
             else:
                 data_flags.append(
@@ -277,17 +295,33 @@ class Step5GrowthValuation(BaseStep):
             tam_ceiling = tam_cr * 0.20 * terminal_ps_5  # max value at 20% penetration
             headroom_multiple = tam_ceiling / mc if mc > 0 else 0
 
-            if headroom_multiple >= 10:
-                methods_in_buy_zone += 1
+            # P1b: TAM source verification.  LLM-inferred TAM has no independent validation;
+            # flag it and count at 50% weight (0.5 method) to prevent false buy signals.
+            tam_unverified = gm.tam_source == "llm_inference"
+            if tam_unverified:
                 data_flags.append(
-                    f"[POSITIVE G5-5: TAM-ceiling — {headroom_multiple:.0f}× headroom "
+                    f"[TAM UNVERIFIED: source '{gm.tam_source}' — "
+                    "G5-5 scored at 50% weight; confirm TAM estimate with CRISIL, IBEF, "
+                    "NASSCOM, or company investor presentation before acting on this result]"
+                )
+
+            if headroom_multiple >= 10:
+                if tam_unverified:
+                    # Half-credit: enough headroom even with uncertainty
+                    methods_in_buy_zone += 0.5
+                else:
+                    methods_in_buy_zone += 1
+                data_flags.append(
+                    f"[{'POSITIVE ' if not tam_unverified else ''}G5-5: TAM-ceiling — {headroom_multiple:.0f}× headroom "
                     f"(TAM ₹{tam_cr:,.0f} Cr; 20% penetration value ₹{tam_ceiling:,.0f} Cr "
-                    f"vs market cap ₹{mc:,.0f} Cr)]"
+                    f"vs market cap ₹{mc:,.0f} Cr){' [UNVERIFIED TAM]' if tam_unverified else ''}]"
                 )
             elif headroom_multiple >= 5:
-                methods_in_buy_zone += 1
+                if not tam_unverified:
+                    methods_in_buy_zone += 1
                 data_flags.append(
-                    f"[G5-5: TAM-ceiling — {headroom_multiple:.1f}× headroom (moderate)]"
+                    f"[G5-5: TAM-ceiling — {headroom_multiple:.1f}× headroom (moderate)"
+                    f"{'; UNVERIFIED TAM — not counted' if tam_unverified else ''}]"
                 )
             else:
                 data_flags.append(

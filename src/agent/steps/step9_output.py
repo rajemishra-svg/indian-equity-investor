@@ -162,33 +162,89 @@ class Step9Output(BaseStep):
     def _set_growth_conviction(self, state: AnalysisState) -> None:
         """Set conviction and allocation for growth recommendations.
 
-        Growth positions start smaller (1-2%) and add on milestone confirmation,
-        reflecting the longer time horizon and higher volatility of growth stocks.
-        Multibagger candidates get slightly higher initial allocation than growth buys.
+        P3 formula: moat(40%) + momentum(30%) + roiic(20%) + tam_runway(10%).
+        Combined score 0–1: HIGH ≥ 0.70, MEDIUM ≥ 0.50, LOW < 0.50.
+        Growth positions start smaller than value; add on milestone confirmation.
         """
         ms = state.multibagger_score
-        total = ms.total_score if ms else 0
+        gm = state.growth_metrics
+        f = state.financials
+
+        # Factor 1 — Moat quality (40%)
+        moat_map = {"High": 1.0, "Medium": 0.70, "Low": 0.35, "Unknown": 0.35}
+        moat_score = moat_map.get(
+            state.moat.moat_durability if state.moat else "Unknown", 0.35
+        )
+        if state.moat and state.moat.moat_type.value == "none":
+            moat_score = min(moat_score, 0.40)
+
+        # Factor 2 — Revenue momentum (30%): YoY vs 3Y CAGR ratio
+        rev_1y = gm.revenue_cagr_1y if gm else None
+        rev_3y = f.revenue_cagr_3y if f else None
+        if rev_1y is not None and rev_3y is not None and rev_3y > 0:
+            # 1.0 = maintaining CAGR, > 1.0 = accelerating (cap at 20% above = 1.2)
+            momentum_score = min(rev_1y / rev_3y, 1.2) / 1.2
+        elif rev_1y is not None and rev_3y is not None and rev_3y <= 0:
+            momentum_score = 0.2  # near-zero 3Y CAGR → poor momentum
+        else:
+            momentum_score = 0.50  # unknown → neutral
+
+        # Factor 3 — ROIIC capital efficiency (20%)
+        roiic = gm.roiic_proxy_cfo_revenue if gm else None
+        if roiic is not None:
+            if roiic >= 30:
+                roiic_score = 1.0
+            elif roiic >= 20:
+                roiic_score = 0.75
+            elif roiic >= 10:
+                roiic_score = 0.50
+            elif roiic >= 8:
+                roiic_score = 0.25  # just above hard gate floor
+            else:
+                roiic_score = 0.10  # below floor (shouldn't reach here post-HT-G5)
+        else:
+            roiic_score = 0.50  # unknown → neutral
+
+        # Factor 4 — TAM runway (10%): from multibagger score component 0-2
+        tam_runway_score = (ms.tam_runway_score / 2.0) if ms else 0.50
+
+        combined = (
+            0.40 * moat_score
+            + 0.30 * momentum_score
+            + 0.20 * roiic_score
+            + 0.10 * tam_runway_score
+        )
+
+        state.add_flag(
+            f"[GROWTH CONVICTION: moat {moat_score:.2f}×40% + momentum {momentum_score:.2f}×30% + "
+            f"ROIIC {roiic_score:.2f}×20% + TAM {tam_runway_score:.2f}×10% = {combined:.2f}]"
+        )
+
+        if combined >= 0.70:
+            conv = ConvictionLevel.HIGH
+        elif combined >= 0.50:
+            conv = ConvictionLevel.MEDIUM
+        else:
+            conv = ConvictionLevel.LOW
+        state.conviction = conv
 
         if state.recommendation_type == "MULTIBAGGER_CANDIDATE":
-            if total >= 9:
-                state.conviction = ConvictionLevel.HIGH
-                state.suggested_allocation_pct = 2.0  # start small, add on milestones
-            elif total >= 8:
-                state.conviction = ConvictionLevel.MEDIUM
-                state.suggested_allocation_pct = 1.5
-            else:
-                state.conviction = ConvictionLevel.LOW
-                state.suggested_allocation_pct = 1.0
+            alloc_map = {
+                ConvictionLevel.HIGH: 2.0,
+                ConvictionLevel.MEDIUM: 1.5,
+                ConvictionLevel.LOW: 1.0,
+            }
         elif state.recommendation_type == "GROWTH_BUY":
-            if total >= 7:
-                state.conviction = ConvictionLevel.MEDIUM
-                state.suggested_allocation_pct = 2.0
-            else:
-                state.conviction = ConvictionLevel.LOW
-                state.suggested_allocation_pct = 1.5
+            alloc_map = {
+                ConvictionLevel.HIGH: 1.5,
+                ConvictionLevel.MEDIUM: 1.0,
+                ConvictionLevel.LOW: 0.5,
+            }
         else:  # GROWTH_WATCHLIST
-            state.conviction = ConvictionLevel.LOW
             state.suggested_allocation_pct = 0.0  # monitor only
+            return
+
+        state.suggested_allocation_pct = alloc_map[conv]
 
     async def _apply_volatility_sizing(self, state: AnalysisState) -> None:
         """Scale the suggested allocation by realized volatility (vol targeting).
