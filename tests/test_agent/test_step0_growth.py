@@ -38,6 +38,8 @@ def make_state(
     holding_trend: str | None = "stable",
     avg_daily_value_cr: float = 5.0,
     fcf_cr: float | None = None,
+    ev_revenue_ratio: float | None = None,
+    roiic_proxy: float | None = None,
 ) -> AnalysisState:
     state = AnalysisState(ticker="TESTCO")
     state.analysis_mode = AnalysisMode.GROWTH
@@ -51,6 +53,8 @@ def make_state(
         cash_runway_months=cash_runway_months,
         burn_rate_cr_month=burn_rate_cr_month,
         promoter_holding_trend_5y=holding_trend,
+        ev_revenue_ratio=ev_revenue_ratio,
+        roiic_proxy_cfo_revenue=roiic_proxy,
     )
     state.governance_data = GovernanceData(
         promoter_holding_pct=promoter_holding,
@@ -243,3 +247,133 @@ async def test_unknown_gross_margin_gives_conditional_pass():
 
     assert state.pre_screen.metric_scores["gross_margin_not_contracting"] is True
     assert any("GROSS MARGIN UNKNOWN" in e for e in state.pre_screen.conditional_exceptions)
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 Gate 1: Revenue momentum (YoY ≥ 80% of 3Y CAGR)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_severe_revenue_deceleration_fails_g1():
+    """PGEL scenario: 3Y CAGR 35% but YoY only 8.6% (Δ26pp) → G1 fails."""
+    state = make_state(
+        rev_3y=35.0,
+        rev_1y=8.6,  # 8.6 < 80% of 35 (28.0) AND < 20% floor
+        gross_margin_trend="stable",
+        cash_runway_months=24.0,
+        burn_rate_cr_month=2.0,
+    )
+    state = await make_step().run(state)
+
+    assert state.pre_screen.metric_scores["revenue_acceleration"] is False
+    assert any("HT-G0" in f and "DECELERATION" in f for f in state.pre_screen.data_flags)
+
+
+@pytest.mark.asyncio
+async def test_momentum_threshold_is_80pct_of_cagr():
+    """YoY at exactly 80% of 3Y CAGR passes; just below fails."""
+    # 80% of 30 = 24 → YoY=24 passes, YoY=23 fails
+    state_pass = make_state(rev_3y=30.0, rev_1y=24.0)
+    state_fail = make_state(rev_3y=30.0, rev_1y=23.0)
+
+    state_pass = await make_step().run(state_pass)
+    state_fail = await make_step().run(state_fail)
+
+    assert state_pass.pre_screen.metric_scores["revenue_acceleration"] is True
+    assert state_fail.pre_screen.metric_scores["revenue_acceleration"] is False
+
+
+@pytest.mark.asyncio
+async def test_minimum_yoy_floor_is_20pct():
+    """Even with low 3Y CAGR, YoY ≥ 20% passes via the absolute floor."""
+    # 3Y CAGR = 26%; 80% of 26 = 20.8 but floor is max(80%, 20%) = 20.8
+    # YoY = 21 ≥ 20.8 → passes
+    state = make_state(rev_3y=26.0, rev_1y=21.0)
+    state = await make_step().run(state)
+
+    assert state.pre_screen.metric_scores["revenue_acceleration"] is True
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 Gate 3: EV/Revenue valuation cap
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ev_revenue_above_6x_fails():
+    """IKS scenario: EV/Revenue 8.9x → ev_revenue_cap fails."""
+    state = make_state(
+        rev_3y=42.0,
+        rev_1y=40.0,
+        ev_revenue_ratio=8.9,
+        roiic_proxy=22.0,  # ROIIC 22% (< 30% needed for 4-6x window)
+        gross_margin_trend="stable",
+        cash_runway_months=24.0,
+        burn_rate_cr_month=1.0,
+    )
+    state = await make_step().run(state)
+
+    assert state.pre_screen.metric_scores["ev_revenue_cap"] is False
+    assert any("HT-G0" in f and "EV/REVENUE" in f for f in state.pre_screen.data_flags)
+
+
+@pytest.mark.asyncio
+async def test_ev_revenue_at_4x_passes():
+    """EV/Revenue ≤ 4x always passes regardless of ROIIC."""
+    state = make_state(rev_3y=30.0, rev_1y=28.0, ev_revenue_ratio=3.8)
+    state = await make_step().run(state)
+
+    assert state.pre_screen.metric_scores["ev_revenue_cap"] is True
+
+
+@pytest.mark.asyncio
+async def test_ev_revenue_5x_with_high_roiic_conditional_pass():
+    """EV/Revenue 5x AND ROIIC ≥ 30% → conditional pass (not hard fail)."""
+    state = make_state(
+        rev_3y=35.0,
+        rev_1y=33.0,
+        ev_revenue_ratio=5.0,
+        roiic_proxy=35.0,  # ROIIC 35% ≥ 30% → conditional ok
+        gross_margin_trend="stable",
+        cash_runway_months=24.0,
+        burn_rate_cr_month=1.0,
+    )
+    state = await make_step().run(state)
+
+    assert state.pre_screen.metric_scores["ev_revenue_cap"] is True
+    assert any(
+        "EV/Revenue" in e and "conditional" in e.lower()
+        for e in state.pre_screen.conditional_exceptions
+    )
+
+
+@pytest.mark.asyncio
+async def test_ev_revenue_5x_with_low_roiic_fails():
+    """EV/Revenue 5x but ROIIC only 20% (< 30%) → fails (no conditional exception)."""
+    state = make_state(
+        rev_3y=35.0,
+        rev_1y=33.0,
+        ev_revenue_ratio=5.0,
+        roiic_proxy=20.0,  # ROIIC < 30% → no conditional pass
+        gross_margin_trend="stable",
+        cash_runway_months=24.0,
+        burn_rate_cr_month=1.0,
+    )
+    state = await make_step().run(state)
+
+    assert state.pre_screen.metric_scores["ev_revenue_cap"] is False
+
+
+@pytest.mark.asyncio
+async def test_ev_revenue_unavailable_skips_gate():
+    """No EV/Revenue data and no P/S → gate skipped with conditional note."""
+    state = make_state(rev_3y=30.0, rev_1y=28.0, ev_revenue_ratio=None)
+    # No ps_ratio set either
+    state = await make_step().run(state)
+
+    assert state.pre_screen.metric_scores["ev_revenue_cap"] is True
+    assert any(
+        "EV/Revenue unavailable" in e
+        for e in state.pre_screen.conditional_exceptions
+    )

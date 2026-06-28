@@ -48,20 +48,26 @@ class Step0GrowthPreScreen(BaseStep):
         conditional_exceptions: list[str] = []
 
         # ------------------------------------------------------------------
-        # G1 — Revenue acceleration (latest YoY > 3Y CAGR, or 3Y CAGR ≥ 25%)
-        # Growth stories should be speeding up, not decelerating.
+        # G1 — Revenue momentum: YoY must be ≥ 80% of 3Y CAGR (or ≥ 20% abs)
+        # Growth stories should not be decelerating sharply. A drop below 80%
+        # of the 3Y CAGR signals the growth engine is stalling. We fail
+        # outright here to avoid wasting Steps 1-8 on a broken story.
         # ------------------------------------------------------------------
         rev_1y = gm.revenue_cagr_1y
         rev_3y = f.revenue_cagr_3y if f else None
 
         if rev_1y is not None and rev_3y is not None:
-            passed_g1 = (rev_1y >= rev_3y) or (rev_3y >= 25.0)
+            momentum_threshold = max(rev_3y * 0.80, 20.0)
+            decel_pp = rev_3y - rev_1y
+            passed_g1 = rev_1y >= momentum_threshold
             metric_scores["revenue_acceleration"] = passed_g1
             if not passed_g1:
                 failed_metrics.append("revenue_acceleration")
                 data_flags.append(
-                    f"[GROWTH CONCERN: revenue decelerating — "
-                    f"1Y {rev_1y:.1f}% < 3Y CAGR {rev_3y:.1f}%]"
+                    f"[HT-G0: REVENUE DECELERATION AT PRESCREEN — "
+                    f"YoY {rev_1y:.1f}% < momentum threshold {momentum_threshold:.1f}% "
+                    f"(80% of 3Y CAGR {rev_3y:.1f}%, Δ {decel_pp:.1f}pp); "
+                    "growth story may be breaking — full analysis skipped]"
                 )
         elif rev_3y is not None:
             passed_g1 = rev_3y >= 25.0
@@ -85,6 +91,53 @@ class Step0GrowthPreScreen(BaseStep):
             metric_scores["revenue_cagr_3y >= 25"] = False
             failed_metrics.append("revenue_cagr_3y >= 25")
             data_flags.append("[DATA UNVERIFIED: revenue_cagr_3y]")
+
+        # ------------------------------------------------------------------
+        # G2b — EV/Revenue valuation cap (new Phase-1 gate)
+        # Growth at 8-10x EV/Revenue prices in 50+ years of compounding.
+        # ≤ 4x = reasonable; ≤ 6x acceptable only if ROIIC > 30%; > 6x = reject.
+        # This gate prevents chasing post-IPO hype at bubble multiples.
+        # ------------------------------------------------------------------
+        ev_rev = gm.ev_revenue_ratio
+        roiic_proxy = gm.roiic_proxy_cfo_revenue  # available before Step 3
+
+        if ev_rev is not None:
+            if ev_rev <= 4.0:
+                passed_g2b = True
+                metric_scores["ev_revenue_cap"] = True
+            elif ev_rev <= 6.0 and roiic_proxy is not None and roiic_proxy >= 30.0:
+                # Expensive but high capital efficiency — conditional pass
+                passed_g2b = True
+                metric_scores["ev_revenue_cap"] = True
+                conditional_exceptions.append(
+                    f"[EV/Revenue {ev_rev:.1f}x: above 4x but ROIIC {roiic_proxy:.1f}% ≥ 30% — "
+                    "conditional pass; monitor margin expansion carefully]"
+                )
+            else:
+                passed_g2b = False
+                metric_scores["ev_revenue_cap"] = False
+                failed_metrics.append("ev_revenue_cap")
+                data_flags.append(
+                    f"[HT-G0: EV/REVENUE {ev_rev:.1f}x EXCEEDS CAP — "
+                    f"threshold ≤ 4x (or ≤ 6x with ROIIC ≥ 30%); "
+                    "stock priced for 50+ years of compounding at current multiple; "
+                    "wait for 30-40% pullback before re-screening]"
+                )
+        else:
+            # EV/Revenue unavailable — use P/S as fallback
+            ps = gm.ps_ratio
+            if ps is not None and ps > 6.0:
+                metric_scores["ev_revenue_cap"] = False
+                failed_metrics.append("ev_revenue_cap")
+                data_flags.append(
+                    f"[EV/REVENUE UNAVAILABLE: P/S {ps:.1f}x used as proxy — "
+                    f"exceeds 6x; likely expensive; verify EV/Revenue manually]"
+                )
+            else:
+                metric_scores["ev_revenue_cap"] = True
+                conditional_exceptions.append(
+                    "[EV/Revenue unavailable: valuation cap check skipped — verify manually]"
+                )
 
         # ------------------------------------------------------------------
         # G3 — Gross margin not contracting
@@ -231,13 +284,14 @@ class Step0GrowthPreScreen(BaseStep):
 
         score = sum(metric_scores.values())
 
-        # Gate: 7+ green = PASS_GREEN, 6 = PASS_CONDITIONAL, <6 = FAIL
-        if score >= 7:
+        # Gate: 8+ green = PASS_GREEN, 7 = PASS_CONDITIONAL, <7 = FAIL
+        # Max score is now 10 (added ev_revenue_cap gate)
+        if score >= 8:
             gate = GateResult.PASS_GREEN
-        elif score >= 6:
+        elif score >= 7:
             gate = GateResult.PASS_CONDITIONAL
             conditional_exceptions.append(
-                f"Growth pre-screen score {score}/9 — conditional pass; "
+                f"Growth pre-screen score {score}/10 — conditional pass; "
                 "additional scrutiny required in Steps 3G and 5G"
             )
         else:
@@ -245,7 +299,7 @@ class Step0GrowthPreScreen(BaseStep):
 
         result = PreScreenResult(
             score=score,
-            max_score=9,
+            max_score=10,
             gate=gate,
             metric_scores=metric_scores,
             failed_metrics=failed_metrics,
@@ -261,7 +315,7 @@ class Step0GrowthPreScreen(BaseStep):
             ticker=state.ticker,
             gate=gate.value,
             score=score,
-            max_score=9,
+            max_score=10,
             sector=state.sector_name,
             failed_metrics=failed_metrics,
         )
@@ -269,7 +323,7 @@ class Step0GrowthPreScreen(BaseStep):
         if gate == GateResult.FAIL:
             state.terminated_at_step = self.step_number
             state.termination_reason = (
-                f"Growth pre-screen FAILED: score {score}/9, "
+                f"Growth pre-screen FAILED: score {score}/10, "
                 f"failed: {', '.join(failed_metrics)}"
             )
             state.recommendation_type = "GROWTH_REJECT"

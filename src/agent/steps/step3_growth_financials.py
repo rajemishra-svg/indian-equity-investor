@@ -127,6 +127,17 @@ class Step3GrowthFinancials(BaseStep):
                 "debt amplifies downside risk during growth deceleration]"
             )
 
+        # HT-G5: ROIIC < 8% — unit economics too weak to justify growth premium
+        # Negative or sub-8% ROIIC means the company destroys value on each
+        # incremental rupee invested; at scale this becomes fatal.
+        roiic_val, roiic_method = _compute_roiic(f, gm)
+        if roiic_method != "unavailable" and roiic_val is not None and roiic_val < 8.0:
+            hard_triggers.append(
+                f"[HT-G5: ROIIC {roiic_val:.1f}% < 8% (method: {roiic_method}) — "
+                "unit economics insufficient; company cannot scale profitably; "
+                "growth premium is unjustified at current capital efficiency]"
+            )
+
         if hard_triggers:
             for t in hard_triggers:
                 state.add_flag(t)
@@ -205,8 +216,8 @@ class Step3GrowthFinancials(BaseStep):
             data_flags.append("[DATA UNVERIFIED: rule_of_40 — computed from revenue CAGR + EBITDA margin]")
             score += 0.5
 
-        # G3-4: ROIIC (0-1 pt)
-        roiic_val, roiic_method = _compute_roiic(f, gm)
+        # G3-4: ROIIC soft score (0-1 pt) — only reached if ROIIC ≥ 8% (HT-G5 above
+        # already hard-terminated anything below 8%, so this scores the 8-20% range)
         if roiic_method != "unavailable" and roiic_val is not None:
             if roiic_method == "cfo_proxy":
                 data_flags.append(
