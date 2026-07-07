@@ -203,6 +203,46 @@ SECTOR_PROFILES: dict[str, SectorProfile] = {
         tranche_t3_discount=0.22,  # 22% below CMP
     ),
 
+    "high_growth": SectorProfile(
+        name="high_growth",
+        display_name="High-Growth / Pre-Profit Compounder",
+        sector_override_note=(
+            "High-growth mode: profitability gates waived — top-line expansion and "
+            "reinvestment runway are the primary lens"
+        ),
+        # High bar on revenue growth — the thesis is growth
+        min_revenue_cagr_5y=25.0,
+        min_pat_cagr_5y=None,       # waived — aggressive reinvestment expected
+        min_roe_5y_avg=None,        # waived — capital still being deployed
+        min_roce_5y_avg=None,       # waived
+        min_cfo_np_pct=None,        # waived — FCF burn is acceptable
+        min_cfo_np_pct_s3=None,
+        max_de_ratio=1.0,           # equity-funded preferred
+        min_icr=None,               # waived for equity-funded cos
+        min_promoter_holding=20.0,  # lower floor — some dilution acceptable
+        # Hard triggers: much softer
+        hard_trigger_cfo_np_min=None,
+        hard_trigger_de_max=2.0,    # over-leveraged growth is dangerous
+        hard_trigger_icr_min=None,
+        # Higher risk premium: growth companies have high execution risk
+        wacc_adjustment=2.0,
+        ev_ebitda_applicable=False,  # EV/Revenue is the right lens
+        # Growth re-rating exit multiples — hold for the full compounding arc
+        exit_mult_1x=2.0,   # 2× when growth starts being recognised
+        exit_mult_2x=3.5,   # 3.5× mid-thesis
+        exit_mult_3x=5.0,   # 5× full multibagger realisation
+        # Wider tranche spacing — growth stocks are more volatile
+        tranche_t2_discount=0.15,   # 15% below CMP
+        tranche_t3_discount=0.25,   # 25% below CMP
+        capital_allocation_note=(
+            "NOTE: This is a high-growth company. Negative or low free cash flow is expected "
+            "during the reinvestment phase. Evaluate capital allocation on ROIIC "
+            "(return on incremental invested capital), gross margin trajectory, and whether "
+            "management is deploying capital into the same high-ROIIC opportunities that "
+            "drove historical growth."
+        ),
+    ),
+
     "recently_listed": SectorProfile(
         name="recently_listed",
         display_name="Recently Listed (< 3 years)",

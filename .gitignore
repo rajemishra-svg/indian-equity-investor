@@ -40,3 +40,6 @@ investor.db
 *.db
 *.db-wal
 *.db-shm
+
+# Generated analysis reports — re-creatable via investor analyze
+analysis/reports/

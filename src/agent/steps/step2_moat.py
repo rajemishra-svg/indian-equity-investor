@@ -79,6 +79,32 @@ class Step2Moat(BaseStep):
         return state
 
     def _build_system_prompt(self, state: AnalysisState) -> str:
+        is_growth = state.analysis_mode == "growth"
+
+        growth_research = (
+            "\n\nGROWTH MODE — ADDITIONAL RESEARCH REQUIRED:\n"
+            "This is a high-growth company analysis. Beyond the standard moat assessment, "
+            "you MUST also research and populate these growth-specific fields:\n"
+            "• TAM: search '[company] total addressable market India size 2024 OR 2025' and "
+            "'[sector] market size India IBEF OR CRISIL OR McKinsey'. Estimate the TAM in "
+            "₹ Crore and compute current revenue as % of TAM (tam_penetration_est_pct). "
+            "Record the source quality: 'industry_report' (IBEF/CRISIL/Frost), "
+            "'mgmt_filing' (company investor day/AR), or 'llm_inference' (no web source found).\n"
+            "• ROIIC evidence: search '[company] capital expenditure returns ROCE trend'. "
+            "Assess whether each ₹ of reinvestment is generating returns >= current ROCE — "
+            "this is the compounding test.\n"
+            "• Moat deepening: does the moat get stronger as the company scales? "
+            "(network effects, switching costs that accumulate, brand that compounds) — "
+            "answer true/false in moat_deepens_with_scale."
+        ) if is_growth else ""
+
+        growth_schema = (
+            '  "tam_size_cr": <float or null — estimated TAM in ₹ Crore [GROWTH MODE]>,\n'
+            '  "tam_penetration_est_pct": <float or null — current revenue as % of TAM [GROWTH MODE]>,\n'
+            '  "tam_source": "<industry_report|mgmt_filing|llm_inference|null [GROWTH MODE]>",\n'
+            '  "moat_deepens_with_scale": <true|false|null [GROWTH MODE]>,\n'
+        ) if is_growth else ""
+
         return (
             "You are a senior Indian equity research analyst specialising in "
             "long-term quality investing. Your task is to assess the competitive moat "
@@ -100,8 +126,9 @@ class Step2Moat(BaseStep):
             "and '[company] investor presentation capital allocation'. Look for: "
             "(a) whether management guidance has been consistently met over 2–3 years, "
             "(b) quality of capital allocation commentary (ROCE targets, acquisition discipline), "
-            "(c) transparency on challenges (not just positives).\n\n"
-            "JSON schema:\n"
+            "(c) transparency on challenges (not just positives)."
+            + growth_research
+            + "\n\nJSON schema:\n"
             "{\n"
             '  "moat_type": "<one of: brand|network_effect|cost_leadership|'
             'switching_costs|regulatory|scale|ip_patents|none>",\n'
@@ -114,34 +141,58 @@ class Step2Moat(BaseStep):
             '  "management_guidance_reliability": "<High|Medium|Low|null — '
             'High = met guidance in 3+ of last 4 quarters, Low = missed guidance repeatedly>",\n'
             '  "concall_quality_note": "<1 sentence on management communication quality, or null>",\n'
-            '  "data_flags": [<list of [DATA UNVERIFIED] flags for missing items>]\n'
+            + growth_schema
+            + '  "data_flags": [<list of [DATA UNVERIFIED] flags for missing items>]\n'
             "}"
         )
 
     def _build_initial_message(self, state: AnalysisState) -> str:
-        parts = [
-            f"Analyse the competitive moat of {state.ticker}",
-        ]
+        is_growth = state.analysis_mode == "growth"
+        parts = [f"Analyse the competitive moat of {state.ticker}"]
         if state.company_name:
             parts.append(f"({state.company_name})")
         parts.append("using the following context:")
         context_lines = []
         if state.quote:
-            context_lines.append(f"- CMP: ₹{state.quote.cmp}, Market Cap: ₹{state.quote.market_cap_cr:.0f} Cr")
+            context_lines.append(
+                f"- CMP: ₹{state.quote.cmp}, Market Cap: ₹{state.quote.market_cap_cr:.0f} Cr"
+            )
         if state.financials:
             f = state.financials
             context_lines.append(
-                f"- Revenue CAGR 5Y: {f.revenue_cagr_5y}%, EBITDA Margin: {f.ebitda_margin_latest}%"
+                f"- Revenue CAGR 5Y: {f.revenue_cagr_5y}%, 3Y: {f.revenue_cagr_3y}%, "
+                f"EBITDA Margin: {f.ebitda_margin_latest}%"
             )
+            if is_growth and f.trailing_revenue_cr:
+                context_lines.append(f"- Trailing Revenue: ₹{f.trailing_revenue_cr:,.0f} Cr")
+
+        if is_growth and state.growth_metrics:
+            gm = state.growth_metrics
+            if gm.rule_of_40_score is not None:
+                context_lines.append(f"- Rule of 40 score: {gm.rule_of_40_score:.0f}")
+            if gm.gross_margin_pct is not None:
+                context_lines.append(
+                    f"- Gross Margin: {gm.gross_margin_pct:.1f}% (trend: {gm.gross_margin_trend})"
+                )
 
         message = " ".join(parts)
         if context_lines:
             message += "\n\n" + "\n".join(context_lines)
-        message += (
-            "\n\nUse web_search and web_fetch to gather information about "
-            "market position, competitive dynamics, and working capital trends. "
-            "Then return the structured JSON."
-        )
+
+        if is_growth:
+            message += (
+                "\n\nGROWTH MODE: Use web_search and web_fetch to research "
+                "market position, competitive dynamics, AND estimate the TAM size "
+                "and current penetration level. Look for whether the moat deepens "
+                "at scale (network effects, accumulating switching costs). "
+                "Then return the structured JSON including all growth-mode fields."
+            )
+        else:
+            message += (
+                "\n\nUse web_search and web_fetch to gather information about "
+                "market position, competitive dynamics, and working capital trends. "
+                "Then return the structured JSON."
+            )
         return message
 
     def _parse_moat_response(self, response_text: str, state: AnalysisState) -> MoatAssessment:
@@ -190,7 +241,7 @@ class Step2Moat(BaseStep):
         first_sentence = full_narrative.split(".")[0].strip()
         short_narrative = (first_sentence[:117] + "…") if len(first_sentence) > 120 else first_sentence
 
-        return MoatAssessment(
+        moat = MoatAssessment(
             moat_type=moat_type,
             moat_durability=data.get("moat_durability", "Unknown"),
             market_position=data.get("market_position", "[NOT AVAILABLE]"),
@@ -203,3 +254,33 @@ class Step2Moat(BaseStep):
             concall_quality_note=concall_note,
             data_flags=data.get("data_flags", []),
         )
+
+        # Growth mode: populate growth_metrics fields from Claude's TAM research
+        if state.analysis_mode == "growth":
+            from src.models import GrowthMetrics
+
+            if state.growth_metrics is None:
+                state.growth_metrics = GrowthMetrics()
+            gm = state.growth_metrics
+
+            tam_cr = data.get("tam_size_cr")
+            if isinstance(tam_cr, (int, float)) and tam_cr > 0:
+                gm.tam_size_cr = float(tam_cr)
+
+            tam_pct = data.get("tam_penetration_est_pct")
+            if isinstance(tam_pct, (int, float)) and 0 < tam_pct <= 100:
+                gm.tam_penetration_est_pct = float(tam_pct)
+
+            tam_src = data.get("tam_source")
+            if tam_src in ("industry_report", "mgmt_filing", "llm_inference"):
+                gm.tam_source = tam_src
+
+            self.log.info(
+                "growth_tam_populated",
+                ticker=state.ticker,
+                tam_size_cr=gm.tam_size_cr,
+                tam_penetration_pct=gm.tam_penetration_est_pct,
+                tam_source=gm.tam_source,
+            )
+
+        return moat

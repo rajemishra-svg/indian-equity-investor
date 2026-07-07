@@ -13,6 +13,7 @@ import asyncio
 import csv
 import io
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -20,13 +21,14 @@ from pathlib import Path
 import httpx
 
 from src.agent.pipeline import InvestmentPipeline
+from src.agent.steps.step0_growth_prescreen import Step0GrowthPreScreen
 from src.agent.steps.step0_prescreen import Step0PreScreen
 from src.api import BSEClient, NSEClient, ScreenerClient, YFinanceClient
 from src.api.cache import data_cache
 from src.config import settings
 from src.db.repository import get_fresh_snapshot, save_snapshot
 from src.logging_config import get_logger
-from src.models import AnalysisState, FinancialMetrics, GateResult, GovernanceData
+from src.models import AnalysisMode, AnalysisState, FinancialMetrics, GateResult, GovernanceData
 
 log = get_logger("batch_scanner")
 
@@ -51,6 +53,26 @@ _NSE_ARCHIVES_HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
     )
 }
+
+
+# NSE publishes corporate-action placeholder rows (e.g. DUMMYVEDL1) in its
+# index constituent lists. They are not tradeable symbols and 404 on every
+# downstream data source, so they are dropped before pre-screening.
+_PLACEHOLDER_TICKER_RE = re.compile(r"^DUMMY", re.IGNORECASE)
+
+
+def _drop_placeholder_tickers(tickers: list[str], source: str) -> list[str]:
+    """Remove NSE placeholder symbols (DUMMY*) from a universe list."""
+    kept = [t for t in tickers if not _PLACEHOLDER_TICKER_RE.match(t)]
+    dropped = len(tickers) - len(kept)
+    if dropped:
+        log.info(
+            "placeholder_tickers_dropped",
+            source=source,
+            dropped=dropped,
+            symbols=[t for t in tickers if _PLACEHOLDER_TICKER_RE.match(t)],
+        )
+    return kept
 
 
 async def _fetch_constituents_from_archives(index: str) -> list[str]:
@@ -123,11 +145,14 @@ class PreScreenSummary:
     failed_metrics: list[str] = field(default_factory=list)
     data_flags: list[str] = field(default_factory=list)
     error: str | None = None
-    # Tie-breakers for the Phase 3 candidate cut — captured from data already
-    # fetched in Phase 2, so they cost nothing extra.
+    # Value-mode tie-breakers (None in growth mode)
     roce_5y: float | None = None             # capital efficiency (higher better)
     cfo_np_3y: float | None = None           # earnings quality (higher better)
     pct_below_52w_high: float | None = None  # entry attractiveness (higher better)
+    # Growth-mode tie-breakers (None in value mode)
+    revenue_cagr_3y: float | None = None     # primary growth signal (higher better)
+    rule_of_40_score: float | None = None    # profitability + growth composite (higher better)
+    gross_margin_trend: str | None = None    # "expanding" | "stable" | "contracting"
 
 
 def candidate_sort_key(s: PreScreenSummary) -> tuple:
@@ -155,6 +180,31 @@ def candidate_sort_key(s: PreScreenSummary) -> tuple:
         _desc(s.roce_5y),
         _desc(s.cfo_np_3y),
         _desc(s.pct_below_52w_high),
+        s.ticker,
+    )
+
+
+def growth_candidate_sort_key(s: PreScreenSummary) -> tuple:
+    """Deterministic ordering for the Phase 3 cut in growth mode.
+
+    Ties broken by:
+      1. score (desc)
+      2. revenue CAGR 3Y (desc) — primary growth signal
+      3. Rule of 40 score (desc) — profitability + growth composite
+      4. gross margin trend rank (expanding=0, stable=1, other=2)
+      5. ticker (asc) — total determinism
+    """
+
+    def _desc(v: float | None) -> float:
+        return -v if v is not None else float("inf")
+
+    gm_rank = {"expanding": 0, "stable": 1}.get(s.gross_margin_trend or "", 2)
+
+    return (
+        -s.score,
+        _desc(s.revenue_cagr_3y),
+        _desc(s.rule_of_40_score),
+        gm_rank,
         s.ticker,
     )
 
@@ -196,7 +246,9 @@ class BatchScanner:
         """
         async with NSEClient() as nse:
             try:
-                tickers = await nse.get_index_constituents(index)
+                tickers = _drop_placeholder_tickers(
+                    await nse.get_index_constituents(index), source="nse_api"
+                )
                 log.info("universe_fetched", index=index, source="nse_api", count=len(tickers))
                 return tickers
             except Exception as exc:
@@ -208,7 +260,9 @@ class BatchScanner:
                 )
 
         try:
-            tickers = await _fetch_constituents_from_archives(index)
+            tickers = _drop_placeholder_tickers(
+                await _fetch_constituents_from_archives(index), source="nse_archives_csv"
+            )
             log.info("universe_fetched", index=index, source="nse_archives_csv", count=len(tickers))
             return tickers
         except Exception as exc:
@@ -220,17 +274,24 @@ class BatchScanner:
             )
             return list(NIFTY50_FALLBACK)
 
-    async def prescreen_universe(self, tickers: list[str]) -> list[PreScreenSummary]:
+    async def prescreen_universe(
+        self,
+        tickers: list[str],
+        growth: bool = False,
+    ) -> list[PreScreenSummary]:
         """Run Step 0 on all tickers concurrently (rate-limited by semaphore).
 
         Trendlyne is skipped — Step 0 only needs quote, financials, shareholding.
+        In growth mode, Step0GrowthPreScreen is used and GrowthMetrics are computed
+        from the prefetched data before the step runs.
         """
         semaphore = asyncio.Semaphore(self._concurrency)
 
         async with NSEClient() as nse, ScreenerClient() as screener, BSEClient() as bse, YFinanceClient() as yfinance:
             clients = {"nse": nse, "screener": screener, "bse": bse, "trendlyne": None, "yfinance": yfinance}
             tasks = [
-                self._prescreen_one(ticker, clients, semaphore) for ticker in tickers
+                self._prescreen_one(ticker, clients, semaphore, growth=growth)
+                for ticker in tickers
             ]
             raw = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -256,6 +317,7 @@ class BatchScanner:
         prescreen_min_score: int = 5,
         max_full_analyses: int = 20,
         prescreen_only: bool = False,
+        growth: bool = False,
     ) -> tuple[list[PreScreenSummary], list[AnalysisState]]:
         """Run the full two-phase scan.
 
@@ -264,32 +326,60 @@ class BatchScanner:
             prescreen_min_score: Minimum Step 0 score (0–9) to proceed to full analysis.
             max_full_analyses: Cap on full pipeline runs (Claude API cost control).
             prescreen_only: If True, skip Phase 2 and return after pre-screening.
+            growth: If True, use growth pipeline (Step0GrowthPreScreen + GrowthPipeline).
 
         Returns:
             (all_prescreen_summaries, ranked_full_analysis_results)
         """
+        # Growth pre-screen pass threshold is 6/9; floor the min-score accordingly.
+        if growth and prescreen_min_score < 6:
+            prescreen_min_score = 6
+
+        sort_key = growth_candidate_sort_key if growth else candidate_sort_key
+
         # Phase 1: universe
         log.info("universe_fetch_start", index=index)
         tickers = await self.get_universe(index)
         log.info("universe_ready", index=index, count=len(tickers))
 
         # Phase 2: pre-screen
-        log.info("prescreen_start", ticker_count=len(tickers), min_score=prescreen_min_score)
-        summaries = await self.prescreen_universe(tickers)
+        import time
+        from datetime import UTC, datetime
 
-        # Sort with quality tie-breakers (ROCE → CFO/NP → % below 52W high) so
-        # the [:max_full_analyses] cut below picks the genuinely best names
-        # among tied Step 0 scores instead of arbitrary universe order.
+        from src.db.repository import save_cost_record
+
+        log.info("prescreen_start", ticker_count=len(tickers), min_score=prescreen_min_score, growth=growth)
+        _t_prescreen = time.monotonic()
+        summaries = await self.prescreen_universe(tickers, growth=growth)
+
         candidates = sorted(
             [s for s in summaries if s.score >= prescreen_min_score and not s.error],
-            key=candidate_sort_key,
+            key=sort_key,
         )
+        _prescreen_elapsed = round(time.monotonic() - _t_prescreen, 1)
         log.info(
             "prescreen_complete",
             total=len(tickers),
             passed=len(candidates),
             proceeding=min(len(candidates), max_full_analyses),
         )
+
+        # Record prescreen phase cost row (deterministic — zero LLM cost, tracks elapsed + volume).
+        await save_cost_record(settings.db_path, {
+            "executed_at": datetime.now(UTC).isoformat(),
+            "subcommand": "scan-prescreen",
+            "index_name": index,
+            "num_tickers": len(tickers),
+            "cost_usd": 0.0,
+            "cost_usd_sonnet": 0.0,
+            "cost_usd_haiku": 0.0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "elapsed_seconds": _prescreen_elapsed,
+            "status": "success",
+        })
 
         if prescreen_only or not candidates:
             return summaries, []
@@ -316,7 +406,11 @@ class BatchScanner:
                     prescreen_score=summary.score,
                 )
                 try:
-                    pipeline = InvestmentPipeline(claude=shared_claude)
+                    if growth:
+                        from src.agent.growth_pipeline import GrowthPipeline
+                        pipeline = GrowthPipeline(claude=shared_claude)
+                    else:
+                        pipeline = InvestmentPipeline(claude=shared_claude)
                     return await pipeline.analyze(summary.ticker)
                 except Exception as exc:
                     log.warning("full_analysis_failed", ticker=summary.ticker, error=str(exc))
@@ -331,8 +425,8 @@ class BatchScanner:
         log.info(
             "scan_complete",
             full_analyses=len(full_results),
-            buy_count=sum(1 for s in ranked if s.recommendation_type == "BUY"),
-            watchlist_count=sum(1 for s in ranked if s.recommendation_type == "WATCHLIST"),
+            buy_count=sum(1 for s in ranked if s.recommendation_type in ("BUY", "MULTIBAGGER_CANDIDATE")),
+            watchlist_count=sum(1 for s in ranked if s.recommendation_type in ("WATCHLIST", "GROWTH_BUY", "GROWTH_WATCHLIST")),
         )
         return summaries, ranked
 
@@ -345,31 +439,47 @@ class BatchScanner:
         ticker: str,
         clients: dict,
         semaphore: asyncio.Semaphore,
+        growth: bool = False,
     ) -> PreScreenSummary:
         """Fetch data and run Step 0 for one ticker under the semaphore."""
         async with semaphore:
             state = AnalysisState(ticker=ticker)
+            if growth:
+                state.analysis_mode = AnalysisMode.GROWTH
             await _fetch_prescreen_data(state, clients)
 
-            # Step0PreScreen is purely deterministic — pass None for claude client
-            step0 = Step0PreScreen(None, clients)  # type: ignore[arg-type]
+            if growth:
+                from src.agent.growth_pipeline import compute_growth_metrics
+                compute_growth_metrics(state)
+                step0 = Step0GrowthPreScreen(None, clients)  # type: ignore[arg-type]
+            else:
+                step0 = Step0PreScreen(None, clients)  # type: ignore[arg-type]
+
             state = await step0.run(state)
 
             pre = state.pre_screen
             f = state.financials
             q = state.quote
+            gm = state.growth_metrics
+
             pct_below_high: float | None = None
             if q and q.w52_high and q.w52_high > 0:
                 pct_below_high = round((q.w52_high - q.cmp) / q.w52_high * 100, 2)
+
             return PreScreenSummary(
                 ticker=ticker,
                 score=pre.score if pre else 0,
                 gate=pre.gate if pre else GateResult.NOT_RUN,
                 failed_metrics=pre.failed_metrics if pre else [],
                 data_flags=state.all_data_flags,
-                roce_5y=f.roce_5y_avg if f else None,
-                cfo_np_3y=f.cfo_net_profit_3y_avg if f else None,
-                pct_below_52w_high=pct_below_high,
+                # Value-mode tie-breakers (None in growth mode)
+                roce_5y=None if growth else (f.roce_5y_avg if f else None),
+                cfo_np_3y=None if growth else (f.cfo_net_profit_3y_avg if f else None),
+                pct_below_52w_high=None if growth else pct_below_high,
+                # Growth-mode tie-breakers (None in value mode)
+                revenue_cagr_3y=f.revenue_cagr_3y if (growth and f) else None,
+                rule_of_40_score=gm.rule_of_40_score if (growth and gm) else None,
+                gross_margin_trend=gm.gross_margin_trend if (growth and gm) else None,
             )
 
 
@@ -454,7 +564,7 @@ async def _fetch_prescreen_data(state: AnalysisState, clients: dict) -> None:
         bse = clients.get("bse")
         result = await bse.get_shareholding(ticker) if bse is not None else None
         if result is None:
-            # BSE API commonly returns empty in non-browser environments; fall back to Screener
+            # Ticker not on BSE, fetch failed, or BSE circuit breaker open — fall back to Screener
             screener = clients.get("screener")
             if screener is not None:
                 result = await screener.get_shareholding(ticker)
@@ -498,12 +608,22 @@ async def _fetch_prescreen_data(state: AnalysisState, clients: dict) -> None:
 
 
 def rank_results(results: list[AnalysisState]) -> list[AnalysisState]:
-    """Sort full-pipeline results: BUY first, then by conviction, MoS, governance."""
+    """Sort full-pipeline results: best outcomes first, then by conviction, MoS, governance.
+
+    Growth verdicts are mapped alongside their value equivalents:
+      MULTIBAGGER_CANDIDATE ≈ BUY
+      GROWTH_BUY            ≈ WATCHLIST
+      GROWTH_WATCHLIST      ≈ PEER_SWITCH
+      GROWTH_REJECT         ≈ REJECT
+    """
 
     def _key(s: AnalysisState) -> tuple:
-        rtype = {"BUY": 0, "WATCHLIST": 1, "PEER_SWITCH": 2, "REJECT": 3}.get(
-            s.recommendation_type or "REJECT", 3
-        )
+        rtype = {
+            "BUY": 0, "MULTIBAGGER_CANDIDATE": 0,
+            "WATCHLIST": 1, "GROWTH_BUY": 1,
+            "PEER_SWITCH": 2, "GROWTH_WATCHLIST": 2,
+            "REJECT": 3, "GROWTH_REJECT": 3,
+        }.get(s.recommendation_type or "REJECT", 3)
         conviction = {"high": 0, "medium": 1, "low": 2}.get(
             s.conviction.value if s.conviction else "", 2
         )

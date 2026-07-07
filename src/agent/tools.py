@@ -17,6 +17,11 @@ from src.logging_config import get_logger
 # Maximum redirect hops _web_fetch follows manually — each hop is re-validated
 # so a public page cannot redirect the agent onto an internal endpoint.
 _MAX_REDIRECTS = 5
+# Hard ceiling for the entire _web_search call (both DDG frontends combined).
+# DuckDuckGo rate-limiting can cause TCP connects to hang at the OS level,
+# bypassing httpx's per-phase timeouts — asyncio.wait_for cancels the coroutine
+# even when the underlying socket operation is stalled.
+_WEB_SEARCH_HARD_TIMEOUT = 30.0
 
 log = get_logger("tools")
 
@@ -314,29 +319,42 @@ async def _web_search(query: str) -> str:
     back to lite.duckduckgo.com (independent layout) makes quiet degradation
     of Step 2 moat research much less likely, and both failure paths log a
     structured warning so a dead search backend is visible in the logs.
+
+    Two-layer timeout: per-request httpx timeouts (connect=5s, read=8s) catch
+    normal slowness; asyncio.wait_for(_WEB_SEARCH_HARD_TIMEOUT) is the hard
+    ceiling that cancels the coroutine even when OS-level TCP hangs bypass
+    httpx's timeouts (observed with DDG rate-limiting in batch scans).
     """
     try:
-        async with httpx.AsyncClient(
-            timeout=15.0,
-            follow_redirects=True,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36"
-                )
-            },
-        ) as client:
-            results = await _ddg_html_results(client, query)
-            if not results:
-                log.warning("web_search_html_layout_empty", query=query, fallback="lite")
-                results = await _ddg_lite_results(client, query)
-        if results:
-            return _wrap_untrusted("\n\n".join(results))
-        log.warning("web_search_no_results_any_frontend", query=query)
-        return "[NO RESULTS FOUND]"
+        return await asyncio.wait_for(_web_search_impl(query), timeout=_WEB_SEARCH_HARD_TIMEOUT)
+    except TimeoutError:
+        log.warning("web_search_timeout", query=query, timeout=_WEB_SEARCH_HARD_TIMEOUT)
+        return f"[SEARCH TIMEOUT after {_WEB_SEARCH_HARD_TIMEOUT:.0f}s]"
     except Exception as exc:
         log.warning("web_search_failed", query=query, error=str(exc))
         return f"[SEARCH ERROR: {exc}]"
+
+
+async def _web_search_impl(query: str) -> str:
+    """Inner implementation — called via asyncio.wait_for in _web_search."""
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=5.0, read=8.0, write=5.0, pool=5.0),
+        follow_redirects=True,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36"
+            )
+        },
+    ) as client:
+        results = await _ddg_html_results(client, query)
+        if not results:
+            log.warning("web_search_html_layout_empty", query=query, fallback="lite")
+            results = await _ddg_lite_results(client, query)
+    if results:
+        return _wrap_untrusted("\n\n".join(results))
+    log.warning("web_search_no_results_any_frontend", query=query)
+    return "[NO RESULTS FOUND]"
 
 
 async def _web_fetch(url: str, extract_text: bool = True) -> str:

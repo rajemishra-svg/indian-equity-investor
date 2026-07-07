@@ -205,6 +205,21 @@ class Step1Governance(BaseStep):
             concerns=concerns,
             data_flags=data_flags,
         )
+        # Growth mode: flag equity dilution and promoter holding trend
+        if state.analysis_mode == "growth" and state.growth_metrics:
+            gm = state.growth_metrics
+            dilution = gm.equity_dilution_3y_pct
+            if dilution is not None and dilution > 25:
+                concerns.append(
+                    f"[GROWTH DILUTION: shares outstanding grew {dilution:.0f}% over 3Y — "
+                    "significant equity dilution; verify revenue grew proportionally]"
+                )
+            if gm.promoter_holding_trend_5y == "declining":
+                concerns.append(
+                    "[GROWTH GOVERNANCE: promoter holding declining over 5Y — "
+                    "critical for multibagger thesis; investigate reason]"
+                )
+
         state.governance = result
 
         self.log.info(

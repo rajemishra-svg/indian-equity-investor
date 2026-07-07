@@ -39,7 +39,9 @@ class Step9Output(BaseStep):
 
         # Determine recommendation type if not already set
         if not state.recommendation_type:
-            state.recommendation_type = "BUY"
+            state.recommendation_type = (
+                "GROWTH_BUY" if state.analysis_mode == "growth" else "BUY"
+            )
 
         # ER-05: Auto-downgrade BUY → WATCHLIST when ≥5 data-error tags have
         # accumulated across the pipeline.  A BUY decision backed by this many
@@ -73,10 +75,9 @@ class Step9Output(BaseStep):
         # Build exit strategy (ask Claude)
         await self._build_exit_strategy(state)
 
-        # Build investment thesis only for actionable outcomes. The REJECT and
-        # PEER_SWITCH report templates never show a thesis, so the Haiku call
-        # would be pure waste there (and a scan produces mostly REJECTs).
-        if not state.investment_thesis and state.recommendation_type in ("BUY", "WATCHLIST"):
+        # Build investment thesis only for actionable outcomes.
+        _thesis_types = ("BUY", "WATCHLIST", "MULTIBAGGER_CANDIDATE", "GROWTH_BUY", "GROWTH_WATCHLIST")
+        if not state.investment_thesis and state.recommendation_type in _thesis_types:
             state.investment_thesis = await self._build_thesis(state)
 
         # Format the final report
@@ -96,6 +97,10 @@ class Step9Output(BaseStep):
 
     def _set_conviction(self, state: AnalysisState) -> None:
         """Determine conviction level from gate results."""
+        # Growth types use multibagger score for conviction; value types use gate averages.
+        if state.recommendation_type in ("MULTIBAGGER_CANDIDATE", "GROWTH_BUY", "GROWTH_WATCHLIST"):
+            self._set_growth_conviction(state)
+            return
         if state.recommendation_type not in ("BUY",):
             return
 
@@ -154,6 +159,93 @@ class Step9Output(BaseStep):
         if is_pre_profit and state.suggested_allocation_pct and state.suggested_allocation_pct > 4.0:
             state.suggested_allocation_pct = 4.0
 
+    def _set_growth_conviction(self, state: AnalysisState) -> None:
+        """Set conviction and allocation for growth recommendations.
+
+        P3 formula: moat(40%) + momentum(30%) + roiic(20%) + tam_runway(10%).
+        Combined score 0–1: HIGH ≥ 0.70, MEDIUM ≥ 0.50, LOW < 0.50.
+        Growth positions start smaller than value; add on milestone confirmation.
+        """
+        ms = state.multibagger_score
+        gm = state.growth_metrics
+        f = state.financials
+
+        # Factor 1 — Moat quality (40%)
+        moat_map = {"High": 1.0, "Medium": 0.70, "Low": 0.35, "Unknown": 0.35}
+        moat_score = moat_map.get(
+            state.moat.moat_durability if state.moat else "Unknown", 0.35
+        )
+        if state.moat and state.moat.moat_type.value == "none":
+            moat_score = min(moat_score, 0.40)
+
+        # Factor 2 — Revenue momentum (30%): YoY vs 3Y CAGR ratio
+        rev_1y = gm.revenue_cagr_1y if gm else None
+        rev_3y = f.revenue_cagr_3y if f else None
+        if rev_1y is not None and rev_3y is not None and rev_3y > 0:
+            # 1.0 = maintaining CAGR, > 1.0 = accelerating (cap at 20% above = 1.2)
+            momentum_score = min(rev_1y / rev_3y, 1.2) / 1.2
+        elif rev_1y is not None and rev_3y is not None and rev_3y <= 0:
+            momentum_score = 0.2  # near-zero 3Y CAGR → poor momentum
+        else:
+            momentum_score = 0.50  # unknown → neutral
+
+        # Factor 3 — ROIIC capital efficiency (20%)
+        roiic = gm.roiic_proxy_cfo_revenue if gm else None
+        if roiic is not None:
+            if roiic >= 30:
+                roiic_score = 1.0
+            elif roiic >= 20:
+                roiic_score = 0.75
+            elif roiic >= 10:
+                roiic_score = 0.50
+            elif roiic >= 8:
+                roiic_score = 0.25  # just above hard gate floor
+            else:
+                roiic_score = 0.10  # below floor (shouldn't reach here post-HT-G5)
+        else:
+            roiic_score = 0.50  # unknown → neutral
+
+        # Factor 4 — TAM runway (10%): from multibagger score component 0-2
+        tam_runway_score = (ms.tam_runway_score / 2.0) if ms else 0.50
+
+        combined = (
+            0.40 * moat_score
+            + 0.30 * momentum_score
+            + 0.20 * roiic_score
+            + 0.10 * tam_runway_score
+        )
+
+        state.add_flag(
+            f"[GROWTH CONVICTION: moat {moat_score:.2f}×40% + momentum {momentum_score:.2f}×30% + "
+            f"ROIIC {roiic_score:.2f}×20% + TAM {tam_runway_score:.2f}×10% = {combined:.2f}]"
+        )
+
+        if combined >= 0.70:
+            conv = ConvictionLevel.HIGH
+        elif combined >= 0.50:
+            conv = ConvictionLevel.MEDIUM
+        else:
+            conv = ConvictionLevel.LOW
+        state.conviction = conv
+
+        if state.recommendation_type == "MULTIBAGGER_CANDIDATE":
+            alloc_map = {
+                ConvictionLevel.HIGH: 2.0,
+                ConvictionLevel.MEDIUM: 1.5,
+                ConvictionLevel.LOW: 1.0,
+            }
+        elif state.recommendation_type == "GROWTH_BUY":
+            alloc_map = {
+                ConvictionLevel.HIGH: 1.5,
+                ConvictionLevel.MEDIUM: 1.0,
+                ConvictionLevel.LOW: 0.5,
+            }
+        else:  # GROWTH_WATCHLIST
+            state.suggested_allocation_pct = 0.0  # monitor only
+            return
+
+        state.suggested_allocation_pct = alloc_map[conv]
+
     async def _apply_volatility_sizing(self, state: AnalysisState) -> None:
         """Scale the suggested allocation by realized volatility (vol targeting).
 
@@ -166,7 +258,8 @@ class Step9Output(BaseStep):
         When volatility cannot be computed the allocation is left unchanged
         and flagged — never silently risk-adjust on bad data.
         """
-        if state.recommendation_type != "BUY" or not state.suggested_allocation_pct:
+        _actionable = {"BUY", "MULTIBAGGER_CANDIDATE", "GROWTH_BUY"}
+        if state.recommendation_type not in _actionable or not state.suggested_allocation_pct:
             return
         yf_client = self.clients.get("yfinance")
         if yf_client is None:
@@ -306,28 +399,55 @@ class Step9Output(BaseStep):
 
     async def _build_thesis(self, state: AnalysisState) -> str:
         """Ask Claude to write a 3–4 sentence investment thesis."""
-        system = (
-            "You are a senior equity analyst. "
-            "Write a concise 3–4 sentence investment thesis for a long-term position. "
-            "Focus on: (1) the business compounding advantage, "
-            "(2) the structural tailwind, "
-            "(3) why now is a reasonable entry. "
-            "Be specific — no generic statements. NEVER fabricate data."
-        )
+        is_growth = state.analysis_mode == "growth"
+        if is_growth:
+            system = (
+                "You are a senior growth equity analyst specialising in Indian compounders. "
+                "Write a concise 3–4 sentence growth investment thesis. "
+                "Focus on: (1) the TAM and how early the company is in its journey, "
+                "(2) why the moat deepens at scale (or stays intact), "
+                "(3) the ROIIC quality — can profits be redeployed at high rates for years, "
+                "(4) why the valuation still leaves room for a multibagger return. "
+                "Be specific — cite revenue CAGR, TAM penetration, and P/S or PEG numbers. "
+                "NEVER fabricate data."
+            )
+        else:
+            system = (
+                "You are a senior equity analyst. "
+                "Write a concise 3–4 sentence investment thesis for a long-term position. "
+                "Focus on: (1) the business compounding advantage, "
+                "(2) the structural tailwind, "
+                "(3) why now is a reasonable entry. "
+                "Be specific — no generic statements. NEVER fabricate data."
+            )
 
         context_parts = [f"Ticker: {state.ticker}"]
         if state.moat:
-            # Use short narrative to reduce token cost; full narrative is in the report body
             moat_ctx = state.moat.moat_narrative_short or state.moat.moat_narrative
             context_parts.append(f"Moat: {moat_ctx}")
         if state.tailwind:
             context_parts.append(f"Tailwind: {state.tailwind.tailwind_narrative}")
+        if is_growth and state.growth_metrics:
+            gm = state.growth_metrics
+            context_parts.append(
+                f"Revenue CAGR 3Y: {state.financials.revenue_cagr_3y if state.financials else 'N/A'}%"
+            )
+            if gm.tam_size_cr and gm.tam_penetration_est_pct:
+                context_parts.append(
+                    f"TAM: ₹{gm.tam_size_cr:,.0f} Cr, penetration ~{gm.tam_penetration_est_pct:.1f}%"
+                )
+            if gm.roiic_3y:
+                context_parts.append(f"ROIIC: {gm.roiic_3y:.0f}%")
+        if state.multibagger_score:
+            ms = state.multibagger_score
+            context_parts.append(
+                f"Multibagger score: {ms.total_score}/10 — {ms.valuation_gap_reason}"
+            )
         if state.valuation:
             v = state.valuation
             context_parts.append(
-                f"Valuation: {v.methods_in_buy_zone}/{v.max_methods} methods in buy zone, "
-                f"MoS {v.margin_of_safety_pct:.1f}%" if v.margin_of_safety_pct else
                 f"Valuation: {v.methods_in_buy_zone}/{v.max_methods} methods in buy zone"
+                + (f", MoS {v.margin_of_safety_pct:.1f}%" if v.margin_of_safety_pct else "")
             )
 
         message = "\n".join(context_parts) + "\n\nWrite the investment thesis."
@@ -567,6 +687,9 @@ class Step9Output(BaseStep):
                 "══════════════════════════════════════════════════════════════════════════",
             ]
 
+        elif rtype in ("MULTIBAGGER_CANDIDATE", "GROWTH_BUY", "GROWTH_WATCHLIST", "GROWTH_REJECT"):
+            lines = self._format_growth_report(state, rtype, date_str, cmp_str, w52h_str, w52l_str, mc_str, cap_label)
+
         else:  # REJECT
             step_name = f"Step {state.terminated_at_step}" if state.terminated_at_step is not None else "Unknown"
             lines = [
@@ -589,6 +712,167 @@ class Step9Output(BaseStep):
             ]
 
         return "\n".join(lines)
+
+    def _format_growth_report(  # noqa: C901
+        self,
+        state: AnalysisState,
+        rtype: str,
+        date_str: str,
+        cmp_str: str,
+        w52h_str: str,
+        w52l_str: str,
+        mc_str: str,
+        cap_label: str,
+    ) -> list[str]:
+        """Format MULTIBAGGER_CANDIDATE / GROWTH_BUY / GROWTH_WATCHLIST / GROWTH_REJECT."""
+        ms = state.multibagger_score
+        gm = state.growth_metrics
+        f = state.financials
+        v = state.valuation
+
+        header_map = {
+            "MULTIBAGGER_CANDIDATE": "MULTIBAGGER CANDIDATE",
+            "GROWTH_BUY":           "GROWTH BUY",
+            "GROWTH_WATCHLIST":     "GROWTH WATCHLIST",
+            "GROWTH_REJECT":        "GROWTH REJECT",
+        }
+
+        lines = [
+            "══════════════════════════════════════════════════════════════════════════",
+            f"                     {header_map.get(rtype, rtype)}",
+            "══════════════════════════════════════════════════════════════════════════",
+            f"STOCK           : {state.company_name or state.ticker} | {state.ticker}",
+            f"MARKET CAP      : {mc_str} | {cap_label}",
+            f"REPORT DATE     : {date_str}",
+            "──────────────────────────────────────────────────────────────────────────",
+            "PRICE DATA",
+            f"  CMP           : {cmp_str}",
+            f"  52W High      : {w52h_str} | 52W Low: {w52l_str}",
+        ]
+
+        # Multibagger score breakdown
+        if ms:
+            lines += [
+                "──────────────────────────────────────────────────────────────────────────",
+                f"MULTIBAGGER POTENTIAL SCORE : {ms.total_score}/10",
+                f"  Valuation Gap       : {ms.valuation_gap_score}/3  — {ms.valuation_gap_reason}",
+                f"  Reinvestment Runway : {ms.reinvestment_runway}/2",
+                f"  TAM Runway          : {ms.tam_runway_score}/2  [{ms.tam_confidence} confidence]",
+                f"  Promoter Conviction : {ms.promoter_decade_score}/2  (5Y track record)",
+                f"  Earnings Quality    : {ms.earnings_quality_score}/1",
+            ]
+            if ms.compounding_horizon_years:
+                lines.append(f"  Compounding Horizon : {ms.compounding_horizon_years}")
+
+        # Growth metrics
+        lines.append("──────────────────────────────────────────────────────────────────────────")
+        lines.append("GROWTH METRICS")
+        if f:
+            lines.append(f"  Revenue CAGR 3Y   : {f.revenue_cagr_3y}%  |  5Y: {f.revenue_cagr_5y}%")
+            lines.append(f"  EBITDA Margin     : {f.ebitda_margin_latest}%")
+        if gm:
+            if gm.gross_margin_pct is not None:
+                lines.append(f"  Gross Margin      : {gm.gross_margin_pct:.1f}% ({gm.gross_margin_trend})")
+            if gm.rule_of_40_score is not None:
+                lines.append(f"  Rule of 40        : {gm.rule_of_40_score:.0f}")
+            if gm.roiic_3y is not None:
+                lines.append(f"  ROIIC 3Y          : {gm.roiic_3y:.1f}%")
+            elif gm.roiic_proxy_cfo_revenue is not None:
+                lines.append(f"  ROIIC (proxy)     : {gm.roiic_proxy_cfo_revenue:.1f}% [CFO/Rev efficiency]")
+            if gm.cash_runway_months is not None and gm.burn_rate_cr_month:
+                lines.append(f"  Cash Runway       : {gm.cash_runway_months:.0f} months")
+            if gm.tam_size_cr:
+                pct_str = f" (~{gm.tam_penetration_est_pct:.1f}% penetrated)" if gm.tam_penetration_est_pct else ""
+                lines.append(f"  TAM               : ₹{gm.tam_size_cr:,.0f} Cr{pct_str} [{gm.tam_source or 'ESTIMATE'}]")
+
+        # Investment thesis
+        lines += [
+            "──────────────────────────────────────────────────────────────────────────",
+            "GROWTH THESIS",
+            f"  {state.investment_thesis or '[NOT AVAILABLE]'}",
+        ]
+
+        # Valuation snapshot
+        lines.append("──────────────────────────────────────────────────────────────────────────")
+        lines.append("VALUATION")
+        if state.valuation_data:
+            vd = state.valuation_data
+            lines.append(f"  P/E               : {vd.pe_current}x  |  PEG: {vd.peg_ratio}")
+            lines.append(f"  P/S               : {gm.ps_ratio if gm else '[N/A]'}x  |  EV/Revenue: {gm.ev_revenue_ratio if gm else '[N/A]'}x")
+        if v:
+            lines.append(f"  Methods in BZ     : {v.methods_in_buy_zone}/{v.max_methods}")
+            if v.dcf_intrinsic_weighted:
+                lines.append(f"  Forward Rev DCF   : ₹{v.dcf_intrinsic_weighted:.0f} [ESTIMATE]")
+
+        # Entry plan (only for actionable recommendations)
+        if rtype in ("MULTIBAGGER_CANDIDATE", "GROWTH_BUY") and state.tranches:
+            lines.append("──────────────────────────────────────────────────────────────────────────")
+            lines.append("ENTRY PLAN  (start small — add on milestone confirmation)")
+            for tr in state.tranches:
+                lines.append(
+                    f"  Tranche {tr.tranche}: {tr.pct_allocation}% of portfolio @ ₹{tr.price:.2f}  |  {tr.condition}"
+                )
+            lines.append(
+                f"  Total starter : {state.suggested_allocation_pct:.1f}%  |  "
+                f"Conviction: {state.conviction.value.upper() if state.conviction else 'N/A'}"
+            )
+
+        # Milestones
+        if ms and ms.key_milestones:
+            lines += [
+                "──────────────────────────────────────────────────────────────────────────",
+                "MILESTONES TO MONITOR",
+            ]
+            for i, m in enumerate(ms.key_milestones, 1):
+                lines.append(f"  {i}. {m}")
+
+        # Exit
+        if state.exit_strategy and rtype in ("MULTIBAGGER_CANDIDATE", "GROWTH_BUY"):
+            ex = state.exit_strategy
+            lines += [
+                "──────────────────────────────────────────────────────────────────────────",
+                "EXIT STRATEGY",
+                f"  Fundamental Trigger : {ex.fundamental_trigger}",
+                "  Valuation Exit      : Growth plateau (rev CAGR < 15% for 2 years) OR re-rating complete",
+                f"  Stop-Loss           : ₹{ex.stop_loss_price}" if ex.stop_loss_price else "  Stop-Loss           : [NOT AVAILABLE]",
+                f"  LTCG Eligible After : {ex.ltcg_eligible_after}",
+            ]
+
+        # Premortem
+        if state.premortem:
+            pm = state.premortem
+            lines += [
+                "──────────────────────────────────────────────────────────────────────────",
+                "RISK ASSESSMENT (GROWTH PREMORTEM)",
+                f"  Primary   : {pm.primary_risk}",
+                f"  Secondary : {pm.secondary_risk}",
+                f"  Tertiary  : {pm.tertiary_risk}",
+            ]
+
+        # Peer benchmarking
+        if state.peer_comparison and state.peer_comparison.peers:
+            pc = state.peer_comparison
+            lines += [
+                "──────────────────────────────────────────────────────────────────────────",
+                "PEER BENCHMARKING",
+                f"  Revenue Growth Rank : {pc.target_quality_rank}/{pc.peer_count + 1} (1=fastest)",
+            ]
+
+        # Data flags
+        if state.all_data_flags:
+            lines += [
+                "──────────────────────────────────────────────────────────────────────────",
+                "DATA FLAGS",
+            ]
+            for flag in state.all_data_flags:
+                lines.append(f"  {flag}")
+
+        lines += [
+            "══════════════════════════════════════════════════════════════════════════",
+            f"RECOMMENDATION : {rtype}  |  Score: {ms.total_score if ms else 'N/A'}/10",
+            "══════════════════════════════════════════════════════════════════════════",
+        ]
+        return lines
 
     def _re_eval_condition(self, state: AnalysisState) -> str:
         """Suggest re-evaluation condition based on rejection reason."""

@@ -10,6 +10,7 @@ import click
 from rich.console import Console
 from rich.table import Table
 
+from src.agent.growth_pipeline import GrowthPipeline
 from src.agent.pipeline import InvestmentPipeline
 from src.config import settings
 from src.logging_config import configure_logging
@@ -60,15 +61,22 @@ def cli() -> None:
     default=True,
     help="Save report to analysis/reports/ (default: True)",
 )
-def analyze(ticker: str, save: bool) -> None:
+@click.option(
+    "--growth",
+    is_flag=True,
+    default=False,
+    help="Use growth pipeline (multibagger screening) instead of value pipeline.",
+)
+def analyze(ticker: str, save: bool, growth: bool) -> None:
     """Run full 9-step analysis on a stock TICKER.
 
     Example: investor analyze RELIANCE
+             investor analyze ZOMATO --growth
     """
     ticker = _validate_ticker(ticker)
 
     async def _run() -> AnalysisState:
-        pipeline = InvestmentPipeline()
+        pipeline = GrowthPipeline() if growth else InvestmentPipeline()
         return await pipeline.analyze(ticker)
 
     with console.status(f"[bold green]Analysing {ticker.upper()}...[/bold green]"):
@@ -459,12 +467,19 @@ def correction_scan() -> None:
         "Use 3–5 on a cold scan; 10–15 once the SQLite warm cache is seeded."
     ),
 )
+@click.option(
+    "--growth",
+    is_flag=True,
+    default=False,
+    help="Screen for high-growth / multibagger candidates (uses growth pipeline).",
+)
 def scan(
     index: str,
     top: int,
     min_score: int,
     prescreen_only: bool,
     concurrency: int | None,
+    growth: bool,
 ) -> None:
     """Screen a stock universe and surface the best investment opportunities.
 
@@ -476,9 +491,13 @@ def scan(
     Examples:\n
       investor scan --index "NIFTY 50" --prescreen-only\n
       investor scan --index "NIFTY 100" --top 5 --min-score 7\n
-      investor scan --concurrency 3
+      investor scan --concurrency 3\n
+      investor scan --growth --index "NIFTY 500" --top 5
     """
-    from src.agent.batch_scanner import BatchScanner, candidate_sort_key
+    from src.agent.batch_scanner import BatchScanner, candidate_sort_key, growth_candidate_sort_key
+
+    sort_key = growth_candidate_sort_key if growth else candidate_sort_key
+    effective_min_score = max(min_score, 6) if growth else min_score
 
     async def _run():
         scanner = BatchScanner(concurrency=concurrency)
@@ -487,26 +506,32 @@ def scan(
             prescreen_min_score=min_score,
             max_full_analyses=top,
             prescreen_only=prescreen_only,
+            growth=growth,
         )
 
-    with console.status(f"[bold green]Scanning {index}...[/bold green]"):
+    mode_label = "Growth" if growth else "Value"
+    with console.status(f"[bold green]Scanning {index} ({mode_label} mode)...[/bold green]"):
         summaries, results = asyncio.run(_run())
 
     # --- Pre-screen table ---
     from rich.table import Table
 
-    passed = [s for s in summaries if not s.error and s.score >= min_score]
-    failed = [s for s in summaries if not s.error and s.score < min_score]
+    passed = [s for s in summaries if not s.error and s.score >= effective_min_score]
+    failed = [s for s in summaries if not s.error and s.score < effective_min_score]
     errors = [s for s in summaries if s.error]
 
     ps_table = Table(
-        title=f"Pre-Screen Results — {index}",
+        title=f"Pre-Screen Results — {index} ({mode_label})",
         show_header=True,
         header_style="bold cyan",
     )
     ps_table.add_column("Ticker", style="bold")
     ps_table.add_column("Score", justify="center")
-    ps_table.add_column("ROCE 5Y", justify="right")
+    # Growth mode: show Rev CAGR 3Y; value mode: show ROCE 5Y
+    if growth:
+        ps_table.add_column("Rev CAGR 3Y", justify="right")
+    else:
+        ps_table.add_column("ROCE 5Y", justify="right")
     ps_table.add_column("Gate")
     ps_table.add_column("Failed Metrics", style="dim")
 
@@ -517,14 +542,19 @@ def scan(
         "not_run": "dim",
     }
 
-    # Same ordering the scanner uses for the Phase 3 cut, so the table top
-    # matches which tickers actually get the full analysis.
-    for s in sorted(passed, key=candidate_sort_key):
+    # Same ordering the scanner uses for the Phase 3 cut.
+    for s in sorted(passed, key=sort_key):
         colour = gate_colours.get(s.gate.value, "white")
+        if growth:
+            tiebreak_val = (
+                f"{s.revenue_cagr_3y:.1f}%" if s.revenue_cagr_3y is not None else "[dim]N/A[/dim]"
+            )
+        else:
+            tiebreak_val = f"{s.roce_5y:.1f}%" if s.roce_5y is not None else "[dim]N/A[/dim]"
         ps_table.add_row(
             s.ticker,
             f"[{colour}]{s.score}/9[/{colour}]",
-            f"{s.roce_5y:.1f}%" if s.roce_5y is not None else "[dim]N/A[/dim]",
+            tiebreak_val,
             f"[{colour}]{s.gate.value.upper()}[/{colour}]",
             ", ".join(s.failed_metrics[:3]) + ("…" if len(s.failed_metrics) > 3 else ""),
         )
@@ -546,7 +576,7 @@ def scan(
 
     # --- Full analysis table ---
     fa_table = Table(
-        title="Full Analysis Results (ranked)",
+        title=f"Full Analysis Results — {mode_label} (ranked)",
         show_header=True,
         header_style="bold cyan",
     )
@@ -557,7 +587,16 @@ def scan(
     fa_table.add_column("Governance", justify="center")
     fa_table.add_column("Terminated At")
 
-    rec_colours = {"BUY": "green", "WATCHLIST": "yellow", "PEER_SWITCH": "cyan", "REJECT": "red"}
+    rec_colours = {
+        "BUY": "green",
+        "MULTIBAGGER_CANDIDATE": "green",
+        "WATCHLIST": "yellow",
+        "GROWTH_BUY": "yellow",
+        "PEER_SWITCH": "cyan",
+        "GROWTH_WATCHLIST": "cyan",
+        "REJECT": "red",
+        "GROWTH_REJECT": "red",
+    }
 
     for state in results:
         rec = state.recommendation_type or "REJECT"
@@ -588,15 +627,20 @@ def scan(
 
     console.print(fa_table)
 
-    # Print full report for BUY recommendations
-    buy_states = [s for s in results if s.recommendation_type == "BUY"]
-    if buy_states:
-        console.print(f"\n[bold green]Found {len(buy_states)} BUY recommendation(s):[/bold green]")
-        for state in buy_states:
+    # Print full report for top outcomes
+    top_states = [
+        s for s in results
+        if s.recommendation_type in ("BUY", "MULTIBAGGER_CANDIDATE")
+    ]
+    if top_states:
+        label = "MULTIBAGGER_CANDIDATE / BUY" if growth else "BUY"
+        console.print(f"\n[bold green]Found {len(top_states)} {label} recommendation(s):[/bold green]")
+        for state in top_states:
             if state.formatted_output:
                 console.print(state.formatted_output)
     else:
-        console.print("\n[yellow]No BUY recommendations from this scan.[/yellow]")
+        label = "MULTIBAGGER_CANDIDATE" if growth else "BUY"
+        console.print(f"\n[yellow]No {label} recommendations from this scan.[/yellow]")
 
     # Save reports and update watchlist/rejection tracker
     reports_dir = Path("analysis") / "reports"
@@ -933,7 +977,11 @@ def db_summary() -> None:
     "--type",
     "rec_type",
     default="BUY",
-    type=click.Choice(["BUY", "WATCHLIST", "PEER_SWITCH", "REJECT"], case_sensitive=False),
+    type=click.Choice(
+        ["BUY", "WATCHLIST", "PEER_SWITCH", "REJECT",
+         "MULTIBAGGER_CANDIDATE", "GROWTH_BUY", "GROWTH_WATCHLIST", "GROWTH_REJECT"],
+        case_sensitive=False,
+    ),
     show_default=True,
     help="Recommendation type to filter",
 )
@@ -1086,6 +1134,93 @@ def db_snapshots(ticker: str, data_type: str | None) -> None:
 
     console.print(table)
     console.print(f"\n[dim]{len(rows)} snapshot(s) for {ticker} · {settings.db_path}[/dim]")
+
+
+# ---------------------------------------------------------------------------
+# db-entry-plan command
+# ---------------------------------------------------------------------------
+
+
+@cli.command("db-entry-plan")
+@click.argument("ticker")
+def db_entry_plan(ticker: str) -> None:
+    """Show entry prices, stop-loss, and exit targets from the latest analysis.
+
+    Extracts position sizing, entry tranches, and risk management levels
+    from the Step 9 output of the most recent analysis.
+
+    \b
+    Example:
+      investor db-entry-plan HINDZINC
+      investor db-entry-plan BAJFINANCE
+    """
+    import asyncio as _asyncio
+
+    from src.db.repository import get_entry_plan
+
+    ticker = ticker.upper()
+    result = _asyncio.run(get_entry_plan(settings.db_path, ticker))
+
+    if not result:
+        console.print(
+            f"[yellow]No analysis found for {ticker} in {settings.db_path}. "
+            f"Run 'investor analyze {ticker}' first.[/yellow]"
+        )
+        return
+
+    # Build output table
+    table = Table(
+        title=f"Entry Plan — {ticker}",
+        show_header=True,
+        header_style="bold cyan",
+        show_lines=True,
+    )
+    table.add_column("Field", style="bold", width=24)
+    table.add_column("Value", width=30)
+
+    # Header info
+    table.add_row("Ticker", result.get("ticker", ""))
+    table.add_row("Company", result.get("company_name", "") or "—")
+    table.add_row("Analysis Date", result.get("analysis_date", ""))
+    rec = result.get("recommendation", "")
+    table.add_row("Recommendation", rec.upper() if rec else "—")
+    conv = result.get("conviction", "")
+    table.add_row("Conviction", conv.upper() if conv else "—")
+    table.add_row("Cap Size", result.get("cap_size", "") or "—")
+    table.add_row("Market Cap", "₹" + f"{float(result.get('market_cap_cr', 0)):,.0f}" + " Cr" if result.get("market_cap_cr") else "—")
+
+    # Entry & Position Sizing
+    table.add_row("[bold]Entry Price[/bold]", "")
+    entry = result.get("entry_price")
+    table.add_row("CMP @ Analysis", f"₹{entry:.2f}" if entry else "—")
+    alloc = result.get("allocation_pct")
+    table.add_row("Target Allocation %", f"{alloc:.1f}%" if alloc else "—")
+
+    # MoS
+    mos = result.get("mos_pct")
+    table.add_row("Margin of Safety", f"{mos:.1f}%" if mos is not None else "—")
+
+    # Entry Tranches (placeholder until Step 9 JSON parsing is added)
+    table.add_row("[bold]Entry Tranches[/bold]", "")
+    t1 = result.get("tranche_1")
+    table.add_row("Tranche 1 @ CMP", f"₹{t1:.2f}" if t1 else "[dim]Not yet available[/dim]")
+    t2 = result.get("tranche_2")
+    table.add_row("Tranche 2 (−8%)", f"₹{t2:.2f}" if t2 else "[dim]Extract from report[/dim]")
+    t3 = result.get("tranche_3")
+    table.add_row("Tranche 3 (−15%)", f"₹{t3:.2f}" if t3 else "[dim]Extract from report[/dim]")
+
+    # Risk Management
+    table.add_row("[bold]Risk Management[/bold]", "")
+    sl = result.get("stop_loss")
+    table.add_row("Stop-Loss", f"₹{sl:.2f}" if sl else "[dim]Extract from report[/dim]")
+    et = result.get("exit_target")
+    table.add_row("Exit Target", f"₹{et:.2f}" if et else "[dim]Extract from report[/dim]")
+
+    console.print(table)
+    console.print(
+        "\n[dim]💡 Entry tranches and stop-loss are currently available in the markdown report "
+        f"(analysis/reports/{ticker}_*.md).[/dim]"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1984,6 +2119,172 @@ def backtest_cmd(min_age_days: int, ticker: str | None) -> None:
         "positive absolute return; 'vs Nifty' compares each sample to the index over its "
         "own holding window.[/dim]"
     )
+
+
+# ---------------------------------------------------------------------------
+# cost-summary command
+# ---------------------------------------------------------------------------
+
+
+@cli.command("cost-summary")
+@click.option(
+    "--period",
+    default="month",
+    type=click.Choice(["day", "week", "month", "quarter", "year"], case_sensitive=False),
+    show_default=True,
+    help="Aggregation period",
+)
+@click.option("--limit", default=24, show_default=True, help="Max rows to show")
+@click.option("--detail", is_flag=True, default=False, help="Per-run table instead of aggregated")
+@click.option(
+    "--by-subcommand", "by_subcommand", is_flag=True, default=False,
+    help="Breakdown by subcommand type"
+)
+@click.option(
+    "--by-ticker", "by_ticker", is_flag=True, default=False,
+    help="Most expensive tickers (analyze only)"
+)
+@click.option("--top", default=10, show_default=True, help="Rows for --by-ticker")
+def cost_summary(
+    period: str, limit: int, detail: bool, by_subcommand: bool, by_ticker: bool, top: int
+) -> None:
+    """Show LLM API cost history.
+
+    \b
+    Examples:
+      investor cost-summary                        # monthly aggregation
+      investor cost-summary --period week          # weekly
+      investor cost-summary --detail               # per-run table
+      investor cost-summary --by-subcommand        # breakdown by command
+      investor cost-summary --by-ticker --top 15   # most expensive tickers
+    """
+    import asyncio as _asyncio
+
+    from rich.console import Console as _Console
+
+    from src.db.repository import (
+        query_cost_by_subcommand,
+        query_cost_by_ticker,
+        query_cost_detail,
+        query_cost_summary,
+    )
+
+    wide = _Console(width=140)
+
+    if by_ticker:
+        rows = _asyncio.run(query_cost_by_ticker(settings.db_path, top=top))
+        if not rows:
+            wide.print("[yellow]No analyze cost records found.[/yellow]")
+            return
+        t = Table(title=f"Top {top} Most Expensive Tickers (analyze)", header_style="bold cyan")
+        t.add_column("Ticker", style="bold")
+        t.add_column("Runs", justify="right")
+        t.add_column("Avg $", justify="right")
+        t.add_column("Total $", justify="right")
+        t.add_column("Last Rec")
+        for r in rows:
+            t.add_row(
+                r["ticker"] or "—",
+                str(r["runs"]),
+                f"${r['avg_cost_usd']:.4f}",
+                f"${r['total_cost_usd']:.4f}",
+                r["last_recommendation"] or "—",
+            )
+        wide.print(t)
+        return
+
+    if by_subcommand:
+        rows = _asyncio.run(query_cost_by_subcommand(settings.db_path))
+        if not rows:
+            wide.print("[yellow]No cost records found.[/yellow]")
+            return
+        t = Table(title="Cost Breakdown by Subcommand", header_style="bold cyan")
+        t.add_column("Subcommand", style="bold")
+        t.add_column("Runs", justify="right")
+        t.add_column("Avg $", justify="right")
+        t.add_column("Total $", justify="right")
+        t.add_column("Avg Haiku $", justify="right")
+        t.add_column("Avg Sonnet $", justify="right")
+        t.add_column("Avg Sec", justify="right")
+        for r in rows:
+            t.add_row(
+                r["subcommand"] or "—",
+                str(r["runs"]),
+                f"${r['avg_cost_usd']:.4f}",
+                f"${r['total_cost_usd']:.4f}",
+                f"${r['avg_cost_usd_haiku']:.4f}",
+                f"${r['avg_cost_usd_sonnet']:.4f}",
+                f"{r['avg_elapsed_seconds'] or 0:.0f}s",
+            )
+        wide.print(t)
+        return
+
+    if detail:
+        rows = _asyncio.run(query_cost_detail(settings.db_path))
+        if not rows:
+            wide.print("[yellow]No cost records found.[/yellow]")
+            return
+        t = Table(title="LLM Cost — Per Run", header_style="bold cyan", show_lines=False)
+        t.add_column("Date")
+        t.add_column("Subcommand")
+        t.add_column("Ticker / Index")
+        t.add_column("Rec")
+        t.add_column("N", justify="right")
+        t.add_column("Haiku $", justify="right")
+        t.add_column("Sonnet $", justify="right")
+        t.add_column("Total $", justify="right")
+        t.add_column("Sec", justify="right")
+        t.add_column("Status")
+        for r in rows:
+            label = r.get("ticker") or r.get("index_name") or "—"
+            n = str(r["num_tickers"]) if r.get("num_tickers") else "—"
+            t.add_row(
+                r["date"] or "—",
+                r["subcommand"] or "—",
+                label,
+                r["recommendation"] or "—",
+                n,
+                f"${r['cost_usd_haiku']:.4f}",
+                f"${r['cost_usd_sonnet']:.4f}",
+                f"${r['cost_usd']:.4f}",
+                f"{r['elapsed_seconds'] or 0:.0f}s",
+                r["status"] or "—",
+            )
+        wide.print(t)
+        wide.print(f"[dim]{len(rows)} records in {settings.db_path}[/dim]")
+        return
+
+    # Default: aggregated by period
+    rows = _asyncio.run(query_cost_summary(settings.db_path, period=period, limit=limit))
+    if not rows:
+        console.print(f"[yellow]No cost records found in {settings.db_path}[/yellow]")
+        return
+    t = Table(
+        title=f"LLM Cost Summary — by {period.capitalize()}",
+        header_style="bold cyan",
+    )
+    t.add_column("Period", style="bold")
+    t.add_column("Runs", justify="right")
+    t.add_column("Haiku $", justify="right")
+    t.add_column("Sonnet $", justify="right")
+    t.add_column("Total $", justify="right")
+    t.add_column("Input Tok", justify="right")
+    t.add_column("Output Tok", justify="right")
+    t.add_column("Cache Read", justify="right")
+    t.add_column("Avg Sec", justify="right")
+    for r in rows:
+        t.add_row(
+            r["period"] or "—",
+            str(r["runs"]),
+            f"${(r['cost_usd_haiku'] or 0):.4f}",
+            f"${(r['cost_usd_sonnet'] or 0):.4f}",
+            f"${(r['cost_usd'] or 0):.4f}",
+            f"{(r['input_tokens'] or 0):,}",
+            f"{(r['output_tokens'] or 0):,}",
+            f"{(r['cache_read_tokens'] or 0):,}",
+            f"{(r['avg_elapsed_seconds'] or 0):.0f}s",
+        )
+    console.print(t)
 
 
 if __name__ == "__main__":

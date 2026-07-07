@@ -5,7 +5,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.agent.batch_scanner import BatchScanner, PreScreenSummary, rank_results
+from src.agent.batch_scanner import (
+    BatchScanner,
+    PreScreenSummary,
+    _drop_placeholder_tickers,
+    rank_results,
+)
 from src.models import (
     AnalysisState,
     ConvictionLevel,
@@ -151,6 +156,55 @@ async def test_get_universe_falls_back_to_hardcoded_when_both_fail():
 
     assert len(tickers) == 50
     assert "RELIANCE" in tickers
+
+
+# ---------------------------------------------------------------------------
+# Placeholder ticker filtering (NSE DUMMY* corporate-action rows)
+# ---------------------------------------------------------------------------
+
+
+def test_drop_placeholder_tickers_removes_dummy_rows():
+    tickers = ["TCS", "DUMMYVEDL1", "INFY", "DUMMYVEDL4", "RELIANCE"]
+    assert _drop_placeholder_tickers(tickers, source="test") == ["TCS", "INFY", "RELIANCE"]
+
+
+def test_drop_placeholder_tickers_is_case_insensitive():
+    assert _drop_placeholder_tickers(["dummyabc", "DummyXyz", "TCS"], source="test") == ["TCS"]
+
+
+def test_drop_placeholder_tickers_only_matches_prefix():
+    """DUMMY must be a prefix — symbols merely containing it are kept."""
+    assert _drop_placeholder_tickers(["INDUMMY", "TCS"], source="test") == ["INDUMMY", "TCS"]
+
+
+def test_drop_placeholder_tickers_noop_when_clean():
+    tickers = ["TCS", "INFY"]
+    assert _drop_placeholder_tickers(tickers, source="test") == tickers
+
+
+@pytest.mark.asyncio
+async def test_get_universe_filters_placeholders_from_nse_api():
+    scanner = BatchScanner(concurrency=2)
+    raw = ["TCS", "DUMMYVEDL1", "HDFCBANK", "DUMMYVEDL2"]
+
+    with patch("src.agent.batch_scanner.NSEClient") as mock_nse_cls:
+        mock_nse_cls.return_value = _mock_nse_client(return_value=raw)
+        tickers = await scanner.get_universe("NIFTY 500")
+
+    assert tickers == ["TCS", "HDFCBANK"]
+
+
+@pytest.mark.asyncio
+async def test_get_universe_filters_placeholders_from_archives_csv():
+    scanner = BatchScanner(concurrency=2)
+    raw = ["RELIANCE", "DUMMYVEDL3", "TCS"]
+
+    with patch("src.agent.batch_scanner.NSEClient") as mock_nse_cls, \
+         patch("src.agent.batch_scanner._fetch_constituents_from_archives", AsyncMock(return_value=raw)):
+        mock_nse_cls.return_value = _mock_nse_client(side_effect=ValueError("403 Forbidden"))
+        tickers = await scanner.get_universe("NIFTY 500")
+
+    assert tickers == ["RELIANCE", "TCS"]
 
 
 # ---------------------------------------------------------------------------
@@ -426,3 +480,157 @@ async def test_prescreen_populates_tiebreaker_fields():
     assert s.cfo_np_3y == pytest.approx(SAMPLE_FINANCIALS.cfo_net_profit_3y_avg)
     expected_below = (SAMPLE_QUOTE.w52_high - SAMPLE_QUOTE.cmp) / SAMPLE_QUOTE.w52_high * 100
     assert s.pct_below_52w_high == pytest.approx(expected_below, abs=0.01)
+
+
+# ---------------------------------------------------------------------------
+# Growth mode — growth_candidate_sort_key
+# ---------------------------------------------------------------------------
+
+
+def test_growth_candidate_sort_key_orders_by_revenue_cagr():
+    """Higher revenue CAGR 3Y ranks first at equal score."""
+    from src.agent.batch_scanner import growth_candidate_sort_key
+
+    high = PreScreenSummary(ticker="HIGH", score=8, gate=GateResult.PASS_GREEN, revenue_cagr_3y=40.0)
+    low = PreScreenSummary(ticker="LOW", score=8, gate=GateResult.PASS_GREEN, revenue_cagr_3y=25.0)
+    ordered = sorted([low, high], key=growth_candidate_sort_key)
+    assert ordered[0].ticker == "HIGH"
+
+
+def test_growth_candidate_sort_key_expanding_margin_beats_stable():
+    """Gross margin 'expanding' ranks above 'stable' at same CAGR."""
+    from src.agent.batch_scanner import growth_candidate_sort_key
+
+    expanding = PreScreenSummary(
+        ticker="EXP", score=8, gate=GateResult.PASS_GREEN,
+        revenue_cagr_3y=30.0, rule_of_40_score=50.0, gross_margin_trend="expanding",
+    )
+    stable = PreScreenSummary(
+        ticker="STA", score=8, gate=GateResult.PASS_GREEN,
+        revenue_cagr_3y=30.0, rule_of_40_score=50.0, gross_margin_trend="stable",
+    )
+    ordered = sorted([stable, expanding], key=growth_candidate_sort_key)
+    assert ordered[0].ticker == "EXP"
+
+
+def test_growth_candidate_sort_key_score_dominates():
+    """Score still dominates all tiebreakers."""
+    from src.agent.batch_scanner import growth_candidate_sort_key
+
+    low_score = PreScreenSummary(ticker="LOW", score=7, gate=GateResult.PASS_GREEN, revenue_cagr_3y=50.0)
+    high_score = PreScreenSummary(ticker="HIGH", score=9, gate=GateResult.PASS_GREEN, revenue_cagr_3y=25.0)
+    ordered = sorted([low_score, high_score], key=growth_candidate_sort_key)
+    assert ordered[0].ticker == "HIGH"
+
+
+# ---------------------------------------------------------------------------
+# Growth mode — prescreen routes to Step0GrowthPreScreen
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_prescreen_one_growth_mode_uses_step0_growth():
+    """growth=True routes to Step0GrowthPreScreen; value step is not called."""
+    scanner = BatchScanner(concurrency=1)
+
+    mock_nse = AsyncMock()
+    mock_nse.__aenter__ = AsyncMock(return_value=mock_nse)
+    mock_nse.__aexit__ = AsyncMock(return_value=False)
+    mock_nse.get_stock_quote = AsyncMock(return_value=SAMPLE_QUOTE)
+
+    mock_screener = AsyncMock()
+    mock_screener.__aenter__ = AsyncMock(return_value=mock_screener)
+    mock_screener.__aexit__ = AsyncMock(return_value=False)
+    mock_screener.get_financials = AsyncMock(return_value=SAMPLE_FINANCIALS)
+    mock_screener.get_shareholding = AsyncMock(return_value=SAMPLE_GOVERNANCE)
+
+    mock_bse = AsyncMock()
+    mock_bse.__aenter__ = AsyncMock(return_value=mock_bse)
+    mock_bse.__aexit__ = AsyncMock(return_value=False)
+    mock_bse.get_shareholding = AsyncMock(return_value=SAMPLE_GOVERNANCE)
+
+    # Lightweight stand-ins for the two Step0 classes
+    growth_step_cls = MagicMock()
+    growth_step_instance = AsyncMock()
+    growth_step_instance.run = AsyncMock(side_effect=lambda state: state)
+    growth_step_cls.return_value = growth_step_instance
+
+    value_step_cls = MagicMock()
+
+    with (
+        patch("src.agent.batch_scanner.NSEClient", return_value=mock_nse),
+        patch("src.agent.batch_scanner.ScreenerClient", return_value=mock_screener),
+        patch("src.agent.batch_scanner.BSEClient", return_value=mock_bse),
+        patch("src.agent.batch_scanner.YFinanceClient", return_value=_mock_yfinance_client()),
+        patch("src.agent.batch_scanner.Step0GrowthPreScreen", growth_step_cls),
+        patch("src.agent.batch_scanner.Step0PreScreen", value_step_cls),
+        patch("src.agent.growth_pipeline.compute_growth_metrics"),
+    ):
+        summaries = await scanner.prescreen_universe(["ZOMATO"], growth=True)
+
+    growth_step_cls.assert_called_once()
+    value_step_cls.assert_not_called()
+    assert len(summaries) == 1
+    # Value tiebreakers must be None in growth mode
+    assert summaries[0].roce_5y is None
+    assert summaries[0].cfo_np_3y is None
+
+
+# ---------------------------------------------------------------------------
+# Growth mode — scan uses GrowthPipeline in Phase 3
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_scan_growth_mode_uses_growth_pipeline():
+    """scan(growth=True) instantiates GrowthPipeline, not InvestmentPipeline."""
+    scanner = BatchScanner(concurrency=2)
+    summaries_fixture = [
+        PreScreenSummary(ticker="ZOMATO", score=8, gate=GateResult.PASS_GREEN, revenue_cagr_3y=42.0)
+    ]
+
+    growth_pipeline_mock = MagicMock()
+    growth_pipeline_mock.analyze = AsyncMock(return_value=_make_state("ZOMATO", rec="MULTIBAGGER_CANDIDATE"))
+
+    value_pipeline_mock = MagicMock()
+
+    with (
+        patch.object(scanner, "get_universe", return_value=["ZOMATO"]),
+        patch.object(scanner, "prescreen_universe", return_value=summaries_fixture),
+        patch("src.agent.growth_pipeline.GrowthPipeline", return_value=growth_pipeline_mock),
+        patch("src.agent.batch_scanner.InvestmentPipeline", return_value=value_pipeline_mock),
+    ):
+        _, results = await scanner.scan(growth=True, prescreen_only=False)
+
+    growth_pipeline_mock.analyze.assert_awaited_once_with("ZOMATO")
+    value_pipeline_mock.analyze.assert_not_called()
+    assert len(results) == 1
+
+
+@pytest.mark.asyncio
+async def test_scan_growth_floors_min_score_at_6():
+    """growth=True with min_score=5 should silently floor to 6 — score-5 tickers are excluded."""
+    scanner = BatchScanner(concurrency=2)
+    summaries_fixture = [
+        PreScreenSummary(ticker="WEAK", score=5, gate=GateResult.PASS_CONDITIONAL),
+        PreScreenSummary(ticker="STRONG", score=7, gate=GateResult.PASS_GREEN, revenue_cagr_3y=30.0),
+    ]
+
+    pipeline_mock = MagicMock()
+    pipeline_mock.analyze = AsyncMock(return_value=_make_state("STRONG"))
+
+    with (
+        patch.object(scanner, "get_universe", return_value=["WEAK", "STRONG"]),
+        patch.object(scanner, "prescreen_universe", return_value=summaries_fixture),
+        patch("src.agent.growth_pipeline.GrowthPipeline", return_value=pipeline_mock),
+    ):
+        _, results = await scanner.scan(
+            prescreen_min_score=5,  # user-supplied; growth mode floors at 6
+            growth=True,
+            prescreen_only=False,
+        )
+
+    # WEAK (score 5) must not have reached Phase 3
+    pipeline_mock.analyze.assert_awaited_once_with("STRONG")
+    assert len(results) == 1
+    assert results[0].ticker == "STRONG"

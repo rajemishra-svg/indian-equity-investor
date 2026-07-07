@@ -145,7 +145,8 @@ class TrendlyneClient(BaseHTTPClient):
             resp = await self.get(f"/fundamentals/governance/{ticker}/")
         except Exception as exc:
             self.log.warning(
-                "trendlyne_governance_failed", ticker=ticker, error=str(exc), error_tag="ER-04"
+                # Governance enrichment is not a shareholding source — ER-04 does not apply.
+                "trendlyne_governance_failed", ticker=ticker, error=str(exc)
             )
             return None
 

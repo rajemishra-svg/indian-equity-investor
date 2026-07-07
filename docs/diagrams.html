@@ -126,7 +126,7 @@
 
 <header>
   <h1>Indian Equity Investor — Architecture Diagrams</h1>
-  <p>Visual reference for the 9-step AI-powered investment analysis pipeline · NSE/BSE · Python + Claude</p>
+  <p>Visual reference for the 10-step AI-powered investment analysis pipeline · NSE/BSE · Python + Claude (Sonnet for moat research, Haiku elsewhere, deterministic gates)</p>
 </header>
 
 <nav>
@@ -136,7 +136,9 @@
   <a href="#api">4 · API Client Fallbacks</a>
   <a href="#gate">5 · Gate Decision Flow</a>
   <a href="#state">6 · AnalysisState Lifecycle</a>
-  <a href="#conviction">7 · Conviction Scoring</a>
+  <a href="#conviction">7 · Conviction & Sizing</a>
+  <a href="#scan">8 · Batch Scan & Persistence</a>
+  <a href="#security">9 · Web Tool Security</a>
 </nav>
 
 <!-- ═══════════════════════════════════════════════
@@ -159,7 +161,8 @@ graph TB
     subgraph CLI["🖥  CLI Layer  ·  src/main.py"]
         A["investor analyze TICKER"]
         B["investor scan --index NIFTY 500"]
-        C["investor portfolio / watchlist"]
+        C["investor portfolio / db-*"]
+        C2["investor watchlist-alerts /\nsurveillance / backtest"]
     end
 
     subgraph Core["⚙  Core Engine  ·  src/agent/"]
@@ -167,20 +170,26 @@ graph TB
         E["BatchScanner\nbatch_scanner.py"]
         F["ModeDetector\nmode_detector.py"]
         G["DataCache\napi/cache.py"]
+        CLS["SectorClassifier\nsector/classifier.py"]
     end
 
-    subgraph Steps["🔬  9-Step Analysis  ·  src/agent/steps/"]
+    subgraph Steps["🔬  10-Step Analysis  ·  src/agent/steps/"]
         direction LR
         S0["Step 0\nPre-Screen\ndeterministic"]
         S1["Step 1\nGovernance\nHaiku + deterministic"]
-        S2["Step 2\nMoat\nSonnet agentic"]
+        S2["Step 2\nMoat\nSonnet agentic ≤6"]
         S3["Step 3\nFinancials\ndeterministic"]
         S4["Step 4\nTailwinds\nHaiku"]
-        S5["Step 5\nValuation\nHaiku DCF"]
+        S5["Step 5\nValuation\ndeterministic DCF\n+ reverse DCF"]
         S6["Step 6\nTechnical\ndeterministic"]
-        S7["Step 7\nPeers\nSonnet agentic"]
+        S7["Step 7\nPeers\nHaiku naming +\ndeterministic ranking"]
         S8["Step 8\nPremortem\nHaiku"]
-        S9["Step 9\nOutput\nHaiku + format"]
+        S9["Step 9\nOutput\nHaiku thesis\n(BUY/WATCHLIST only)"]
+    end
+
+    subgraph Store["🗄  Persistence  ·  src/db/"]
+        REPO["AnalysisRepository\nrepository.py"]
+        SQL[("investor.db\nSQLite · WAL\nanalyses · snapshots ·\nportfolio FIFO lots")]
     end
 
     subgraph Clients["🌐  API Clients  ·  src/api/"]
@@ -202,18 +211,22 @@ graph TB
 
     A --> D
     B --> E
-    C --> D
+    C --> REPO
+    C2 --> REPO
     E --> D
     D --> F
     D --> G
+    D --> CLS
     D --> S0
+    D --> REPO
+    E -->|"7-day warm cache"| REPO
+    REPO --> SQL
 
     S0 --> S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> S7 --> S8 --> S9
 
     S1 --> ClaudeAPI
     S2 --> ClaudeAPI
     S4 --> ClaudeAPI
-    S5 --> ClaudeAPI
     S7 --> ClaudeAPI
     S8 --> ClaudeAPI
     S9 --> ClaudeAPI
@@ -233,9 +246,10 @@ graph TB
     classDef det fill:#1a2d1f,stroke:#34d399,color:#6ee7b7
     classDef ext fill:#1f1f2e,stroke:#6366f1,color:#a5b4fc
 
-    class S0,S3,S6 det
-    class S1,S2,S4,S5,S7,S8,S9 claude
+    class S0,S3,S5,S6 det
+    class S1,S2,S4,S7,S8,S9 claude
     class ClaudeAPI ext
+    class SQL,REPO ext
     </div>
   </div>
 </div>
@@ -272,12 +286,14 @@ sequenceDiagram
     CLI->>Pipeline: analyze("RELIANCE")
 
     Pipeline->>NSE: detect_mode() — Nifty 52W level
+    Note over NSE: yfinance fallback if NSE blocked —<br/>both fail → NORMAL + [MODE UNCONFIRMED] (ER-08)
     NSE-->>Pipeline: mode = Normal | Correction | MaxOpportunity
 
     Pipeline->>Cache: _prefetch_data()
     Cache->>NSE: quote · financials · governance · valuation
     NSE-->>Cache: StockQuote · FinancialMetrics · GovernanceData · ValuationData
-    Cache-->>Pipeline: all data cached (TTL 1h / 24h)
+    Cache-->>Pipeline: all data cached (TTL 1h / 24h / mode 15min)
+    Note over Pipeline: sector classified (+ confidence) · conglomerate check<br/>4 raw snapshots saved to SQLite (ER-07 if ≥3 fail)
 
     Pipeline->>S013: Step 0 — PreScreen (9 metrics, deterministic)
     S013-->>Pipeline: score X/9
@@ -324,34 +340,34 @@ sequenceDiagram
     S2479->>Claude: sector_context JSON
     Claude-->>S2479: sector · tailwind_type · cycle_position
 
-    Pipeline->>S56: Step 5 — Valuation (5 methods)
-    S56->>Claude: DCF_compute [Haiku · 3 scenarios · 600 tok]
-    Claude-->>S56: base · bull · bear · weighted intrinsic
-    S56-->>Pipeline: methods_in_buy_zone · margin_of_safety · gate
+    Pipeline->>S56: Step 5 — Valuation (5 methods, deterministic Python DCF — zero LLM calls)
+    Note over S56: 3-scenario DCF (PAT-checked growth anchor) + reverse DCF implied growth<br/>EC-02 mid-cycle FCF normalization for cyclicals · sector WACC adjustment
+    S56-->>Pipeline: methods_in_buy_zone · margin_of_safety · implied_growth · gate
 
     alt 0 methods in buy zone
-        Note over Pipeline: WATCHLIST Tier 2 — pipeline CONTINUES
+        Note over Pipeline: WATCHLIST Tier 2 — pipeline CONTINUES (target_buy_price stored)
     end
 
     Pipeline->>S56: Step 6 — Technical (5 signals, deterministic)
     S56-->>Pipeline: signals_met · GREEN|AMBER|RED · tranche prices
 
-    Pipeline->>S2479: Step 7 — Peers (agentic loop ≤8 iter)
-    loop ≤ 8 iterations
-        S2479->>Claude: web_search · web_fetch [Sonnet · 4096 tok]
-        Claude-->>S2479: peer data or end_turn
-    end
-    S2479-->>Pipeline: peer_table · quality_rank · valuation_rank
+    Pipeline->>S2479: Step 7 — Peers (1 Haiku call + deterministic comparison)
+    S2479->>Claude: identify peer names [Haiku · JSON · 600 tok]
+    Claude-->>S2479: peer tickers + names
+    Note over S2479: peer metrics fetched from Screener + yfinance —<br/>quality/valuation ranking and dominance test run in Python
+    S2479-->>Pipeline: peer_table · quality_rank · valuation_rank · dominant_peer
 
     Pipeline->>S2479: Step 8 — Premortem [Haiku · 600 tok]
-    S2479->>Claude: all_state_context JSON
+    S2479->>Claude: all_state_context JSON (uses 120-char moat summary)
     Claude-->>S2479: primary · secondary · tertiary risks
 
     Pipeline->>S2479: Step 9 — Output [Haiku thesis 512 tok + deterministic format]
+    Note over S2479: thesis call only for BUY / WATCHLIST — skipped for REJECT / PEER_SWITCH<br/>BUY allocation risk-adjusted by realized volatility · ER-05 auto-downgrade if ≥5 error tags
     S2479->>Claude: thesis_context
     Claude-->>S2479: 3-4 sentence investment thesis
-    S2479-->>Pipeline: formatted_report (BUY | WATCHLIST | REJECT)
+    S2479-->>Pipeline: formatted_output (BUY | WATCHLIST | REJECT | PEER_SWITCH)
 
+    Note over Pipeline: save_analysis() → SQLite investor.db — single persistence point, non-fatal on error
     Pipeline-->>CLI: AnalysisState
     CLI-->>User: Formatted Report
     </div>
@@ -393,13 +409,13 @@ flowchart TD
     subgraph Step1["Step 1 — Governance"]
         GD --> Enrich["_enrich_governance_data()\nHaiku agentic loop ≤4 iter\nweb_search · web_fetch\nauditor · RPT · SEBI orders"]
         Enrich -->|merged fields| GD2["GovernanceData\n(enriched)"]
-        GD2 --> Gov["state.governance\nGovernanceResult\nscore /15 · gate\nimmediate_triggers · concerns"]
+        GD2 --> Gov["state.governance\nGovernanceScore\nscore /15 · gate\nimmediate_triggers · concerns"]
         Claude1["Claude Haiku\ncapital allocation score"] --> Gov
     end
 
     subgraph Step2["Step 2 — Moat"]
-        Gov --> Moat["state.moat\nMoatResult\nmoat_type · moat_durability\nmarket_position · tam_multiple\nmoat_narrative"]
-        Claude2["Claude Sonnet\nagentic web research"] --> Moat
+        Gov --> Moat["state.moat\nMoatAssessment\nmoat_type · moat_durability\nmarket_position · tam_multiple\nmoat_narrative (+ 120-char short form\nfor Steps 8–9 prompts)"]
+        Claude2["Claude Sonnet\nagentic web research ≤6 iter\nmessage-prefix prompt caching"] --> Moat
     end
 
     subgraph Step3["Step 3 — Financials"]
@@ -407,13 +423,13 @@ flowchart TD
     end
 
     subgraph Step4["Step 4 — Tailwinds"]
-        Moat & FinGate --> TW["state.tailwind\nTailwindResult\nsector · tailwind_type\ncycle_position · growth_runway_years\nheadwind_flags"]
+        Moat & FinGate --> TW["state.tailwind\nTailwindAssessment\nsector · tailwind_type\ncycle_position · growth_runway_years\nheadwind_flags"]
         Claude4["Claude Haiku\nsector analysis"] --> TW
     end
 
-    subgraph Step5["Step 5 — Valuation"]
-        VD & FM & SQ & TW --> Val["state.valuation\nValuationResult\ndcf_intrinsic_base/bull/bear/weighted\nmargin_of_safety_pct · mos_met\nmethods_in_buy_zone /5\npe_percentile_verdict · peg_verdict\nfcf_yield_verdict · ev_ebitda_verdict"]
-        Claude5["Claude Haiku\nDCF 3-scenario"] --> Val
+    subgraph Step5["Step 5 — Valuation (no LLM)"]
+        VD & FM & SQ & TW --> Val["state.valuation\nValuationResult\ndcf_intrinsic_base/bull/bear/weighted\nmargin_of_safety_pct · mos_met\nimplied_growth_pct · growth_anchor_pct\nmethods_in_buy_zone /5\npe_percentile_verdict · peg_verdict\nfcf_yield_verdict · ev_ebitda_verdict"]
+        DCF5["Deterministic Python DCF\n3 scenarios + reverse DCF bisection\nPAT-checked growth anchor\nEC-02 mid-cycle normalization\nsector-adjusted WACC"] --> Val
     end
 
     subgraph Step6["Step 6 — Technical"]
@@ -421,27 +437,30 @@ flowchart TD
     end
 
     subgraph Step7["Step 7 — Peers"]
-        Val & Tech & Moat --> Peer["state.peers\nPeerResult\npeer_table · quality_rank\nvaluation_rank · peer_switch_ticker"]
-        Claude7["Claude Sonnet\nagentic peer research"] --> Peer
+        Val & Tech & Moat --> Peer["state.peer_comparison\nPeerComparisonResult\npeers table · target_quality_rank\ntarget_valuation_rank · dominant_peer"]
+        Claude7["Claude Haiku\npeer naming only"] --> Peer
+        PyRank["Python comparison\nScreener + yfinance metric fetches\nquality/valuation ranks · dominance test"] --> Peer
     end
 
     subgraph Step8["Step 8 — Premortem"]
-        Peer & Val & Gov & FinGate --> PM["state.premortem\nPremortemResult\nprimary_risk · secondary_risk\ntertiary_risk · structural_flag"]
+        Peer & Val & Gov & FinGate --> PM["state.premortem\nPremortRisk\nprimary_risk · secondary_risk\ntertiary_risk · risk_type · proceed"]
         Claude8["Claude Haiku\nrisk analysis"] --> PM
     end
 
     subgraph Step9["Step 9 — Output"]
-        PM & Peer & Val & Tech & TW & FinGate & Gov & Moat & PS --> Out["state.recommendation_type\nBUY | WATCHLIST | REJECT\n\nstate.conviction HIGH|MED|LOW\nstate.formatted_report\n\nWrites to portfolio/ files"]
-        Claude9["Claude Haiku\ninvestment thesis"] --> Out
+        PM & Peer & Val & Tech & TW & FinGate & Gov & Moat & PS --> Out["state.recommendation_type\nBUY | WATCHLIST | REJECT | PEER_SWITCH\n\nstate.conviction HIGH|MED|LOW\nsuggested_allocation_pct\n(volatility risk-adjusted)\nstate.formatted_output\n\nsave_analysis() → SQLite investor.db"]
+        Claude9["Claude Haiku\ninvestment thesis\n(BUY/WATCHLIST only)"] --> Out
     end
 
     classDef source fill:#1a1d2e,stroke:#6366f1,color:#a5b4fc
     classDef stateField fill:#1a2d1f,stroke:#34d399,color:#6ee7b7
     classDef claudeNode fill:#1e3a5f,stroke:#4f8ef7,color:#93c5fd
+    classDef detNode fill:#142d20,stroke:#34d399,color:#a7f3d0
 
     class NSE_Q,SCRN,NSE_SH,BSE_SH,SCRN_SH,TL_GOV,TL source
     class SQ,FM,GD,GD2,VD stateField
-    class Enrich,Claude1,Claude2,Claude4,Claude5,Claude7,Claude8,Claude9 claudeNode
+    class Enrich,Claude1,Claude2,Claude4,Claude7,Claude8,Claude9 claudeNode
+    class DCF5,PyRank detNode
     </div>
   </div>
 </div>
@@ -492,9 +511,9 @@ flowchart TD
 
     subgraph Shareholding["Shareholding — 4-layer chain"]
         G1["NSEClient\n/api/corporate-shareholding-pattern\nuses existing session cookies\n(primary)"] -->|"✓ holding + pledging\n8-quarter trend"| GR["GovernanceData\nholding% · pledging%\n8Q trend · direction"]
-        G1 -->|"✗ 403 / empty"| G2["BSEClient\nbseindia.com shareholding\n(2nd fallback)"]
-        G2 -->|"✓ Partial"| GR
-        G2 -->|"✗ Scrip-code fail"| G3["ScreenerClient\nscreener.in shareholding\n(3rd fallback)"]
+        G1 -->|"✗ 403 / empty"| G2["BSEClient\nPeerSmartSearch → SHPQNewFormat →\nSHPSUMMARY (latest 4 quarters)\n(2nd fallback)"]
+        G2 -->|"✓ Partial\n4-quarter trend"| GR
+        G2 -->|"✗ not listed / fail / breaker open\n(10 consecutive fails → skip BSE\nfor rest of process)"| G3["ScreenerClient\nscreener.in shareholding\n(3rd fallback)"]
         G3 -->|"✓ Basic"| GR
         G3 -->|"✗ Fail"| GN["governance_data = empty\n[PLEDGING UNKNOWN]\nall sub-scores default to 1/3"]
         GR --> G4["TrendlyneClient\n/fundamentals/governance/TICKER\n(auditor + pledging enrichment)"]
@@ -502,11 +521,13 @@ flowchart TD
         G4 -->|"fields already present\nor 404"| GR2["GovernanceData unchanged\nskip enrichment call"]
     end
 
-    subgraph Cache["DataCache (Singleton)"]
-        CA["TTL-based in-memory cache\nquote · valuation TTL = 1 hour\nfinancials · shareholding TTL = 24 hours\nPrevents redundant fetches in batch scans"]
+    subgraph Cache["Two Cache Layers"]
+        CA["DataCache — TTL in-memory singleton\nquote · valuation TTL = 1 hour\nfinancials · shareholding TTL = 24 hours\nNifty mode TTL = 15 minutes\nNone is never cached"]
+        WC["SQLite snapshot warm cache\ndata_snapshots table · 7-day TTL\nbatch scans skip HTTP entirely on hit\ninvestor.db in WAL mode"]
     end
 
     Quote & Index & Valuation & Financials & Shareholding --> CA
+    CA --> WC
 
     classDef primary fill:#1e3a5f,stroke:#4f8ef7,color:#93c5fd
     classDef fallback fill:#2d2514,stroke:#f59e0b,color:#fcd34d
@@ -518,7 +539,7 @@ flowchart TD
     class Q2,I2,I3,V2,G2,G3,G4 fallback
     class QN,FN,GN,VN fail
     class QR,QR2,IR,IR2,IR3,VR,VR2,FR,GR,GE,GR2 success
-    class CA cache
+    class CA,WC cache
     </div>
   </div>
 </div>
@@ -586,7 +607,7 @@ flowchart TD
 
     S7_g & S7_a & S7_r --> S7
 
-    S7{"Step 7\nPeer Benchmark\nSonnet agentic ≤8 iter"}
+    S7{"Step 7\nPeer Benchmark\nHaiku naming +\ndeterministic ranking"}
     S7 -->|"Target top-quartile quality\nbottom-half valuation\nPASS"| S8
     S7 -->|"Peer scores higher quality\nAND lower valuation"| PS["PEER SWITCH\nRestart Step 0\nwith dominant peer"]
     S7 -->|"Target top quality\ntop valuation\nCONDITIONAL"| S8_w["Step 8\n⚠ valuation premium noted"]
@@ -596,10 +617,11 @@ flowchart TD
     S8 -->|"Primary risk STRUCTURAL\n+ UNHEDGEABLE"| S9_warn["Step 9\n⚠ DO NOT RECOMMEND flag"]
     S8 -->|"Risks CYCLICAL\nor MANAGEABLE"| S9
 
-    S9["Step 9\nOutput\nHaiku + format"]
+    S9["Step 9\nOutput\nHaiku thesis (BUY/WATCHLIST only)\n+ deterministic format\n+ volatility-adjusted sizing"]
     S9_warn --> S9
-    S9 --> BUY(["✅ BUY\n+ Tranche plan\n+ Exit strategy"])
-    S9 --> WATCH(["👁 WATCHLIST\nTier 1 / 2 / 3\n+ Alert prices"])
+    S9 --> BUY(["✅ BUY\n+ Tranche plan (sector-aware)\n+ Exit strategy + stop-loss"])
+    S9 --> WATCH(["👁 WATCHLIST\nTier 1 / 2 / 3\n+ target_buy_price stored\nfor watchlist-alerts"])
+    S9 -->|"⚠ ER-05: ≥5 error tags\nBUY auto-downgraded"| WATCH
 
     R0["Step 9\nREJECTION_LOG"] --> REJ(["❌ REJECT\n+ Re-evaluate condition"])
     R1["Step 9\nREJECTION_LOG\nGOVERNANCE REJECT"] --> REJ
@@ -639,134 +661,113 @@ flowchart TD
 stateDiagram-v2
     [*] --> Initialised: InvestmentPipeline.analyze(ticker)
 
-    state Initialised {
-        note right of Initialised
-            ticker, company_name
-            mode (Normal/Correction/MaxOpp)
-            cap_size (large/mid/small)
-            required_mos_pct (25/35/45%)
-        end note
-    }
+    note right of Initialised
+        ticker, company_name
+        mode (Normal/Correction/MaxOpp)
+        cap_size (large/mid/small)
+        required_mos_pct (25/35/45%)
+    end note
 
     Initialised --> DataPrefetched: _prefetch_data()
 
-    state DataPrefetched {
-        note right of DataPrefetched
-            state.quote → StockQuote
-            state.financials → FinancialMetrics
-            state.governance_data → GovernanceData
-            state.valuation_data → ValuationData
-        end note
-    }
+    note right of DataPrefetched
+        state.quote → StockQuote
+        state.financials → FinancialMetrics
+        state.governance_data → GovernanceData
+        state.valuation_data → ValuationData
+    end note
 
     DataPrefetched --> PreScreened: Step 0
 
-    state PreScreened {
-        note right of PreScreened
-            state.pre_screen → PreScreenResult
-            score /9 · gate · failed_metrics
-        end note
-    }
+    note right of PreScreened
+        state.pre_screen → PreScreenResult
+        score /9 · gate · failed_metrics
+    end note
 
     PreScreened --> TERMINATED_0: score < 5
     PreScreened --> Governed: score ≥ 5
 
-    state Governed {
-        note right of Governed
-            state.governance → GovernanceResult
-            score /15 · immediate_triggers
-            capital_allocation_score (Claude)
-        end note
-    }
+    note right of Governed
+        state.governance → GovernanceScore
+        score /15 · immediate_triggers
+        capital_allocation_score (Claude)
+    end note
 
     Governed --> TERMINATED_1: score < 9 or trigger
     Governed --> MoatAssessed: score ≥ 9
 
-    state MoatAssessed {
-        note right of MoatAssessed
-            state.moat → MoatResult
-            moat_type · durability · narrative
-            market_position · tam_multiple
-        end note
-    }
+    note right of MoatAssessed
+        state.moat → MoatAssessment
+        moat_type · durability · narrative
+        market_position · tam_multiple
+    end note
 
     MoatAssessed --> FinancialGated: Step 3
 
-    state FinancialGated {
-        note right of FinancialGated
-            state.financial_gate → FinancialGateResult
-            score /7 · hard_triggers_fired
-            sector_overrides (banks/NBFCs)
-        end note
-    }
+    note right of FinancialGated
+        state.financial_gate → FinancialGateResult
+        score /7 · hard_triggers_fired
+        sector_overrides (banks/NBFCs)
+    end note
 
     FinancialGated --> TERMINATED_3: score < 5 or hard trigger
     FinancialGated --> TailwindAssessed: score ≥ 5
 
-    state TailwindAssessed {
-        note right of TailwindAssessed
-            state.tailwind → TailwindResult
-            sector · tailwind_type
-            cycle_position · growth_runway_years
-        end note
-    }
+    note right of TailwindAssessed
+        state.tailwind → TailwindAssessment
+        sector · tailwind_type
+        cycle_position · growth_runway_years
+    end note
 
     TailwindAssessed --> ValuationGated: Step 5
 
-    state ValuationGated {
-        note right of ValuationGated
-            state.valuation → ValuationResult
-            5 methods · methods_in_buy_zone
-            dcf_intrinsic_weighted
-            margin_of_safety_pct · mos_met
-        end note
-    }
+    note right of ValuationGated
+        state.valuation → ValuationResult
+        5 methods · methods_in_buy_zone
+        dcf_intrinsic_weighted (deterministic)
+        margin_of_safety_pct · mos_met
+        implied_growth_pct (reverse DCF)
+    end note
 
     ValuationGated --> WATCHLIST: 0 methods in buy zone
     ValuationGated --> TechnicalConfirmed: ≥ 1 method in buy zone
 
     WATCHLIST --> TechnicalConfirmed: pipeline continues
 
-    state TechnicalConfirmed {
-        note right of TechnicalConfirmed
-            state.technical → TechnicalSignal
-            signals_met /5
-            entry_guidance GREEN|AMBER|RED
-            tranche_1/2/3_price
-        end note
-    }
+    note right of TechnicalConfirmed
+        state.technical → TechnicalSignal
+        signals_met /5
+        entry_guidance GREEN|AMBER|RED
+        tranche_1/2/3_price
+    end note
 
     TechnicalConfirmed --> PeerBenchmarked: Step 7
 
-    state PeerBenchmarked {
-        note right of PeerBenchmarked
-            state.peers → PeerResult
-            peer_table · quality_rank
-            valuation_rank
-        end note
-    }
+    note right of PeerBenchmarked
+        state.peer_comparison → PeerComparisonResult
+        peers table · target_quality_rank
+        target_valuation_rank · dominant_peer
+    end note
 
     PeerBenchmarked --> Premortemed: no peer dominance
     PeerBenchmarked --> PEER_SWITCH: dominant peer detected
 
-    state Premortemed {
-        note right of Premortemed
-            state.premortem → PremortemResult
-            primary/secondary/tertiary risks
-            structural_flag
-        end note
-    }
+    note right of Premortemed
+        state.premortem → PremortRisk
+        primary/secondary/tertiary risks
+        risk_type · proceed
+    end note
 
     Premortemed --> OutputGenerated: Step 9
 
-    state OutputGenerated {
-        note right of OutputGenerated
-            state.recommendation_type BUY|WATCHLIST|REJECT
-            state.conviction HIGH|MEDIUM|LOW
-            state.formatted_report
-            state.all_data_flags
-        end note
-    }
+    note right of OutputGenerated
+        state.recommendation_type
+        BUY|WATCHLIST|REJECT|PEER_SWITCH
+        state.conviction HIGH|MEDIUM|LOW
+        suggested_allocation_pct (vol-adjusted)
+        state.formatted_output · all_data_flags
+        save_analysis() → investor.db
+    end note
 
     OutputGenerated --> [*]: report delivered
 
@@ -784,8 +785,8 @@ stateDiagram-v2
 <div class="diagram-card" id="conviction">
   <div class="card-header">
     <div class="card-header-left">
-      <h2>7 · Conviction Scoring Model</h2>
-      <p>How governance, financials, valuation, moat quality, and technical signals combine into High / Medium / Low conviction</p>
+      <h2>7 · Conviction & Position Sizing</h2>
+      <p>How gate scores combine into High / Medium / Low conviction, and how the allocation is risk-adjusted before output</p>
     </div>
     <div class="btn-group">
       <button class="btn-svg" onclick="downloadSVG('conviction')">⬇ SVG</button>
@@ -795,71 +796,163 @@ stateDiagram-v2
   <div class="diagram-body">
     <div class="mermaid" id="conviction-diagram">
 flowchart LR
-    subgraph Inputs["Score Components"]
-        G["Governance\nscore /15\n÷ 15 → 0.0–1.0"]
-        F["Financials\nscore /7\n÷ 7 → 0.0–1.0"]
-        V["Valuation\nmethods_in_zone /5\n÷ 5 → 0.0–1.0"]
-        M["Moat Quality\nHigh=1.0\nMedium=0.70\nLow=0.35\nNone≤0.40"]
-        T["Technical\nsignals_met /5\n× 0.1 → bonus"]
+    subgraph Inputs["Score Components (equal-weighted, BUY only)"]
+        PS7["Pre-screen\nscore /9 → 0.0–1.0"]
+        G["Governance\nscore /15 → 0.0–1.0"]
+        F["Financials\nscore /7 → 0.0–1.0"]
+        V["Valuation\nmethods_in_zone\n/ max_methods → 0.0–1.0"]
+        M["Moat durability\nHigh=1.0 · Medium=0.70\nLow | Unknown=0.35\nmoat_type none → cap 0.40"]
     end
 
-    subgraph Weights["Weighted Average"]
-        W1["governance × 0.30"]
-        W2["financials × 0.25"]
-        W3["valuation × 0.20"]
-        W4["moat × 0.15"]
-        W5["technical bonus"]
+    PS7 & G & F & V & M --> Avg["Simple average\n0.0–1.0"]
+
+    subgraph Adjustments["Bonus / Penalty"]
+        T["Technical entry\nGREEN +0.05\nAMBER +0.02"]
+        P1["Late-cycle tailwind\n−0.03"]
     end
 
-    subgraph Adjustments["Penalties & Caps"]
-        P1["Late-cycle tailwind\n−0.03 from tech bonus"]
-        P2["CONDITIONAL pass flags\n−0.05 per flag"]
-        P3["moat_type = none\ncap moat score ≤ 0.40"]
+    T & P1 --> Avg
+
+    subgraph Output["Conviction → Base Allocation"]
+        H["HIGH\n≥ 0.80\nbase 5%"]
+        Med["MEDIUM\n0.65–0.79\nbase 3%"]
+        L["LOW\n< 0.65\nbase 2%"]
     end
 
-    subgraph Output["Conviction Band"]
-        H["HIGH\n≥ 0.72\nMax alloc 8–10% portfolio"]
-        Med["MEDIUM\n0.55–0.71\nMax alloc 5–7% portfolio"]
-        L["LOW\n< 0.55\nMax alloc 3–4% portfolio"]
+    Avg -->|"≥ 0.80"| H
+    Avg -->|"0.65–0.79"| Med
+    Avg -->|"< 0.65"| L
+
+    subgraph Sizing["Risk Adjustments (in order)"]
+        EC01["EC-01 pre-profit\ncap ≤ 4%"]
+        VOL["Volatility targeting\nalloc × clamp(25% / realized_vol, 0.4, 1.0)\n1Y daily returns · round 0.5% · floor 1%\nvol unavailable → unchanged + flag"]
     end
 
-    G --> W1
-    F --> W2
-    V --> W3
-    M --> W4
-    T --> W5
-
-    W1 & W2 & W3 & W4 & W5 --> Avg["Weighted\nAverage\n0.0–1.0"]
-
-    P1 & P2 & P3 --> Avg
-
-    Avg -->|"≥ 0.72"| H
-    Avg -->|"0.55–0.71"| Med
-    Avg -->|"< 0.55"| L
+    H & Med & L --> EC01 --> VOL
 
     subgraph StopLoss["Cap-Size Stop-Loss"]
-        SL1["Large Cap\nstop = CMP × 0.82\n(18% below)"]
-        SL2["Mid Cap\nstop = CMP × 0.75\n(25% below)"]
-        SL3["Small Cap\nstop = CMP × 0.70\n(30% below)"]
+        SL1["Large Cap\nstop = buy × 0.82\n(18% below)"]
+        SL2["Mid Cap\nstop = buy × 0.75\n(25% below)"]
+        SL3["Small Cap\nstop = buy × 0.70\n(30% below)"]
     end
 
-    H & Med & L --> StopLoss
+    VOL --> StopLoss
 
     classDef score fill:#1e3a5f,stroke:#4f8ef7,color:#93c5fd
-    classDef weight fill:#1a2d1f,stroke:#34d399,color:#6ee7b7
     classDef penalty fill:#2d2514,stroke:#f59e0b,color:#fcd34d
     classDef out fill:#142d20,stroke:#34d399,color:#a7f3d0
 
-    class G,F,V,M,T score
-    class W1,W2,W3,W4,W5 weight
-    class P1,P2,P3 penalty
+    class PS7,G,F,V,M score
+    class T,P1,EC01,VOL penalty
     class H,Med,L out
     </div>
   </div>
 </div>
 
+<!-- ═══════════════════════════════════════════════
+     DIAGRAM 8 — BATCH SCAN & PERSISTENCE
+════════════════════════════════════════════════════ -->
+<div class="diagram-card" id="scan">
+  <div class="card-header">
+    <div class="card-header-left">
+      <h2>8 · Batch Scan, Persistence & Monitoring</h2>
+      <p>Two-phase cost funnel — Claude tokens spent on ~2% of the universe — and the SQLite-backed monitoring loop</p>
+    </div>
+    <div class="btn-group">
+      <button class="btn-svg" onclick="downloadSVG('scan')">⬇ SVG</button>
+      <button class="btn-png" onclick="downloadPNG('scan')">⬇ PNG</button>
+    </div>
+  </div>
+  <div class="diagram-body">
+    <div class="mermaid" id="scan-diagram">
+flowchart TD
+    subgraph P1["Phase 1 — Universe (3-layer fallback · DUMMY* placeholder rows dropped)"]
+        U1["NSE JSON API"] -->|"403"| U2["NSE archives CSV"]
+        U2 -->|"network fail"| U3["nifty50_fallback.json\n(staleness warning > 90 days)"]
+    end
+
+    P1 --> P2
+
+    subgraph P2["Phase 2 — Pre-screen · ~504 tickers · zero LLM calls"]
+        WC8["SQLite warm cache\nsnapshots ≤ 7 days old\nskip HTTP entirely"] --> PS8
+        HTTP8["quote + financials + shareholding\nSemaphore(8) · shared Screener Semaphore(2)"] --> PS8
+        PS8["Step 0 deterministic pre-screen\nscore /9 per ticker"]
+    end
+
+    PS8 --> CUT["Candidate cut — top N (default 10)\nscore ties broken by:\nROCE 5Y ↓ → CFO/NP 3Y ↓ →\n% below 52W high ↓ → ticker ↑"]
+
+    CUT --> P3["Phase 3 — Full pipeline × N\nasyncio.gather · Semaphore(3)\none shared AsyncAnthropic client\nPhase 2 data reused via DataCache"]
+
+    P3 --> RANK["rank_results()\nBUY > WATCHLIST > PEER_SWITCH > REJECT\nthen conviction → MoS% → governance"]
+
+    P3 --> DB8[("investor.db · WAL\nanalyses (1 row / ticker / day)\ndata_snapshots (4 raw payloads / run)\nportfolio FIFO lots + tax")]
+
+    DB8 --> MON["Monitoring loop (no LLM)\n• watchlist-alerts — live CMP vs stored DCF target_buy_price\n• surveillance — staleness · price drift · fundamental drift\n  (HIGH severity when a hard-trigger level is crossed)\n• backtest — replay deterministic gates on old snapshots,\n  forward returns vs Nifty 50 per verdict bucket"]
+
+    MON -->|"HIGH drift alerts +\nentry triggers"| RE["re-run investor analyze\n(full pipeline, fresh data)"]
+
+    classDef phase fill:#1e3a5f,stroke:#4f8ef7,color:#93c5fd
+    classDef det fill:#142d20,stroke:#34d399,color:#a7f3d0
+    classDef store fill:#1f1f2e,stroke:#818cf8,color:#c7d2fe
+    classDef warn fill:#2d2514,stroke:#f59e0b,color:#fcd34d
+
+    class U1,U2,U3 phase
+    class WC8,HTTP8,PS8,RANK,MON det
+    class DB8 store
+    class CUT,P3,RE warn
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     DIAGRAM 9 — WEB TOOL SECURITY
+════════════════════════════════════════════════════ -->
+<div class="diagram-card" id="security">
+  <div class="card-header">
+    <div class="card-header-left">
+      <h2>9 · Web Tool Security Pipeline</h2>
+      <p>Every web_search / web_fetch result passes through layered defenses before reaching Claude (Steps 1–2 research)</p>
+    </div>
+    <div class="btn-group">
+      <button class="btn-svg" onclick="downloadSVG('security')">⬇ SVG</button>
+      <button class="btn-png" onclick="downloadPNG('security')">⬇ PNG</button>
+    </div>
+  </div>
+  <div class="diagram-body">
+    <div class="mermaid" id="security-diagram">
+flowchart TD
+    REQ["Claude requests web_fetch(url)\nor web_search(query)"] --> SSRF
+
+    subgraph Guard["SSRF Guard — per request AND per redirect hop"]
+        SSRF["Scheme must be http/https"] --> DNS["DNS-resolve host\nreject if ANY address is non-global:\nloopback · RFC1918 · link-local/metadata\nCGN · 0.0.0.0 · IPv6 loopback ·\ndecimal-encoded IPs · unresolvable"]
+        DNS --> HOPS["Redirects followed manually\n≤ 5 hops, each re-validated\n(public page cannot bounce\nto an internal endpoint)"]
+    end
+
+    HOPS --> FETCH["HTTP fetch\nDuckDuckGo search: html frontend →\nlite frontend fallback"]
+
+    FETCH --> SAN["Sanitization\nBeautifulSoup strips ALL tags\n(script · style · noscript)\nregex redacts injection patterns\n('ignore all previous instructions',\n'system prompt:', …)"]
+
+    SAN --> WRAP["&lt;untrusted_web_content&gt; wrapper\nescaped copies of the closing tag\ninside page text are [REDACTED]\nso the page cannot close the region early"]
+
+    WRAP --> LLM["Claude (Step 2 system prompt:\ncontent inside the tags is DATA,\nnever instructions)"]
+
+    SSRF -.->|"blocked"| ERR["[BLOCKED] returned\nas tool_result"]
+    DNS -.->|"non-global"| ERR
+    HOPS -.->|"> 5 hops"| ERR
+
+    classDef guard fill:#2d1515,stroke:#ef4444,color:#fca5a5
+    classDef clean fill:#142d20,stroke:#34d399,color:#a7f3d0
+    classDef claude fill:#1e3a5f,stroke:#4f8ef7,color:#93c5fd
+
+    class SSRF,DNS,HOPS,ERR guard
+    class FETCH,SAN,WRAP clean
+    class REQ,LLM claude
+    </div>
+  </div>
+</div>
+
 <footer>
-  Indian Equity Investor · 9-step pipeline · Claude Sonnet + Haiku · NSE/BSE ·
+  Indian Equity Investor · 10-step pipeline · Claude Sonnet (moat research) + Haiku · deterministic DCF & gates · SQLite persistence · NSE/BSE ·
   Diagrams rendered with <a href="https://mermaid.js.org" style="color:var(--accent)">Mermaid.js</a>
 </footer>
 

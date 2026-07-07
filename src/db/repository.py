@@ -70,6 +70,9 @@ async def init_db(db_path: str) -> None:
         migrations = [
             ("analyses", "target_buy_price", "ALTER TABLE analyses ADD COLUMN target_buy_price REAL"),
             ("analyses", "allocation_pct",   "ALTER TABLE analyses ADD COLUMN allocation_pct REAL"),
+            ("analyses", "analysis_mode",    "ALTER TABLE analyses ADD COLUMN analysis_mode TEXT DEFAULT 'value'"),
+            ("analyses", "multibagger_total_score", "ALTER TABLE analyses ADD COLUMN multibagger_total_score INTEGER"),
+            ("analyses", "multibagger_verdict",     "ALTER TABLE analyses ADD COLUMN multibagger_verdict TEXT"),
         ]
         for table, column, ddl in migrations:
             async with db.execute(
@@ -146,6 +149,10 @@ async def save_analysis(db_path: str, state: AnalysisState) -> None:
             2,
         )
 
+    multibagger_score = state.multibagger_score
+    multibagger_total = multibagger_score.total_score if multibagger_score else None
+    multibagger_verdict = multibagger_score.verdict if multibagger_score else None
+
     async with aiosqlite.connect(db_path) as db:
         await db.execute(
             """
@@ -157,6 +164,7 @@ async def save_analysis(db_path: str, state: AnalysisState) -> None:
                 financial_score, financial_gate, financial_triggers,
                 valuation_gate, valuation_methods_in_buy_zone, mos_pct, required_mos_pct,
                 dcf_intrinsic_weighted,
+                analysis_mode, multibagger_total_score, multibagger_verdict,
                 terminated_at_step, termination_reason, recommendation, conviction,
                 watchlist_tier, target_buy_price, investment_thesis,
                 all_data_flags, error_tags
@@ -168,6 +176,7 @@ async def save_analysis(db_path: str, state: AnalysisState) -> None:
                 ?, ?, ?,
                 ?, ?, ?, ?,
                 ?,
+                ?, ?, ?,
                 ?, ?, ?, ?,
                 ?, ?, ?,
                 ?, ?
@@ -196,6 +205,9 @@ async def save_analysis(db_path: str, state: AnalysisState) -> None:
                 mos_pct,
                 required_mos_pct,
                 dcf_intrinsic_weighted,
+                state.analysis_mode,
+                multibagger_total,
+                multibagger_verdict,
                 state.terminated_at_step,
                 state.termination_reason,
                 state.recommendation_type,
@@ -540,6 +552,52 @@ async def get_summary(db_path: str) -> list[dict]:
     return rows
 
 
+async def get_entry_plan(db_path: str, ticker: str) -> dict | None:
+    """Extract entry prices, stop-loss, and exit targets from the latest analysis.
+
+    Returns a dict with:
+      - ticker, company_name, analysis_date, recommendation, conviction, cap_size, cmp
+      - entry_price (current price at time of analysis)
+      - stop_loss (if available from Step 9)
+      - exit_target (if available from Step 9)
+      - tranche_1, tranche_2, tranche_3 (entry price levels)
+      - allocation_pct (position sizing)
+    """
+    await init_db(db_path)
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT
+                ticker, company_name, analysis_date, recommendation, conviction,
+                cap_size, cmp, allocation_pct, mos_pct
+            FROM analyses
+            WHERE ticker = ?
+            ORDER BY analysis_date DESC
+            LIMIT 1
+            """,
+            (ticker.upper(),),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+    if not row:
+        return None
+
+    result = _row_to_dict(row)
+    result['entry_price'] = result.get('cmp')
+    result['allocation_pct'] = result.get('allocation_pct')
+    result['mos_pct'] = result.get('mos_pct')
+
+    # TODO: Extract stop_loss and exit_target from analysis_data JSON when Step 9 output is structured
+    result['stop_loss'] = None
+    result['exit_target'] = None
+    result['tranche_1'] = None
+    result['tranche_2'] = None
+    result['tranche_3'] = None
+
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Portfolio write operations
 # ---------------------------------------------------------------------------
@@ -764,6 +822,153 @@ async def clear_portfolio(db_path: str, user_id: str) -> dict[str, int]:
             counts[table] = cur.rowcount
         await db.commit()
     return counts
+
+
+# ---------------------------------------------------------------------------
+# LLM cost tracking
+# ---------------------------------------------------------------------------
+
+_PERIOD_TRUNC: dict[str, str] = {
+    "day":     "date(executed_at)",
+    "week":    "strftime('%Y-W%W', executed_at)",
+    "month":   "strftime('%Y-%m', executed_at)",
+    "quarter": "strftime('%Y-Q', executed_at) || ((CAST(strftime('%m', executed_at) AS INTEGER) - 1) / 3 + 1)",
+    "year":    "strftime('%Y', executed_at)",
+}
+
+
+async def save_cost_record(db_path: str, record: dict) -> None:
+    """Persist one LLM cost row. Best-effort — never raises."""
+    try:
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute(
+                """INSERT INTO llm_costs (
+                       executed_at, subcommand, ticker, index_name,
+                       recommendation, num_tickers,
+                       cost_usd, cost_usd_sonnet, cost_usd_haiku,
+                       input_tokens, output_tokens,
+                       cache_read_tokens, cache_write_tokens,
+                       elapsed_seconds, status)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    record.get("executed_at"),
+                    record.get("subcommand"),
+                    record.get("ticker"),
+                    record.get("index_name"),
+                    record.get("recommendation"),
+                    record.get("num_tickers"),
+                    record.get("cost_usd"),
+                    record.get("cost_usd_sonnet"),
+                    record.get("cost_usd_haiku"),
+                    record.get("input_tokens"),
+                    record.get("output_tokens"),
+                    record.get("cache_read_tokens"),
+                    record.get("cache_write_tokens"),
+                    record.get("elapsed_seconds"),
+                    record.get("status", "success"),
+                ),
+            )
+            await db.commit()
+    except Exception:  # noqa: BLE001
+        pass  # cost tracking is never fatal
+
+
+async def query_cost_summary(
+    db_path: str,
+    period: str = "month",
+    limit: int = 24,
+) -> list[dict]:
+    """Aggregate LLM costs by period, newest first."""
+    trunc = _PERIOD_TRUNC.get(period, _PERIOD_TRUNC["month"])
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            f"""SELECT
+                    {trunc} AS period,
+                    COUNT(*) AS runs,
+                    SUM(cost_usd) AS cost_usd,
+                    SUM(cost_usd_sonnet) AS cost_usd_sonnet,
+                    SUM(cost_usd_haiku) AS cost_usd_haiku,
+                    SUM(input_tokens) AS input_tokens,
+                    SUM(output_tokens) AS output_tokens,
+                    SUM(cache_read_tokens) AS cache_read_tokens,
+                    SUM(cache_write_tokens) AS cache_write_tokens,
+                    AVG(elapsed_seconds) AS avg_elapsed_seconds
+                FROM llm_costs
+                GROUP BY 1
+                ORDER BY 1 DESC
+                LIMIT ?""",
+            (limit,),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def query_cost_detail(db_path: str) -> list[dict]:
+    """One row per cost record, newest first."""
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT
+                   date(executed_at) AS date,
+                   subcommand,
+                   ticker,
+                   index_name,
+                   recommendation,
+                   num_tickers,
+                   ROUND(cost_usd_haiku,  4) AS cost_usd_haiku,
+                   ROUND(cost_usd_sonnet, 4) AS cost_usd_sonnet,
+                   ROUND(cost_usd,        4) AS cost_usd,
+                   ROUND(elapsed_seconds, 0) AS elapsed_seconds,
+                   status
+               FROM llm_costs
+               ORDER BY executed_at DESC"""
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def query_cost_by_subcommand(db_path: str) -> list[dict]:
+    """Cost breakdown by subcommand type, highest total first."""
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT
+                   subcommand,
+                   COUNT(*) AS runs,
+                   ROUND(AVG(cost_usd),        4) AS avg_cost_usd,
+                   ROUND(SUM(cost_usd),        4) AS total_cost_usd,
+                   ROUND(AVG(cost_usd_sonnet), 4) AS avg_cost_usd_sonnet,
+                   ROUND(AVG(cost_usd_haiku),  4) AS avg_cost_usd_haiku,
+                   ROUND(AVG(elapsed_seconds), 1) AS avg_elapsed_seconds
+               FROM llm_costs
+               GROUP BY subcommand
+               ORDER BY total_cost_usd DESC"""
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def query_cost_by_ticker(db_path: str, top: int = 10) -> list[dict]:
+    """Most expensive tickers to analyse (analyze subcommand only)."""
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT
+                   ticker,
+                   COUNT(*) AS runs,
+                   ROUND(AVG(cost_usd), 4) AS avg_cost_usd,
+                   ROUND(SUM(cost_usd), 4) AS total_cost_usd,
+                   MAX(recommendation) AS last_recommendation
+               FROM llm_costs
+               WHERE subcommand = 'analyze'
+               GROUP BY ticker
+               ORDER BY total_cost_usd DESC
+               LIMIT ?""",
+            (top,),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
 
 
 # ---------------------------------------------------------------------------

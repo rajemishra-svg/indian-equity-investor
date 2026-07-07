@@ -17,6 +17,11 @@ class MarketMode(StrEnum):
     MAXIMUM_OPPORTUNITY = "maximum_opportunity"
 
 
+class AnalysisMode(StrEnum):
+    VALUE = "value"
+    GROWTH = "growth"
+
+
 class GateResult(StrEnum):
     PASS_GREEN = "pass_green"
     PASS_CONDITIONAL = "pass_conditional"
@@ -125,6 +130,16 @@ class FinancialMetrics(BaseModel):
 
     # ── Revenue (absolute) — needed for P/S ratio on pre-profit companies ──
     trailing_revenue_cr: float | None = None   # latest annual revenue in ₹ Crore
+
+    # ── Growth mode: capex, D&A, gross margin (populated by Screener extension) ──
+    capex_cr_latest: float | None = None        # latest year capital expenditure ₹ Cr (absolute)
+    capex_cr_3y: list[float] = Field(default_factory=list)   # 3Y series oldest→newest
+    da_cr_latest: float | None = None           # depreciation & amortisation ₹ Cr
+    ebit_cr_latest: float | None = None         # EBITDA - D&A, latest year
+    gross_profit_margin_pct: float | None = None  # gross margin % latest year
+    gross_profit_margin_series: list[float] = Field(default_factory=list)  # annual series
+    revenue_1y_ago_cr: float | None = None      # prior-year revenue for 1Y CAGR computation
+    cash_cr_latest: float | None = None         # cash & equivalents from balance sheet ₹ Cr
 
     data_flags: list[str] = Field(default_factory=list)
 
@@ -316,6 +331,69 @@ class PremortRisk(BaseModel):
     data_flags: list[str] = Field(default_factory=list)
 
 
+class GrowthMetrics(BaseModel):
+    """Growth-specific metrics populated during prefetch + Step 2 (TAM)."""
+
+    # Revenue momentum
+    revenue_cagr_1y: float | None = None          # latest YoY — acceleration signal
+    gross_margin_pct: float | None = None          # latest year gross margin %
+    gross_margin_trend: str | None = None          # "expanding" | "stable" | "contracting"
+
+    # Cash health
+    burn_rate_cr_month: float | None = None        # monthly cash burn when FCF < 0
+    cash_runway_months: float | None = None        # cash + liquid investments / burn rate
+
+    # Capital efficiency
+    roiic_3y: float | None = None                  # ΔEBIT(3Y) / (capex + ΔWC); None if capex unavailable
+    roiic_proxy_cfo_revenue: float | None = None   # fallback: CFO-growth / Revenue-growth ratio
+    rule_of_40_score: float | None = None          # revenue CAGR % + EBITDA margin %
+
+    # Valuation metrics for growth companies
+    ps_ratio: float | None = None                  # Price / Sales (key for pre-profit)
+    ev_revenue_ratio: float | None = None          # EV / Trailing Revenue
+
+    # TAM (populated by Step 2 agentic loop)
+    tam_size_cr: float | None = None               # estimated TAM in ₹ Crore
+    tam_penetration_est_pct: float | None = None   # current revenue as % of TAM
+    tam_source: str | None = None                  # "industry_report" | "mgmt_filing" | "llm_inference" | None
+
+    # Promoter track record (populated from BSE shareholding history)
+    promoter_holding_trend_5y: str | None = None   # "increasing" | "stable" | "declining"
+    equity_dilution_3y_pct: float | None = None    # % growth in shares outstanding over 3Y
+
+    # IPO / listing age — estimated from Screener financial history length
+    listing_years: float | None = None             # None = unknown (≥ 3Y assumed); < 1.0 = very recently listed
+
+    data_flags: list[str] = Field(default_factory=list)
+
+
+class MultibaggerScore(BaseModel):
+    """Composite multibagger potential score (0-10) from Step 5M."""
+
+    # Component scores
+    valuation_gap_score: int = 0      # 0-3: PEG vs revenue CAGR — market not yet pricing growth
+    reinvestment_runway: int = 0      # 0-2: ROIIC ≥ 20% + TAM headroom
+    tam_runway_score: int = 0         # 0-2: revenue at 20% TAM penetration vs current
+    promoter_decade_score: int = 0    # 0-2: 5-10Y holding track record + no pledge + low dilution
+    earnings_quality_score: int = 0   # 0-1: real earnings, CFO > PAT, no RPT inflation
+
+    total_score: int = 0              # 0-10
+
+    # Verdict
+    verdict: str = "GROWTH_REJECT"   # MULTIBAGGER_CANDIDATE | GROWTH_BUY | GROWTH_WATCHLIST | GROWTH_REJECT
+
+    # Narrative
+    compounding_horizon_years: str = ""    # "7-10 years" / "10-15 years" / ""
+    valuation_gap_reason: str = ""         # why market hasn't priced this in yet
+    key_milestones: list[str] = Field(default_factory=list)   # specific triggers to monitor
+    score_narrative: str = ""              # 2-3 sentence composite explanation
+
+    # TAM confidence tier (affects tam_runway_score interpretation)
+    tam_confidence: str = "none"           # "high" | "medium" | "low" | "none"
+
+    data_flags: list[str] = Field(default_factory=list)
+
+
 class TrancheEntry(BaseModel):
     tranche: int
     pct_allocation: int
@@ -339,6 +417,7 @@ class AnalysisState(BaseModel):
     ticker: str
     company_name: str = ""
     mode: MarketMode = MarketMode.NORMAL
+    analysis_mode: AnalysisMode = AnalysisMode.VALUE
     nifty_level: float | None = None
     nifty_52w_high: float | None = None
     nifty_decline_pct: float | None = None
@@ -353,6 +432,10 @@ class AnalysisState(BaseModel):
     governance_data: GovernanceData | None = None
     valuation_data: ValuationData | None = None
     technical_data: TechnicalData | None = None
+
+    # Growth-mode data (None in value mode)
+    growth_metrics: GrowthMetrics | None = None
+    multibagger_score: MultibaggerScore | None = None
 
     # Step results
     pre_screen: PreScreenResult | None = None

@@ -15,6 +15,7 @@ from tenacity import (
     wait_exponential,
 )
 
+from src.agent.cost_tracker import record_usage
 from src.agent.tools import TOOLS, execute_tool
 from src.config import settings
 from src.logging_config import get_logger
@@ -129,6 +130,7 @@ class BaseStep(ABC):
         response = await _create()
         elapsed = time.monotonic() - start
 
+        record_usage(model=_model, usage=response.usage, step_name=self.step_name)
         self.log.info(
             "claude_api_call",
             step=self.step_number,
@@ -330,6 +332,17 @@ class BaseStep(ABC):
                 )
                 break
 
+        # Accumulate loop totals into the run-level cost tracker.
+        # We pass a synthetic usage object since the loop aggregates across
+        # multiple API calls and cache_creation_input_tokens is not tracked
+        # at the loop level (only reads are summed above).
+        class _LoopUsage:
+            input_tokens = total_input_tokens
+            output_tokens = total_output_tokens
+            cache_read_input_tokens = total_cache_read_tokens
+            cache_creation_input_tokens = 0
+
+        record_usage(model=_model, usage=_LoopUsage(), step_name=self.step_name)
         self.log.info(
             "claude_api_call",
             step=self.step_number,
