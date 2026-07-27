@@ -142,6 +142,7 @@ class PreScreenSummary:
     ticker: str
     score: int
     gate: GateResult
+    max_score: int = 9  # 9 for value mode, 10 for growth mode (see Step0GrowthPreScreen)
     failed_metrics: list[str] = field(default_factory=list)
     data_flags: list[str] = field(default_factory=list)
     error: str | None = None
@@ -304,6 +305,7 @@ class BatchScanner:
                         ticker=ticker,
                         score=0,
                         gate=GateResult.NOT_RUN,
+                        max_score=10 if growth else 9,
                         error=str(result),
                     )
                 )
@@ -470,6 +472,7 @@ class BatchScanner:
                 ticker=ticker,
                 score=pre.score if pre else 0,
                 gate=pre.gate if pre else GateResult.NOT_RUN,
+                max_score=pre.max_score if pre else (10 if growth else 9),
                 failed_metrics=pre.failed_metrics if pre else [],
                 data_flags=state.all_data_flags,
                 # Value-mode tie-breakers (None in growth mode)
