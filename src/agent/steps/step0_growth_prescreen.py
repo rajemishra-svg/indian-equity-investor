@@ -103,18 +103,15 @@ class Step0GrowthPreScreen(BaseStep):
 
         if ev_rev is not None:
             if ev_rev <= 4.0:
-                passed_g2b = True
                 metric_scores["ev_revenue_cap"] = True
             elif ev_rev <= 6.0 and roiic_proxy is not None and roiic_proxy >= 30.0:
                 # Expensive but high capital efficiency — conditional pass
-                passed_g2b = True
                 metric_scores["ev_revenue_cap"] = True
                 conditional_exceptions.append(
                     f"[EV/Revenue {ev_rev:.1f}x: above 4x but ROIIC {roiic_proxy:.1f}% ≥ 30% — "
                     "conditional pass; monitor margin expansion carefully]"
                 )
             else:
-                passed_g2b = False
                 metric_scores["ev_revenue_cap"] = False
                 failed_metrics.append("ev_revenue_cap")
                 data_flags.append(

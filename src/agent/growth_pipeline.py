@@ -101,13 +101,27 @@ def compute_growth_metrics(state: AnalysisState) -> None:
         if v and v.net_debt_cr is not None:
             gm.ev_revenue_ratio = round((market_cap_cr + v.net_debt_cr) / revenue_cr, 2)
 
-    # Promoter holding trend: use insider buying signal as a short-term proxy.
+    # Promoter holding trend: prefer real BSE quarterly shareholding history over
+    # any proxy. Falls back to the 3-month insider buying/selling signal only when
+    # BSE didn't return enough filing quarters to compute a trend.
     if state.governance_data:
-        insider = state.governance_data.insider_net_buying_3m
-        if insider == "buying":
-            gm.promoter_holding_trend_5y = "increasing"
-        elif insider == "selling":
-            gm.promoter_holding_trend_5y = "declining"
+        holding_trend = state.governance_data.promoter_holding_trend
+        if len(holding_trend) >= 2:
+            if holding_trend[-1] > holding_trend[0]:
+                gm.promoter_holding_trend_5y = "increasing"
+            elif holding_trend[-1] < holding_trend[0]:
+                gm.promoter_holding_trend_5y = "declining"
+            else:
+                gm.promoter_holding_trend_5y = "stable"
+        else:
+            # Fallback proxy — insider_net_buying_3m is normalised to
+            # "NET_BUYING" / "NET_SELLING" / "NEUTRAL" by Step 1's enrichment
+            # (see step1_governance.py insider_aliases); match those exactly.
+            insider = state.governance_data.insider_net_buying_3m
+            if insider == "NET_BUYING":
+                gm.promoter_holding_trend_5y = "increasing"
+            elif insider == "NET_SELLING":
+                gm.promoter_holding_trend_5y = "declining"
 
     # equity_dilution_3y_pct: requires historical shares outstanding — not yet tracked.
     # Left as None; Step 5M applies benefit of doubt.
@@ -257,6 +271,27 @@ class GrowthPipeline(InvestmentPipeline):
                     elapsed_seconds=round(elapsed, 2),
                     ticker=ticker,
                 )
+
+                # Re-save the governance snapshot after Step 1 completes — see the
+                # matching comment in InvestmentPipeline.analyze() (pipeline.py).
+                if isinstance(step, Step1Governance) and state.governance_data:
+                    try:
+                        from datetime import date as _date
+
+                        from src.db.repository import save_snapshot
+
+                        await save_snapshot(
+                            settings.db_path,
+                            ticker,
+                            _date.today().isoformat(),
+                            "governance",
+                            state.governance_data.model_dump(mode="json"),
+                            "step1_enriched",
+                        )
+                    except Exception as exc:
+                        self.log.warning(
+                            "governance_snapshot_resave_failed", ticker=ticker, error=str(exc)
+                        )
 
                 # Post-Step-2: re-classify sector if initial confidence was low.
                 # Growth moat narrative often reveals a sector (e.g. a "tech" company

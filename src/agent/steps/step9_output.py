@@ -96,14 +96,30 @@ class Step9Output(BaseStep):
     # ------------------------------------------------------------------
 
     def _set_conviction(self, state: AnalysisState) -> None:
-        """Determine conviction level from gate results."""
+        """Determine conviction level and allocation, then apply cross-cutting adjustments."""
         # Growth types use multibagger score for conviction; value types use gate averages.
         if state.recommendation_type in ("MULTIBAGGER_CANDIDATE", "GROWTH_BUY", "GROWTH_WATCHLIST"):
             self._set_growth_conviction(state)
-            return
-        if state.recommendation_type not in ("BUY",):
+        elif state.recommendation_type == "BUY":
+            self._set_value_conviction(state)
+        else:
             return
 
+        # EC-14: moderate regulatory overhang halves the allocation set above,
+        # regardless of value/growth path — Step 1 (governance) runs unchanged
+        # in both pipelines, so the flag can originate from either.
+        if state.suggested_allocation_pct and any(
+            "EC-14: MODERATE" in f for f in state.all_data_flags
+        ):
+            halved = round(state.suggested_allocation_pct * 0.5, 2)
+            state.add_flag(
+                f"[EC-14: allocation cut from {state.suggested_allocation_pct:.1f}% to "
+                f"{halved:.1f}% due to moderate regulatory overhang]"
+            )
+            state.suggested_allocation_pct = halved
+
+    def _set_value_conviction(self, state: AnalysisState) -> None:
+        """Determine conviction level from gate results (value-mode BUY only)."""
         scores = []
         if state.pre_screen:
             scores.append(state.pre_screen.score / state.pre_screen.max_score)

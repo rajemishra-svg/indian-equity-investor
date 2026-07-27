@@ -256,6 +256,12 @@ class BSEClient(BaseHTTPClient):
             else:
                 trend_direction = "stable"
 
+        # Same quarters, holding side — this is the only source of a real (not
+        # inferred) promoter holding trend; feeds GrowthMetrics.promoter_holding_trend_5y.
+        holding_trend = [
+            holding for holding, _pledge in reversed(per_quarter) if holding is not None
+        ]
+
         flags: list[str] = []
         if promoter_holding is None:
             flags.append("[DATA UNVERIFIED: promoter_holding]")
@@ -277,5 +283,6 @@ class BSEClient(BaseHTTPClient):
             promoter_pledging_pct=promoter_pledging,
             promoter_pledging_trend=pledging_trend,
             pledging_trend_direction=trend_direction,
+            promoter_holding_trend=holding_trend,
             data_flags=flags,
         )

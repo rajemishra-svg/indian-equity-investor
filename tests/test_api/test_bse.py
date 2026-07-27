@@ -69,10 +69,13 @@ def _summary(holding: float | None, pledge: float | None) -> dict:
     }
 
 
-def _mock_happy_path(mock: respx.MockRouter, pledges: list[float]) -> None:
+def _mock_happy_path(
+    mock: respx.MockRouter, pledges: list[float], holdings: list[float] | None = None
+) -> None:
     """Mock the full chain: search → quarter list → one summary per quarter.
 
-    ``pledges`` is newest-first, one entry per mocked quarter.
+    ``pledges`` (and ``holdings`` if given) is newest-first, one entry per mocked
+    quarter. ``holdings`` defaults to a flat 50.0 for every quarter when omitted.
     """
     mock.get(SEARCH_PATH, params={"Type": "EQ", "text": "RELIANCE"}).mock(
         return_value=httpx.Response(
@@ -83,10 +86,11 @@ def _mock_happy_path(mock: respx.MockRouter, pledges: list[float]) -> None:
     mock.get(QUARTERS_PATH, params={"scripcode": "500325"}).mock(
         return_value=httpx.Response(200, json=_quarters(*[float(q) for q in qtrids]))
     )
-    for qtrid, pledge in zip(qtrids, pledges, strict=True):
+    holdings = holdings if holdings is not None else [50.0] * len(pledges)
+    for qtrid, pledge, holding in zip(qtrids, pledges, holdings, strict=True):
         mock.get(
             SUMMARY_PATH, params={"scripcode": "500325", "qtrcode": str(qtrid)}
-        ).mock(return_value=httpx.Response(200, json=_summary(50.0, pledge)))
+        ).mock(return_value=httpx.Response(200, json=_summary(holding, pledge)))
 
 
 # ── Happy path ───────────────────────────────────────────────────────────────
@@ -106,7 +110,25 @@ async def test_get_shareholding_parses_promoter_row_and_trend():
     assert gov.promoter_pledging_pct == pytest.approx(5.0)  # latest quarter
     assert gov.promoter_pledging_trend == [2.0, 3.0, 4.0, 5.0]  # oldest → newest
     assert gov.pledging_trend_direction == "increasing"
+    assert gov.promoter_holding_trend == [50.0, 50.0, 50.0, 50.0]  # flat holding
     assert not is_circuit_open()
+
+
+@pytest.mark.asyncio
+async def test_get_shareholding_parses_declining_holding_trend():
+    """Promoter holding trend is chronological and independent of the pledging trend."""
+    with respx.mock(base_url=BASE) as mock:
+        _mock_happy_path(
+            mock,
+            pledges=[1.0, 1.0, 1.0, 1.0],
+            holdings=[55.0, 54.0, 52.0, 50.0],  # newest first → declining
+        )
+
+        async with BSEClient() as client:
+            gov = await client.get_shareholding("RELIANCE")
+
+    assert isinstance(gov, GovernanceData)
+    assert gov.promoter_holding_trend == [50.0, 52.0, 54.0, 55.0]  # oldest → newest
 
 
 @pytest.mark.asyncio

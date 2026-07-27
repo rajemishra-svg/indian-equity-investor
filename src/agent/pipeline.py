@@ -158,6 +158,30 @@ class InvestmentPipeline:
                     ticker=ticker,
                 )
 
+                # Re-save the governance snapshot after Step 1 completes. The snapshot
+                # saved earlier in _prefetch_data only has BSE/Screener shareholding
+                # fields — auditor, RPT%, SEBI orders/severity are populated by Step 1's
+                # enrichment loop and would otherwise never be persisted, leaving future
+                # backtest replays with no real data for those fields.
+                if isinstance(step, Step1Governance) and state.governance_data:
+                    try:
+                        from datetime import date as _date
+
+                        from src.db.repository import save_snapshot
+
+                        await save_snapshot(
+                            settings.db_path,
+                            ticker,
+                            _date.today().isoformat(),
+                            "governance",
+                            state.governance_data.model_dump(mode="json"),
+                            "step1_enriched",
+                        )
+                    except Exception as exc:
+                        self.log.warning(
+                            "governance_snapshot_resave_failed", ticker=ticker, error=str(exc)
+                        )
+
                 # Fix 1.4: re-classify sector after Step 2 when initial confidence was low.
                 # Moat narrative is now available and may reveal the true sector (e.g.
                 # a company named "XYZ Enterprises" that turns out to be a bank/NBFC).
