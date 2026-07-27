@@ -459,6 +459,7 @@ def correction_scan() -> None:
 )
 @click.option(
     "--concurrency",
+    type=int,
     default=None,
     show_default=True,
     help=(
