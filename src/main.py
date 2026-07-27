@@ -459,6 +459,7 @@ def correction_scan() -> None:
 )
 @click.option(
     "--concurrency",
+    type=int,
     default=None,
     show_default=True,
     help=(
@@ -553,7 +554,7 @@ def scan(
             tiebreak_val = f"{s.roce_5y:.1f}%" if s.roce_5y is not None else "[dim]N/A[/dim]"
         ps_table.add_row(
             s.ticker,
-            f"[{colour}]{s.score}/9[/{colour}]",
+            f"[{colour}]{s.score}/{s.max_score}[/{colour}]",
             tiebreak_val,
             f"[{colour}]{s.gate.value.upper()}[/{colour}]",
             ", ".join(s.failed_metrics[:3]) + ("…" if len(s.failed_metrics) > 3 else ""),

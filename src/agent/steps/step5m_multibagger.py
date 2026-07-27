@@ -22,6 +22,11 @@ from __future__ import annotations
 import anthropic
 
 from src.agent.steps.base import BaseStep
+from src.agent.steps.step5_growth_valuation import (
+    _EV_REVENUE_BANDS,
+    _GROWTH_SECTOR_MAP,
+    _ev_revenue_band,
+)
 from src.models import AnalysisState, GrowthMetrics, MultibaggerScore, WatchlistTier
 
 
@@ -100,28 +105,50 @@ class Step5MMultibagger(BaseStep):
                     f"PEG {peg:.2f} > 2.0 — market has already recognised the growth story; "
                     "multibagger from here requires sustained outperformance of expectations"
                 )
-        elif peg is None and ev_rev is not None and rev_3y is not None:
-            # Pre-profit: use EV/Revenue as a proxy for valuation discipline
-            # Cheap EV/Revenue relative to growth rate ≈ low implied P/S
-            growth_implied_fair_ps = rev_3y / 10  # rough rule: 10× PE / growth rate
-            if ev_rev < growth_implied_fair_ps * 0.5:
+        elif peg is None and ev_rev is not None:
+            # Pre-profit / PE unavailable: use EV/Revenue as a proxy for valuation
+            # discipline. Reuses Step 5G's own sector-aware bands (saas_tech,
+            # fintech, consumer_brand, etc.) rather than a flat "fair P/S =
+            # growth% / 10" rule — that flat rule contradicted Step 5G's verdict
+            # on the same number (e.g. a fintech at 4.1x EV/Rev sits well inside
+            # the 6x "fintech" fair band per Step 5G, but the flat rule judged it
+            # "at or above fair value" and zeroed this component out, dragging
+            # otherwise-strong candidates from GROWTH_BUY down into
+            # GROWTH_WATCHLIST purely on an internal scoring inconsistency).
+            sector_key = _GROWTH_SECTOR_MAP.get(state.sector_name or "", "default")
+            fair_max, _expensive_above = _EV_REVENUE_BANDS.get(
+                sector_key, _EV_REVENUE_BANDS["default"]
+            )
+            verdict = _ev_revenue_band(ev_rev, sector_key)
+            data_flags.append("[MULTIBAGGER NOTE: pre-profit; PEG unavailable; EV/Rev used as proxy]")
+            if ev_rev <= fair_max * 0.5:
+                score.valuation_gap_score = 3
+                score.valuation_gap_reason = (
+                    f"EV/Revenue {ev_rev:.1f}× well below {sector_key} sector fair ceiling "
+                    f"{fair_max:.1f}× — pre-profit but deeply cheap"
+                )
+                data_flags.append(
+                    f"[MULTIBAGGER SIGNAL: EV/Revenue {ev_rev:.1f}× << {sector_key} fair "
+                    f"{fair_max:.1f}× — classic pre-discovery setup]"
+                )
+            elif verdict == "EXCELLENT":
                 score.valuation_gap_score = 2
                 score.valuation_gap_reason = (
-                    f"EV/Revenue {ev_rev:.1f}× well below growth-implied fair P/S "
-                    f"{growth_implied_fair_ps:.1f}× — pre-profit but cheaply priced"
+                    f"EV/Revenue {ev_rev:.1f}× within {sector_key} sector fair band "
+                    f"(≤{fair_max:.1f}×) — pre-profit but reasonably priced"
                 )
-                data_flags.append("[MULTIBAGGER NOTE: pre-profit company; PEG unavailable; EV/Rev used as proxy]")
-            elif ev_rev < growth_implied_fair_ps:
+            elif verdict == "FAIR":
                 score.valuation_gap_score = 1
                 score.valuation_gap_reason = (
-                    f"EV/Revenue {ev_rev:.1f}× below growth-implied fair P/S — moderate gap"
+                    f"EV/Revenue {ev_rev:.1f}× in {sector_key} sector's fair-to-expensive "
+                    "range — moderate gap"
                 )
             else:
                 score.valuation_gap_score = 0
                 score.valuation_gap_reason = (
-                    f"EV/Revenue {ev_rev:.1f}× at or above growth-implied fair value"
+                    f"EV/Revenue {ev_rev:.1f}× exceeds {sector_key} sector norms — "
+                    "growth premium already priced in"
                 )
-                data_flags.append("[MULTIBAGGER NOTE: pre-profit; PEG unavailable; EV/Rev used as proxy]")
         else:
             score.valuation_gap_score = 0
             score.valuation_gap_reason = "Valuation gap indeterminate — PEG and EV/Revenue both unavailable"

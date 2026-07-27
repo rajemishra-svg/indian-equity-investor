@@ -41,9 +41,11 @@ def make_state(
     cfo_np: float | None = 85.0,
     other_income_pct: float | None = 5.0,
     rpt_pct: float | None = 3.0,
+    sector_name: str | None = None,
 ) -> AnalysisState:
     state = AnalysisState(ticker="GROWTHCO")
     state.analysis_mode = AnalysisMode.GROWTH
+    state.sector_name = sector_name
     state.financials = FinancialMetrics(
         revenue_cagr_3y=rev_3y,
         trailing_revenue_cr=trailing_revenue_cr,
@@ -214,14 +216,62 @@ async def test_peg_above_2_scores_0():
 
 
 @pytest.mark.asyncio
-async def test_pre_profit_uses_ev_revenue_proxy_when_peg_unavailable():
-    """When PEG is None, fall back to EV/Revenue proxy (pre-profit companies)."""
-    state = make_state(peg=None, ev_revenue_ratio=2.0, rev_3y=30.0)
+async def test_pre_profit_ev_revenue_deep_discount_scores_3():
+    """default sector fair_max=3.0; ev_rev ≤ 1.5 (50% of fair_max) → deep discount, 3/3."""
+    state = make_state(peg=None, ev_revenue_ratio=1.0, rev_3y=30.0, sector_name=None)
     state = await make_step().run(state)
 
-    # growth-implied fair P/S = 30 / 10 = 3.0; ev_rev=2.0 < 3.0*0.5=1.5 → no, 2.0 > 1.5
-    # so it falls into the "< fair PS" branch → valuation_gap = 1
-    assert state.multibagger_score.valuation_gap_score in (1, 2)  # depends on exact calc
+    assert state.multibagger_score.valuation_gap_score == 3
+    assert any("MULTIBAGGER SIGNAL" in f for f in state.multibagger_score.data_flags)
+
+
+@pytest.mark.asyncio
+async def test_pre_profit_ev_revenue_within_sector_fair_band_scores_2():
+    """default sector fair_max=3.0; ev_rev=2.0 is EXCELLENT but not deep-discount → 2/3."""
+    state = make_state(peg=None, ev_revenue_ratio=2.0, rev_3y=30.0, sector_name=None)
+    state = await make_step().run(state)
+
+    assert state.multibagger_score.valuation_gap_score == 2
+
+
+@pytest.mark.asyncio
+async def test_pre_profit_ev_revenue_agrees_with_step5g_fintech_band():
+    """Regression test for the COFORGE case: EV/Rev 4.1x is EXCELLENT for fintech
+    sector (fair_max=6.0) per Step 5G's own bands — must score positively here too,
+    not the 0/3 the old flat 'rev_3y/10' heuristic produced despite Step 5G calling
+    this same number a buy-zone valuation."""
+    state = make_state(
+        peg=None, ev_revenue_ratio=4.1, rev_3y=27.0, sector_name="financial_services"
+    )
+    state = await make_step().run(state)
+
+    assert state.multibagger_score.valuation_gap_score == 2
+    assert "financial_services" not in state.multibagger_score.valuation_gap_reason
+    assert "fintech" in state.multibagger_score.valuation_gap_reason
+
+
+@pytest.mark.asyncio
+async def test_pre_profit_ev_revenue_fair_band_scores_1():
+    """default sector: ev_rev between fair_max (3.0) and expensive_above (6.0) → FAIR → 1/3.
+
+    Regression test for the BLS case: EV/Rev 3.26x is just above the default
+    sector's 3.0x fair ceiling but still well inside Step 5G's own buy-zone
+    FAIR band (≤6.0x) — must score positively (1), not the 0/3 the old flat
+    heuristic gave despite Step 5G flagging this valuation as buy-zone.
+    """
+    state = make_state(peg=None, ev_revenue_ratio=3.26, rev_3y=26.0, sector_name=None)
+    state = await make_step().run(state)
+
+    assert state.multibagger_score.valuation_gap_score == 1
+
+
+@pytest.mark.asyncio
+async def test_pre_profit_ev_revenue_expensive_scores_0():
+    """default sector: ev_rev > expensive_above (6.0) → EXPENSIVE → 0/3."""
+    state = make_state(peg=None, ev_revenue_ratio=8.0, rev_3y=30.0, sector_name=None)
+    state = await make_step().run(state)
+
+    assert state.multibagger_score.valuation_gap_score == 0
 
 
 # ---------------------------------------------------------------------------
