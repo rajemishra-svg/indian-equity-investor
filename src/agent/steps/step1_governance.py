@@ -19,11 +19,15 @@ IMMEDIATE_TRIGGER_CHECKS = [
     ),
     (
         "active_sebi_ed_fraud_investigation",
-        # Fire ONLY when actual SEBI/ED orders are on record.
+        # EC-14 severity tiers (skill/references/edge-cases.md): only "major" (SEBI
+        # fraud investigation / NCLT insolvency) and "fraud" (ED/CBI involvement)
+        # reject immediately. "minor"/"moderate" orders proceed with a flag and a
+        # 50% allocation cut (applied in Step 9) rather than an outright REJECT.
+        # Orders present but severity unclassified default to "major" — a false
+        # REJECT is far cheaper than capital lost to a missed fraud signal.
         # "sebi_record_clean=False with no orders" means the enrichment model expressed
         # doubt but found nothing specific — treat as DATA UNVERIFIED, not confirmed fraud.
-        # Confirmed fraud requires explicit orders (sebi_orders non-empty).
-        lambda g: bool(g.sebi_orders),
+        lambda g: bool(g.sebi_orders) and (g.sebi_severity or "major") in ("major", "fraud"),
     ),
     (
         "rpt > 20% of revenue (unexplained)",
@@ -74,18 +78,9 @@ class Step1Governance(BaseStep):
         # IMMEDIATE_TRIGGER_CHECKS loop runs below.
         immediate_triggers: list[str] = []
 
-        # --- 1. Pledging score (0–3) ---
-        pledging_score = self._score_pledging(g, data_flags)
+        # --- 1. Pledging score (0–3), trend-adjusted ---
+        pledging_score = self._score_pledging(g, data_flags, concerns)
         sub_scores["pledging"] = pledging_score
-
-        # --- 1b. Pledging trend — add concern but don't score separately ---
-        if g is not None and g.pledging_trend_direction == "increasing" and (
-            g.promoter_pledging_pct is not None and g.promoter_pledging_pct > 0
-        ):
-            concerns.append(
-                f"Pledging trend is INCREASING ({g.promoter_pledging_pct:.1f}%) — watch closely; "
-                "rising pledging signals promoter stress."
-            )
 
         # --- 1c. Contingent liabilities — soft warnings + hard gate ---
         #
@@ -307,6 +302,13 @@ class Step1Governance(BaseStep):
             '  "contingent_liabilities_pct_networth": <contingent liabilities as % of net worth from latest balance sheet, or null>,\n'
             '  "sebi_record_clean": <true if no active SEBI/ED fraud investigation, false otherwise>,\n'
             '  "sebi_orders": ["<brief description of any SEBI/ED orders if present, else empty list>"],\n'
+            '  "sebi_severity": null,\n'
+            "  // ^ Only set when sebi_orders is non-empty. Use exactly one of:\n"
+            "  //   \"minor\"    — tax dispute < 5% of net worth; no fraud allegation\n"
+            "  //   \"moderate\" — SEBI technical/procedural violation; no fraud; < 2 years pending\n"
+            "  //   \"major\"    — SEBI financial fraud investigation; NCLT/insolvency proceedings\n"
+            "  //   \"fraud\"    — ED/CBI involvement; allegations of siphoning funds\n"
+            "  //   JSON null if orders exist but severity cannot be determined (treated as \"major\" downstream — do not guess up)\n"
             '  "insider_net_buying_3m": null\n'
             "  // ^ Use exactly: \"NET_BUYING\", \"NET_SELLING\", \"NEUTRAL\", or JSON null (no quotes around null)\n"
             "}\n\n"
@@ -315,7 +317,10 @@ class Step1Governance(BaseStep):
             "SEBI SCORES portal, and news.\n"
             "2. For auditor: search '[company] statutory auditor annual report 2024 site:nseindia.com OR site:bseindia.com'.\n"
             "3. For RPT: search '[company] related party transactions annual report 2024'.\n"
-            "4. For SEBI: search '[company] SEBI order notice 2023 2024'.\n"
+            "4. For SEBI: search '[company] SEBI order notice 2023 2024'. If orders are found, classify severity "
+            "using the tiers above — this determines whether the pipeline rejects outright (major/fraud) or "
+            "merely flags and reduces position size (minor/moderate). When uncertain between two tiers, pick "
+            "the MORE severe one — a false REJECT is far cheaper than capital lost to a missed fraud signal.\n"
             "5. P3-2 For insider activity: search '[company] promoter buying selling BSE bulk block deal 2024' "
             "and '[ticker] insider trading disclosure bseindia.com'. "
             "NET_BUYING = promoters/insiders net bought shares; NET_SELLING = net sold; "
@@ -376,6 +381,15 @@ class Step1Governance(BaseStep):
             orders = enriched.get("sebi_orders")
             if isinstance(orders, list):
                 g.sebi_orders = [str(o) for o in orders]
+            # EC-14: severity tier. Only accept the four defined values; anything
+            # else (including "null" strings or hallucinated tiers) is dropped so
+            # the downstream conservative default ("major" when orders present,
+            # unclassified) applies instead of trusting a malformed response.
+            severity_raw = enriched.get("sebi_severity")
+            if isinstance(severity_raw, str) and severity_raw.lower() in (
+                "minor", "moderate", "major", "fraud"
+            ):
+                g.sebi_severity = severity_raw.lower()
             # Mark enrichment as having run — the immediate trigger can now fire
             g.sebi_record_checked = True
 
@@ -411,19 +425,31 @@ class Step1Governance(BaseStep):
     # Sub-scorers
     # ------------------------------------------------------------------
 
-    def _score_pledging(self, g, flags: list) -> int:
+    def _score_pledging(self, g, flags: list, concerns: list) -> int:
         if g is None or g.promoter_pledging_pct is None:
             flags.append("[PLEDGING UNKNOWN — manual verification required]")
             return 2  # API failure ≠ pledging concern; immediate trigger still guards >10%
         pct = g.promoter_pledging_pct
         if pct == 0:
-            return 3
+            score = 3
         elif pct <= 4:
-            return 2
+            score = 2
         elif pct <= 10:
-            return 1
+            score = 1
         else:
-            return 0  # immediate trigger will also fire
+            score = 0  # immediate trigger will also fire
+
+        # Trend penalty: rising pledging signals promoter stress even before it
+        # crosses an absolute threshold — a promoter at 3% and climbing is a worse
+        # signal than one flat at 3% for years, but both scored identically before.
+        if g.pledging_trend_direction == "increasing" and pct > 0:
+            score = max(0, score - 1)
+            concerns.append(
+                f"Pledging trend is INCREASING ({pct:.1f}%) — watch closely; "
+                "rising pledging signals promoter stress. (-1 pledging score)"
+            )
+
+        return score
 
     def _score_audit(self, g, flags: list, concerns: list) -> int:
         if g is None:
@@ -457,6 +483,17 @@ class Step1Governance(BaseStep):
         # Penalise audit qualifications
         if g.audit_qualifications:
             concerns.append(f"Audit qualifications: {g.audit_qualifications}")
+            score = max(0, score - 1)
+
+        # Penalise auditor churn independent of resignation language — frequent
+        # auditor changes (even orderly rotation/M&A ones) are a soft governance
+        # discipline concern. Mid-year resignation is separately hard-gated by
+        # IMMEDIATE_TRIGGER_CHECKS regardless of this score.
+        if g.auditor_changed_3y:
+            concerns.append(
+                "Auditor changed within the last 3 years — verify the change was "
+                "routine (rotation/M&A) and not a governance red flag."
+            )
             score = max(0, score - 1)
 
         return min(score, 3)
@@ -544,9 +581,29 @@ class Step1Governance(BaseStep):
         if g.sebi_record_clean and not g.sebi_orders:
             return 3
         elif g.sebi_orders:
-            # Known orders logged — minor record blemish but visible
-            concerns.append(f"SEBI orders on record: {g.sebi_orders}")
-            return 2
+            # EC-14 severity tiers — see skill/references/edge-cases.md.
+            # major/fraud already terminate via IMMEDIATE_TRIGGER_CHECKS; the score
+            # computed here still runs (and is reported) regardless of gate outcome.
+            severity = g.sebi_severity or "major"  # unclassified defaults conservative
+            concerns.append(f"SEBI orders on record ({severity}): {g.sebi_orders}")
+            if severity == "minor":
+                flags.append(
+                    f"[EC-14: MINOR REGULATORY OVERHANG — {g.sebi_orders}; "
+                    "proceed with caution, noted in risk section]"
+                )
+                return 2
+            elif severity == "moderate":
+                flags.append(
+                    f"[EC-14: MODERATE REGULATORY OVERHANG — {g.sebi_orders}; "
+                    "reduce allocation by 50% if recommendation proceeds to BUY]"
+                )
+                return 1
+            else:  # major / fraud
+                flags.append(
+                    f"[EC-14: {severity.upper()} REGULATORY ISSUE — {g.sebi_orders}; "
+                    "pipeline terminated]"
+                )
+                return 0
         elif not g.sebi_record_clean:
             # Enrichment ran but expressed doubt without finding specific orders.
             # This is a data quality gap (model uncertainty), not confirmed fraud.

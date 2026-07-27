@@ -120,6 +120,137 @@ async def test_sebi_fraud_investigation_triggers_fail():
 
 
 # ---------------------------------------------------------------------------
+# EC-14: SEBI severity tiers
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sebi_severity_major_triggers_fail():
+    """Explicit 'major' severity → immediate REJECT, same as before EC-14."""
+    gov = GovernanceData(
+        promoter_holding_pct=50.0,
+        promoter_pledging_pct=0.0,
+        auditor_name="Deloitte",
+        sebi_record_clean=False,
+        sebi_orders=["SEBI fraud investigation opened FY24"],
+        sebi_severity="major",
+        rpt_pct_revenue=5.0,
+        capital_allocation_description="Good.",
+    )
+    state = AnalysisState(ticker="SEBIMAJOR")
+    state.quote = SAMPLE_QUOTE
+    state.governance_data = gov
+
+    step = make_step(capital_alloc_score=3)
+    state = await step.run(state)
+
+    assert state.governance.gate == GateResult.FAIL
+    assert "active_sebi_ed_fraud_investigation" in state.governance.immediate_triggers
+
+
+@pytest.mark.asyncio
+async def test_sebi_severity_fraud_triggers_fail():
+    """Explicit 'fraud' severity (ED/CBI) → immediate REJECT."""
+    gov = GovernanceData(
+        promoter_holding_pct=50.0,
+        promoter_pledging_pct=0.0,
+        auditor_name="Deloitte",
+        sebi_record_clean=False,
+        sebi_orders=["ED investigation — alleged fund siphoning"],
+        sebi_severity="fraud",
+        rpt_pct_revenue=5.0,
+        capital_allocation_description="Good.",
+    )
+    state = AnalysisState(ticker="SEBIFRAUD")
+    state.quote = SAMPLE_QUOTE
+    state.governance_data = gov
+
+    step = make_step(capital_alloc_score=3)
+    state = await step.run(state)
+
+    assert state.governance.gate == GateResult.FAIL
+
+
+@pytest.mark.asyncio
+async def test_sebi_severity_minor_does_not_reject():
+    """'minor' severity (small tax dispute) → does NOT trigger REJECT; score 2."""
+    gov = GovernanceData(
+        promoter_holding_pct=50.0,
+        promoter_pledging_pct=0.0,
+        auditor_name="Deloitte",
+        sebi_record_clean=False,
+        sebi_orders=["Minor tax dispute, 3% of net worth"],
+        sebi_severity="minor",
+        sebi_record_checked=True,  # simulates enrichment having already confirmed this
+        rpt_pct_revenue=5.0,
+        capital_allocation_description="Good.",
+    )
+    state = AnalysisState(ticker="SEBIMINOR")
+    state.quote = SAMPLE_QUOTE
+    state.governance_data = gov
+
+    step = make_step(capital_alloc_score=3)
+    state = await step.run(state)
+
+    assert "active_sebi_ed_fraud_investigation" not in state.governance.immediate_triggers
+    assert state.governance.sub_scores["regulatory"] == 2
+    assert any("EC-14: MINOR" in f for f in state.governance.data_flags)
+
+
+@pytest.mark.asyncio
+async def test_sebi_severity_moderate_does_not_reject_and_flags_allocation_cut():
+    """'moderate' severity → does NOT trigger REJECT; score 1; flags 50% allocation cut."""
+    gov = GovernanceData(
+        promoter_holding_pct=50.0,
+        promoter_pledging_pct=0.0,
+        auditor_name="Deloitte",
+        sebi_record_clean=False,
+        sebi_orders=["SEBI technical violation notice, pending 8 months"],
+        sebi_severity="moderate",
+        sebi_record_checked=True,  # simulates enrichment having already confirmed this
+        rpt_pct_revenue=5.0,
+        capital_allocation_description="Good.",
+    )
+    state = AnalysisState(ticker="SEBIMOD")
+    state.quote = SAMPLE_QUOTE
+    state.governance_data = gov
+
+    step = make_step(capital_alloc_score=3)
+    state = await step.run(state)
+
+    assert "active_sebi_ed_fraud_investigation" not in state.governance.immediate_triggers
+    assert state.governance.sub_scores["regulatory"] == 1
+    assert any("EC-14: MODERATE" in f and "50%" in f for f in state.governance.data_flags)
+
+
+@pytest.mark.asyncio
+async def test_sebi_severity_unclassified_defaults_to_major_conservative():
+    """Orders present but severity unclassified (None) → conservative default REJECT.
+
+    A false REJECT is cheaper than capital lost to an unclassified fraud signal.
+    """
+    gov = GovernanceData(
+        promoter_holding_pct=50.0,
+        promoter_pledging_pct=0.0,
+        auditor_name="Deloitte",
+        sebi_record_clean=False,
+        sebi_orders=["Some SEBI order — severity not determined by enrichment"],
+        sebi_severity=None,
+        rpt_pct_revenue=5.0,
+        capital_allocation_description="Good.",
+    )
+    state = AnalysisState(ticker="SEBIUNCLASSIFIED")
+    state.quote = SAMPLE_QUOTE
+    state.governance_data = gov
+
+    step = make_step(capital_alloc_score=3)
+    state = await step.run(state)
+
+    assert state.governance.gate == GateResult.FAIL
+    assert "active_sebi_ed_fraud_investigation" in state.governance.immediate_triggers
+
+
+# ---------------------------------------------------------------------------
 # Score thresholds
 # ---------------------------------------------------------------------------
 
@@ -232,9 +363,114 @@ async def test_pledging_trend_increasing_adds_concern():
     step = make_step(capital_alloc_score=2)
     state = await step.run(state)
 
-    # Should still pass (pledging 4% → score 2), but concern should mention trend
+    # pledging 4% → base score 2, minus 1 for increasing trend → 1
     assert state.governance is not None
     assert any("increasing" in c.lower() or "INCREASING" in c for c in state.governance.concerns)
+    assert state.governance.sub_scores["pledging"] == 1
+
+
+@pytest.mark.asyncio
+async def test_pledging_trend_stable_no_score_penalty():
+    """Stable trend at the same absolute pledging % → no deduction."""
+    gov = GovernanceData(
+        promoter_holding_pct=52.0,
+        promoter_pledging_pct=4.0,
+        promoter_pledging_trend=[4.0, 4.0, 4.0, 4.0],
+        pledging_trend_direction="stable",
+        auditor_name="Price Waterhouse",
+        audit_qualifications=[],
+        rpt_pct_revenue=5.0,
+        sebi_record_clean=True,
+        sebi_orders=[],
+        capital_allocation_description="Good track record.",
+    )
+    state = AnalysisState(ticker="STABLETEST")
+    state.quote = SAMPLE_QUOTE
+    state.governance_data = gov
+
+    step = make_step(capital_alloc_score=2)
+    state = await step.run(state)
+
+    assert state.governance.sub_scores["pledging"] == 2  # no penalty
+
+
+@pytest.mark.asyncio
+async def test_pledging_trend_increasing_at_zero_pct_no_penalty():
+    """Increasing trend with current pledging at exactly 0% → no deduction (nothing to worsen)."""
+    gov = GovernanceData(
+        promoter_holding_pct=52.0,
+        promoter_pledging_pct=0.0,
+        pledging_trend_direction="increasing",
+        auditor_name="Price Waterhouse",
+        audit_qualifications=[],
+        rpt_pct_revenue=5.0,
+        sebi_record_clean=True,
+        sebi_orders=[],
+        capital_allocation_description="Good track record.",
+    )
+    state = AnalysisState(ticker="ZEROTEST")
+    state.quote = SAMPLE_QUOTE
+    state.governance_data = gov
+
+    step = make_step(capital_alloc_score=2)
+    state = await step.run(state)
+
+    assert state.governance.sub_scores["pledging"] == 3  # no penalty at 0%
+
+
+# ---------------------------------------------------------------------------
+# Auditor change frequency
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_auditor_changed_3y_deducts_one_point():
+    """A non-resignation auditor change in the last 3 years costs 1 audit point."""
+    gov = GovernanceData(
+        promoter_holding_pct=52.0,
+        promoter_pledging_pct=0.0,
+        auditor_name="Price Waterhouse",  # reputed → base 3
+        auditor_changed_3y=True,
+        audit_qualifications=[],  # no resignation language — routine change
+        rpt_pct_revenue=5.0,
+        sebi_record_clean=True,
+        sebi_orders=[],
+        capital_allocation_description="Good track record.",
+    )
+    state = AnalysisState(ticker="AUDITCHANGE")
+    state.quote = SAMPLE_QUOTE
+    state.governance_data = gov
+
+    step = make_step(capital_alloc_score=2)
+    state = await step.run(state)
+
+    assert state.governance.sub_scores["audit"] == 2  # 3 - 1
+    assert any("auditor changed" in c.lower() for c in state.governance.concerns)
+
+
+@pytest.mark.asyncio
+async def test_auditor_unchanged_no_penalty():
+    """No auditor change in 3 years → full audit score, no concern."""
+    gov = GovernanceData(
+        promoter_holding_pct=52.0,
+        promoter_pledging_pct=0.0,
+        auditor_name="Price Waterhouse",
+        auditor_changed_3y=False,
+        audit_qualifications=[],
+        rpt_pct_revenue=5.0,
+        sebi_record_clean=True,
+        sebi_orders=[],
+        capital_allocation_description="Good track record.",
+    )
+    state = AnalysisState(ticker="AUDITSTABLE")
+    state.quote = SAMPLE_QUOTE
+    state.governance_data = gov
+
+    step = make_step(capital_alloc_score=2)
+    state = await step.run(state)
+
+    assert state.governance.sub_scores["audit"] == 3
+    assert not any("auditor changed" in c.lower() for c in state.governance.concerns)
 
 
 @pytest.mark.asyncio

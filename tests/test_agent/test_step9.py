@@ -119,6 +119,45 @@ def _buy_state() -> AnalysisState:
     return AnalysisState(ticker="GOODCO", recommendation_type="BUY")
 
 
+# ---------------------------------------------------------------------------
+# EC-14: moderate regulatory overhang halves allocation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ec14_moderate_flag_halves_value_mode_allocation():
+    """EC-14 MODERATE flag on a value-mode BUY halves the conviction-based allocation."""
+    state = _buy_state()  # empty gates → LOW conviction → base 2.0%
+    state.add_flag("[EC-14: MODERATE REGULATORY OVERHANG — some order; reduce allocation by 50%]")
+    step = Step9Output(_thesis_claude(), {})
+    state = await step.run(state)
+
+    assert state.suggested_allocation_pct == pytest.approx(1.0)
+    assert any("EC-14: allocation cut" in f for f in state.all_data_flags)
+
+
+@pytest.mark.asyncio
+async def test_ec14_minor_flag_does_not_halve_allocation():
+    """EC-14 MINOR (not MODERATE) must not trigger the allocation cut."""
+    state = _buy_state()
+    state.add_flag("[EC-14: MINOR REGULATORY OVERHANG — small tax dispute]")
+    step = Step9Output(_thesis_claude(), {})
+    state = await step.run(state)
+
+    assert state.suggested_allocation_pct == pytest.approx(2.0)
+
+
+@pytest.mark.asyncio
+async def test_ec14_moderate_flag_halves_growth_mode_allocation():
+    """EC-14 MODERATE also applies on the growth-mode conviction path."""
+    state = _growth_state(rtype="GROWTH_BUY", moat_durability="High", rev_1y=42.0, rev_3y=35.0, roiic=30.0)
+    state.add_flag("[EC-14: MODERATE REGULATORY OVERHANG — some order; reduce allocation by 50%]")
+    step = Step9Output(_refusing_claude(), {})
+    state = await step.run(state)
+
+    assert state.suggested_allocation_pct == pytest.approx(0.75)  # 1.5% HIGH GROWTH_BUY halved
+
+
 @pytest.mark.asyncio
 async def test_high_volatility_halves_allocation():
     # Empty gate scores → LOW conviction → base allocation 2.0%

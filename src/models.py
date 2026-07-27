@@ -149,12 +149,18 @@ class GovernanceData(BaseModel):
     promoter_pledging_pct: float | None = None
     promoter_pledging_trend: list[float] = Field(default_factory=list)  # last 8 quarters
     pledging_trend_direction: str | None = None  # "increasing", "decreasing", "stable"
+    # Chronological (oldest→latest) promoter holding % across the same BSE filing
+    # quarters as promoter_pledging_trend — populated alongside it, not derived.
+    promoter_holding_trend: list[float] = Field(default_factory=list)
     auditor_name: str | None = None
     auditor_changed_3y: bool = False
     audit_qualifications: list[str] = Field(default_factory=list)
     rpt_pct_revenue: float | None = None
     contingent_liabilities_pct_networth: float | None = None
     sebi_orders: list[str] = Field(default_factory=list)
+    # EC-14: severity tier for sebi_orders, classified by governance enrichment.
+    # "minor" | "moderate" | "major" | "fraud" | None (unclassified — orders may still be empty).
+    sebi_severity: str | None = None
     # Default False — assume dirty until enrichment confirms clean (Bug 1.5 fix).
     # A company whose SEBI data was never fetched must NOT get credit for a clean record.
     sebi_record_clean: bool = False

@@ -179,6 +179,42 @@ async def test_happy_path_buy_recommendation(mock_pipeline_env):
 
 
 @pytest.mark.asyncio
+async def test_governance_snapshot_resaved_after_step1(mock_pipeline_env):
+    """Step 1 completion re-saves the governance snapshot with enriched data.
+
+    The snapshot saved during _prefetch_data only has BSE/Screener shareholding
+    fields; Step 1's capital-allocation/audit/RPT enrichment happens after that
+    save, so without a re-save those fields would never reach data_snapshots.
+    """
+    from unittest.mock import patch
+
+    env = mock_pipeline_env
+    pipeline = InvestmentPipeline.__new__(InvestmentPipeline)
+    pipeline.claude = env["claude"]
+    pipeline.nse = env["nse"]
+    pipeline.screener = env["screener"]
+    pipeline.bse = env["bse"]
+    pipeline.trendlyne = env["trendlyne"]
+    pipeline.yfinance = env["yfinance"]
+    from src.logging_config import get_logger
+    pipeline.log = get_logger("pipeline_test")
+
+    with patch("src.db.repository.save_snapshot", new=AsyncMock()) as mock_save:
+        state = await pipeline.analyze("RELIANCE")
+
+    governance_calls = [
+        c for c in mock_save.call_args_list if c.args[3] == "governance"
+    ]
+    assert governance_calls, "expected at least one governance snapshot save"
+    # The post-Step-1 re-save uses the "step1_enriched" source and happens
+    # after the pre-Step-1 save from _prefetch_data — so there should be 2 calls.
+    assert len(governance_calls) == 2
+    sources = [c.args[5] for c in governance_calls]
+    assert "step1_enriched" in sources
+    assert state.recommendation_type == "BUY"
+
+
+@pytest.mark.asyncio
 async def test_step1_governance_fail_terminates_with_rejection(mock_pipeline_env):
     """Bad governance → Step 1 FAIL → pipeline terminates → REJECTION_LOG output."""
     env = mock_pipeline_env

@@ -2056,7 +2056,7 @@ def backtest_cmd(min_age_days: int, ticker: str | None) -> None:
       investor backtest --min-age-days 180
       investor backtest --ticker RELIANCE
     """
-    from src.backtest.engine import run_backtest, summarize
+    from src.backtest.engine import run_backtest, summarize, summarize_by_governance
 
     if ticker:
         ticker = _validate_ticker(ticker)
@@ -2114,11 +2114,62 @@ def backtest_cmd(min_age_days: int, ticker: str | None) -> None:
 
     console.print(table)
     console.print(
-        "[dim]Deterministic replay only (Steps 0/3/5): governance/moat LLM judgments are "
+        "[dim]Deterministic replay only (Steps 0/3/5): moat (Step 2) LLM judgment is "
         "not re-run, and market mode defaults to NORMAL. Win rate = % of samples with a "
         "positive absolute return; 'vs Nifty' compares each sample to the index over its "
         "own holding window.[/dim]"
     )
+
+    gov_rows = summarize_by_governance(samples)
+    if gov_rows:
+        gov_colours = {
+            "GOV_HIGH": "green",
+            "GOV_MEDIUM": "yellow",
+            "GOV_LOW": "red",
+            "GOV_HARD_TRIGGER": "bright_red",
+        }
+        gov_table = Table(
+            title="Backtest — Governance buckets (Step 1 deterministic replay)",
+            show_header=True,
+            header_style="bold cyan",
+        )
+        gov_table.add_column("Governance bucket", style="bold")
+        gov_table.add_column("Samples", justify="right")
+        gov_table.add_column("Priced", justify="right")
+        gov_table.add_column("Median Fwd %", justify="right")
+        gov_table.add_column("Mean Fwd %", justify="right")
+        gov_table.add_column("Win Rate", justify="right")
+        gov_table.add_column("Median vs Nifty", justify="right")
+        gov_table.add_column("Avg Days", justify="right")
+
+        for r in gov_rows:
+            colour = gov_colours.get(r["governance_bucket"], "white")
+            gov_table.add_row(
+                f"[{colour}]{r['governance_bucket']}[/{colour}]",
+                str(r["samples"]),
+                str(r["priced"]),
+                _fmt(r["median_return_pct"]),
+                _fmt(r["mean_return_pct"]),
+                f"{r['win_rate_pct']:.0f}%" if r["win_rate_pct"] is not None else "[dim]N/A[/dim]",
+                _fmt(r["median_excess_pct"]),
+                str(r["avg_holding_days"]),
+            )
+
+        console.print(gov_table)
+        console.print(
+            "[dim]Governance score replays Step 1's 4 deterministic sub-scores "
+            "(pledging, audit, RPT, regulatory — 12 pts max; capital allocation is "
+            "LLM-only and excluded). GOV_HARD_TRIGGER = would have REJECTed at Step 1. "
+            "If the pipeline's governance-first philosophy holds, GOV_HIGH should beat "
+            "GOV_LOW/GOV_HARD_TRIGGER by more than VALUATION_GREEN beats VALUATION_FAIL "
+            "above.[/dim]"
+        )
+    else:
+        console.print(
+            "[dim]No governance snapshots available for replay — governance bucket "
+            "table skipped. Snapshots need the post-Step-1 enrichment re-save "
+            "(added after this feature); older snapshots won't have it.[/dim]"
+        )
 
 
 # ---------------------------------------------------------------------------

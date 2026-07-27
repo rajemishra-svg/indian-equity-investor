@@ -2,18 +2,28 @@
 
 Every analysis and scan stores point-in-time raw data in ``data_snapshots``.
 This engine replays those snapshots through the deterministic steps
-(0 pre-screen, 3 financials, 5 valuation — zero LLM calls, zero API cost
-beyond two price lookups) to reproduce the verdict the pipeline *would* have
-given on that date, then measures the forward price return to today and the
-excess over the Nifty 50 across the same window.
+(0 pre-screen, 3 financials, 5 valuation, plus Step 1's deterministic governance
+sub-scores — zero LLM calls, zero API cost beyond two price lookups) to
+reproduce the verdict the pipeline *would* have given on that date, then
+measures the forward price return to today and the excess over the Nifty 50
+across the same window.
 
 If the gates carry signal, VALUATION_GREEN samples should outperform
-VALUATION_FAIL / REJECT buckets and the index.  Where they don't, the
-thresholds (pre-screen cut-off, MoS bands, WACC) deserve re-tuning.
+VALUATION_FAIL / REJECT buckets and the index — and, per the pipeline's own
+"Governance > Business Quality > Financials > Valuation" hierarchy, GOV_HIGH
+samples should outperform GOV_LOW / GOV_HARD_TRIGGER even more decisively.
+Where they don't, the thresholds (pre-screen cut-off, MoS bands, WACC,
+governance sub-score weights) deserve re-tuning.
 
 Known limitations (deterministic replay only):
-- Governance (Step 1) and moat (Step 2) LLM judgments are not replayed; the
-  deterministic governance *data* still feeds the Step 0 promoter checks.
+- Governance's one LLM-scored sub-component (capital allocation, 0-3 of 15
+  points) is not replayed — only the four deterministic sub-scores (pledging,
+  audit, RPT, regulatory; 12 points max) and the immediate hard triggers.
+  Moat (Step 2) is entirely LLM judgment and is not replayed at all.
+- Governance replay needs the *enriched* snapshot (auditor/RPT/SEBI fields
+  populated by Step 1's research loop, not just BSE/Screener shareholding
+  data). Snapshots taken before this enrichment re-save was added will
+  mostly fall back to Step 1's own conservative defaults for those fields.
 - Market mode defaults to NORMAL — historical Nifty drawdown state is not
   reconstructed, so required-MoS uses the normal-mode bands.
 """
@@ -26,6 +36,7 @@ from datetime import date, timedelta
 from statistics import mean, median
 
 from src.agent.steps.step0_prescreen import Step0PreScreen
+from src.agent.steps.step1_governance import IMMEDIATE_TRIGGER_CHECKS, Step1Governance
 from src.agent.steps.step3_financials import Step3Financials
 from src.agent.steps.step5_valuation import Step5Valuation
 from src.db.repository import get_snapshot_groups_before
@@ -60,6 +71,56 @@ _GATE_TO_VERDICT = {
     GateResult.FAIL: "VALUATION_FAIL",
 }
 
+# Governance bucket order: best expected bucket first. Max deterministic
+# score is 12 (pledging 0-3, audit 0-3, RPT 0-3, regulatory 0-3) — the
+# capital-allocation sub-score (0-3, LLM-only) is excluded from replay.
+GOVERNANCE_ORDER = ["GOV_HIGH", "GOV_MEDIUM", "GOV_LOW", "GOV_HARD_TRIGGER"]
+
+
+def _governance_bucket(score: int | None, hard_trigger: bool) -> str | None:
+    """Bucket a replayed governance score, or None if governance data was absent."""
+    if hard_trigger:
+        return "GOV_HARD_TRIGGER"
+    if score is None:
+        return None
+    if score >= 9:
+        return "GOV_HIGH"
+    elif score >= 6:
+        return "GOV_MEDIUM"
+    else:
+        return "GOV_LOW"
+
+
+def _replay_governance(g: GovernanceData | None) -> tuple[int | None, bool]:
+    """Replay Step 1's deterministic sub-scores and hard triggers.
+
+    Returns (score_0_to_12_or_None, hard_trigger_fired). Uses the same pure
+    methods Step 1 itself calls — capital_allocation (LLM-only) is excluded.
+    """
+    if g is None:
+        return None, False
+
+    step1 = Step1Governance(None, {})  # type: ignore[arg-type] — pure sub-scorers only, no Claude call
+    flags: list[str] = []
+    concerns: list[str] = []
+    score = (
+        step1._score_pledging(g, flags, concerns)
+        + step1._score_audit(g, flags, concerns)
+        + step1._score_rpt(g, flags)
+        + step1._score_regulatory(g, flags, concerns)
+    )
+
+    hard_trigger = False
+    for _name, checker in IMMEDIATE_TRIGGER_CHECKS:
+        try:
+            if checker(g):
+                hard_trigger = True
+                break
+        except Exception:
+            pass
+
+    return score, hard_trigger
+
 
 @dataclass
 class BacktestSample:
@@ -76,6 +137,10 @@ class BacktestSample:
     fwd_return_pct: float | None = None
     nifty_return_pct: float | None = None
     excess_return_pct: float | None = None
+    # Governance replay (Step 1 deterministic sub-scores only — see module docstring)
+    governance_score: int | None = None       # 0-12, or None when no governance snapshot
+    governance_hard_trigger: bool = False
+    governance_bucket: str | None = None      # one of GOVERNANCE_ORDER, or None if unscored
 
 
 async def replay_group(group: dict) -> BacktestSample | None:
@@ -118,6 +183,9 @@ async def replay_group(group: dict) -> BacktestSample | None:
         company_name=state.company_name or "", ticker=state.ticker
     )
 
+    gov_score, gov_hard_trigger = _replay_governance(state.governance_data)
+    gov_bucket = _governance_bucket(gov_score, gov_hard_trigger)
+
     # Deterministic gates only — claude client is never touched by these steps.
     state = await Step0PreScreen(None, {}).run(state)  # type: ignore[arg-type]
     if state.is_terminated:
@@ -139,6 +207,9 @@ async def replay_group(group: dict) -> BacktestSample | None:
         mos_pct=state.valuation.margin_of_safety_pct if state.valuation else None,
         start_price=quote.cmp,
         holding_days=(date.today() - date.fromisoformat(group["snapshot_date"])).days,
+        governance_score=gov_score,
+        governance_hard_trigger=gov_hard_trigger,
+        governance_bucket=gov_bucket,
     )
 
 
@@ -235,6 +306,42 @@ def summarize(samples: list[BacktestSample]) -> list[dict]:
         rows.append(
             {
                 "verdict": verdict,
+                "samples": len(bucket),
+                "priced": len(returns),
+                "median_return_pct": round(median(returns), 2) if returns else None,
+                "mean_return_pct": round(mean(returns), 2) if returns else None,
+                "win_rate_pct": (
+                    round(100 * sum(1 for r in returns if r > 0) / len(returns), 1)
+                    if returns
+                    else None
+                ),
+                "median_excess_pct": round(median(excess), 2) if excess else None,
+                "avg_holding_days": round(mean(s.holding_days for s in bucket)),
+            }
+        )
+    return rows
+
+
+def summarize_by_governance(samples: list[BacktestSample]) -> list[dict]:
+    """Aggregate samples per governance bucket, in GOVERNANCE_ORDER.
+
+    Tests the pipeline's own "Governance > Business Quality > Financials >
+    Valuation" hierarchy directly: if governance carries the signal the
+    philosophy claims, GOV_HIGH should beat GOV_LOW / GOV_HARD_TRIGGER by a
+    wider margin than the valuation buckets in ``summarize`` beat each other.
+    Samples with no governance snapshot (governance_bucket is None) are
+    excluded — they carry no information either way.
+    """
+    rows: list[dict] = []
+    for bucket_name in GOVERNANCE_ORDER:
+        bucket = [s for s in samples if s.governance_bucket == bucket_name]
+        if not bucket:
+            continue
+        returns = [s.fwd_return_pct for s in bucket if s.fwd_return_pct is not None]
+        excess = [s.excess_return_pct for s in bucket if s.excess_return_pct is not None]
+        rows.append(
+            {
+                "governance_bucket": bucket_name,
                 "samples": len(bucket),
                 "priced": len(returns),
                 "median_return_pct": round(median(returns), 2) if returns else None,
