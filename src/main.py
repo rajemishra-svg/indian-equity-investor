@@ -121,7 +121,13 @@ def _save_report(ticker: str, state: AnalysisState) -> None:
     help="Show individual purchase lots instead of per-ticker totals.",
 )
 def portfolio(user_id: str | None, lots: bool) -> None:
-    """Show current portfolio holdings — per-ticker totals, or raw lots with --lots."""
+    """Show current portfolio holdings — per-ticker totals, or raw lots with --lots.
+
+    Allocation % is computed live from current market value (quantity × live CMP),
+    not the --allocation value recorded at buy time — that field captures what you
+    intended a purchase to represent, but the actual weight of a position drifts
+    with price, so this shows what your portfolio looks like right now.
+    """
     tracker = PortfolioTracker(user_id=user_id)
     holdings = asyncio.run(tracker.get_holdings())
 
@@ -129,7 +135,30 @@ def portfolio(user_id: str | None, lots: bool) -> None:
         console.print(f"[yellow]No holdings found for user '{tracker.user_id}'.[/yellow]")
         return
 
-    total_alloc = 0.0
+    async def _fetch_prices(tickers: list[str]) -> dict[str, float | None]:
+        from src.api.yfinance_client import YFinanceClient
+
+        async with YFinanceClient() as yf_client:
+            out: dict[str, float | None] = {}
+            for t in tickers:
+                quote = await yf_client.get_stock_quote(t)
+                out[t] = quote.cmp if quote else None
+        return out
+
+    distinct_tickers = sorted({h["ticker"] for h in holdings})
+    with console.status("[bold green]Fetching live prices...[/bold green]"):
+        live_prices = asyncio.run(_fetch_prices(distinct_tickers))
+
+    stale_tickers = sorted(t for t in distinct_tickers if live_prices.get(t) is None)
+
+    def _mkt_value(h: dict) -> float:
+        # Fall back to cost basis when a live quote is unavailable so the holding
+        # still counts toward the total instead of silently vanishing from it —
+        # its allocation % is then an estimate, flagged via stale_tickers below.
+        price = live_prices.get(h["ticker"]) or h["avg_cost"]
+        return price * h["quantity"]
+
+    total_value = sum(_mkt_value(h) for h in holdings)
 
     if lots:
         table = Table(
@@ -142,18 +171,25 @@ def portfolio(user_id: str | None, lots: bool) -> None:
         table.add_column("Lot Cost", justify="right")
         table.add_column("Qty", justify="right")
         table.add_column("Purchase Date")
+        table.add_column("Live CMP", justify="right")
+        table.add_column("Mkt Value", justify="right")
         table.add_column("Allocation %", justify="right")
 
         for h in holdings:
+            live = live_prices.get(h["ticker"])
+            mkt_value = _mkt_value(h)
+            alloc_pct = (mkt_value / total_value * 100) if total_value else 0.0
+            live_str = f"₹{live:.2f}" if live is not None else "[dim]N/A[/dim]"
             table.add_row(
                 h["ticker"],
                 h.get("company_name", ""),
                 f"₹{h['avg_cost']:.2f}",
                 str(h["quantity"]),
                 h.get("purchase_date", ""),
-                f"{h['allocation_pct']:.1f}%",
+                live_str,
+                f"₹{mkt_value:,.2f}",
+                f"{alloc_pct:.1f}%",
             )
-            total_alloc += h["allocation_pct"]
     else:
         # Per-ticker rollup: quantity-weighted average cost across FIFO lots
         agg: dict[str, dict] = {}
@@ -166,16 +202,16 @@ def portfolio(user_id: str | None, lots: bool) -> None:
                     "cost": 0.0,
                     "lots": 0,
                     "first_buy": h.get("purchase_date", ""),
-                    "alloc": 0.0,
+                    "mkt_value": 0.0,
                 },
             )
             entry["qty"] += h["quantity"]
             entry["cost"] += h["avg_cost"] * h["quantity"]
             entry["lots"] += 1
+            entry["mkt_value"] += _mkt_value(h)
             first = h.get("purchase_date", "")
             if first and (not entry["first_buy"] or first < entry["first_buy"]):
                 entry["first_buy"] = first
-            entry["alloc"] += h["allocation_pct"]
 
         table = Table(
             title="Portfolio Holdings — per ticker (use --lots for purchase lots)",
@@ -188,11 +224,16 @@ def portfolio(user_id: str | None, lots: bool) -> None:
         table.add_column("Total Qty", justify="right")
         table.add_column("W.Avg Cost", justify="right")
         table.add_column("First Buy")
+        table.add_column("Live CMP", justify="right")
+        table.add_column("Mkt Value", justify="right")
         table.add_column("Allocation %", justify="right")
 
         for ticker in sorted(agg):
             entry = agg[ticker]
             w_avg = entry["cost"] / entry["qty"] if entry["qty"] else 0.0
+            live = live_prices.get(ticker)
+            alloc_pct = (entry["mkt_value"] / total_value * 100) if total_value else 0.0
+            live_str = f"₹{live:.2f}" if live is not None else "[dim]N/A[/dim]"
             table.add_row(
                 ticker,
                 entry["company"],
@@ -200,12 +241,18 @@ def portfolio(user_id: str | None, lots: bool) -> None:
                 str(entry["qty"]),
                 f"₹{w_avg:.2f}",
                 entry["first_buy"],
-                f"{entry['alloc']:.1f}%",
+                live_str,
+                f"₹{entry['mkt_value']:,.2f}",
+                f"{alloc_pct:.1f}%",
             )
-            total_alloc += entry["alloc"]
 
     console.print(table)
-    console.print(f"\n[bold]Total Allocation: {total_alloc:.1f}%[/bold]")
+    console.print(f"\n[bold]Total Portfolio Value: ₹{total_value:,.2f}[/bold]  (100.0% across all holdings)")
+    if stale_tickers:
+        console.print(
+            f"[dim]Live price unavailable for {', '.join(stale_tickers)} — "
+            "valued at cost basis instead; allocation % for these is an estimate.[/dim]"
+        )
 
 
 # ---------------------------------------------------------------------------
