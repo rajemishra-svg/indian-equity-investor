@@ -10,7 +10,7 @@ from typing import Any
 import anthropic
 from tenacity import (
     retry,
-    retry_if_exception_type,
+    retry_if_exception,
     stop_after_attempt,
     wait_exponential,
 )
@@ -119,7 +119,7 @@ class BaseStep(ABC):
             kwargs["tools"] = tools
 
         @retry(
-            retry=retry_if_exception_type(_is_retryable_anthropic_error),
+            retry=retry_if_exception(_is_retryable_anthropic_error),
             stop=stop_after_attempt(3),
             wait=wait_exponential(multiplier=1, min=5, max=60),
             reraise=True,
@@ -196,7 +196,7 @@ class BaseStep(ABC):
         self._last_loop_hit_max = False
 
         @retry(
-            retry=retry_if_exception_type(_is_retryable_anthropic_error),
+            retry=retry_if_exception(_is_retryable_anthropic_error),
             stop=stop_after_attempt(3),
             wait=wait_exponential(multiplier=1, min=5, max=60),
             reraise=True,
