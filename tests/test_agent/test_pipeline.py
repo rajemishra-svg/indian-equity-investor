@@ -72,8 +72,8 @@ def _make_peer_identify_response():
     """Step 7 identification call — Claude only names peers; metrics come from clients."""
     data = {
         "peers": [
-            {"ticker": "ONGC", "name": "Oil and Natural Gas Corporation"},
-            {"ticker": "IOC", "name": "Indian Oil Corporation"},
+            {"ticker": "ONGC", "name": "Oil and Natural Gas Corporation", "same_industry_confirmed": True},
+            {"ticker": "IOC", "name": "Indian Oil Corporation", "same_industry_confirmed": True},
         ]
     }
     return _make_claude_text_response(json.dumps(data))

@@ -71,8 +71,8 @@ def _target_state(rev=8.0, pat=7.0, roe=12.0, roce=13.0, de=1.0, pe=40.0) -> Ana
 
 _TWO_PEER_IDENTIFY = {
     "peers": [
-        {"ticker": "DOMPEER", "name": "Dominant Peer Ltd"},
-        {"ticker": "WEAKPEER", "name": "Weak Peer Ltd"},
+        {"ticker": "DOMPEER", "name": "Dominant Peer Ltd", "same_industry_confirmed": True},
+        {"ticker": "WEAKPEER", "name": "Weak Peer Ltd", "same_industry_confirmed": True},
     ]
 }
 
@@ -208,11 +208,11 @@ async def test_all_peer_fetches_failing_falls_back_conditional():
 async def test_identify_peers_filters_invalid_and_duplicate_tickers():
     payload = {
         "peers": [
-            {"ticker": "TARGET", "name": "Target Industries"},       # the target itself
-            {"ticker": "goodco", "name": "Good Co"},                  # lowercase → normalised
-            {"ticker": "GOODCO", "name": "Good Co dup"},              # duplicate
-            {"ticker": "BAD TICKER!", "name": "Invalid symbol"},      # invalid chars
-            {"ticker": "M&M", "name": "Mahindra & Mahindra"},         # & is legal
+            {"ticker": "TARGET", "name": "Target Industries", "same_industry_confirmed": True},  # the target itself
+            {"ticker": "goodco", "name": "Good Co", "same_industry_confirmed": True},  # lowercase → normalised
+            {"ticker": "GOODCO", "name": "Good Co dup", "same_industry_confirmed": True},  # duplicate
+            {"ticker": "BAD TICKER!", "name": "Invalid symbol", "same_industry_confirmed": True},  # invalid chars
+            {"ticker": "M&M", "name": "Mahindra & Mahindra", "same_industry_confirmed": True},  # & is legal
             "not-a-dict",
         ]
     }
@@ -220,3 +220,93 @@ async def test_identify_peers_filters_invalid_and_duplicate_tickers():
     idents = await step._identify_peers(_target_state())
 
     assert idents == [("GOODCO", "Good Co"), ("M&M", "Mahindra & Mahindra")]
+
+
+# ---------------------------------------------------------------------------
+# Sector-consistency filter (same_industry_confirmed)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_identify_peers_drops_unconfirmed_same_industry():
+    """A peer explicitly marked same_industry_confirmed=false is dropped.
+
+    Regression test for the SUNPHARMA case: peer identification named INFY
+    (then JYOTHYLAB on a later run) alongside genuine pharma peers, and since
+    the dominance test has no other sector-consistency check, the off-sector
+    company's structurally different ROE/ROCE/leverage let it spuriously
+    "dominate" and fire a false PEER_SWITCH.
+    """
+    payload = {
+        "peers": [
+            {"ticker": "REALPEER", "name": "Real Peer Pharma", "same_industry_confirmed": True},
+            {"ticker": "OFFSECTOR", "name": "Unrelated IT Co", "same_industry_confirmed": False},
+        ]
+    }
+    step = Step7Peers(_mock_claude(payload), _make_clients({}, {}))
+    idents = await step._identify_peers(_target_state())
+
+    assert idents == [("REALPEER", "Real Peer Pharma")]
+
+
+@pytest.mark.asyncio
+async def test_identify_peers_drops_missing_same_industry_field():
+    """A peer with no same_industry_confirmed field at all is dropped (conservative default)."""
+    payload = {
+        "peers": [
+            {"ticker": "CONFIRMED", "name": "Confirmed Peer", "same_industry_confirmed": True},
+            {"ticker": "UNCONFIRMED", "name": "No Confirmation Field"},
+        ]
+    }
+    step = Step7Peers(_mock_claude(payload), _make_clients({}, {}))
+    idents = await step._identify_peers(_target_state())
+
+    assert idents == [("CONFIRMED", "Confirmed Peer")]
+
+
+@pytest.mark.asyncio
+async def test_identify_peers_drops_malformed_same_industry_value():
+    """A non-boolean value (e.g. the string "true") does not count as confirmed."""
+    payload = {
+        "peers": [
+            {"ticker": "CONFIRMED", "name": "Confirmed Peer", "same_industry_confirmed": True},
+            {"ticker": "STRINGTRUE", "name": "String True", "same_industry_confirmed": "true"},
+            {"ticker": "NUMTRUE", "name": "Numeric True", "same_industry_confirmed": 1},
+        ]
+    }
+    step = Step7Peers(_mock_claude(payload), _make_clients({}, {}))
+    idents = await step._identify_peers(_target_state())
+
+    assert idents == [("CONFIRMED", "Confirmed Peer")]
+
+
+@pytest.mark.asyncio
+async def test_off_sector_peer_no_longer_triggers_false_peer_switch():
+    """End-to-end: an unconfirmed cross-sector 'dominant' candidate must not
+    reach the ranking stage at all, so it cannot trigger PEER_SWITCH even
+    though its raw metrics would otherwise dominate the target."""
+    payload = {
+        "peers": [
+            {"ticker": "OFFSECTOR", "name": "Unrelated IT Co", "same_industry_confirmed": False},
+            {"ticker": "REALPEER", "name": "Real Peer Pharma", "same_industry_confirmed": True},
+        ]
+    }
+    clients = _make_clients(
+        financials_by_ticker={
+            # OFFSECTOR would dominate on every metric if it were included.
+            "OFFSECTOR": _fin(20.0, 22.0, 30.0, 32.0, 0.1),
+            "REALPEER": _fin(6.0, 5.0, 9.0, 10.0, 1.8),
+        },
+        valuation_by_ticker={
+            "OFFSECTOR": _val(12.0),
+            "REALPEER": _val(55.0),
+        },
+    )
+    step = Step7Peers(_mock_claude(payload), clients)
+    state = await step.run(_target_state())
+
+    pc = state.peer_comparison
+    assert pc is not None
+    assert pc.dominant_peer != "OFFSECTOR"
+    assert state.recommendation_type != "PEER_SWITCH"
+    assert not any(p.ticker == "OFFSECTOR" for p in pc.peers)

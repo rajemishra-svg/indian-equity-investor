@@ -154,7 +154,19 @@ class Step7Peers(BaseStep):
     # ------------------------------------------------------------------
 
     async def _identify_peers(self, state: AnalysisState) -> list[tuple[str, str]]:
-        """Ask Claude to name 3–5 direct NSE-listed peers. Returns (ticker, name) pairs."""
+        """Ask Claude to name 3–5 direct NSE-listed peers. Returns (ticker, name) pairs.
+
+        Requires the model to self-confirm each peer is in the same primary
+        industry as the target (same_industry_confirmed=true); peers without an
+        explicit confirmation are dropped. This guards against the light model
+        occasionally naming an unrelated large-cap as a "peer" (e.g. an IT services
+        or FMCG company for a pharma manufacturer) despite the instruction above —
+        the deterministic quality/valuation ranking in _rank_and_compare() has no
+        other way to detect a cross-sector company slipping through, and a single
+        such company can spuriously "dominate" on raw ROE/ROCE/P/E and trigger a
+        false PEER_SWITCH, since off-sector businesses often run structurally
+        different margins and leverage than the target's actual industry.
+        """
         system = (
             "You are an Indian equity research analyst. Given a target company "
             "listed on NSE, identify its 3-5 closest DIRECT listed competitors on "
@@ -162,8 +174,15 @@ class Step7Peers(BaseStep):
             "ticker symbols (e.g. TATAMOTORS, M&M, BAJAJ-AUTO). Do NOT include the "
             "target itself, unlisted companies, subsidiaries of the target, or "
             "foreign listings.\n\n"
+            "For EACH peer, set same_industry_confirmed=true ONLY if it operates in "
+            "the exact same primary industry as the target (e.g. both are "
+            "pharmaceutical manufacturers) — being 'both large Indian companies' or "
+            "'both NSE-listed blue chips' does NOT qualify. If you are not fully "
+            "confident a company is a genuine same-industry competitor, set "
+            "same_industry_confirmed=false — do not guess.\n\n"
             "Return ONLY a JSON object, no markdown:\n"
-            '{"peers": [{"ticker": "<NSE symbol>", "name": "<company name>"}]}'
+            '{"peers": [{"ticker": "<NSE symbol>", "name": "<company name>", '
+            '"same_industry_confirmed": <true/false>}]}'
         )
 
         context = [f"Target company: {state.ticker}"]
@@ -207,6 +226,11 @@ class Step7Peers(BaseStep):
                 not _PEER_TICKER_RE.match(ticker)
                 or ticker == state.ticker
                 or ticker in seen
+                # Strict: only a literal JSON `true` counts as confirmed. Missing,
+                # false, or a malformed value (e.g. the string "true") all drop
+                # the candidate — better to lose a borderline peer than let an
+                # unconfirmed cross-sector company corrupt the dominance test.
+                or p.get("same_industry_confirmed") is not True
             ):
                 continue
             seen.add(ticker)
