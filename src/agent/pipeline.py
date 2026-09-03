@@ -21,7 +21,14 @@ from src.agent.steps import (
     Step8Premortem,
     Step9Output,
 )
-from src.api import BSEClient, NSEClient, ScreenerClient, TrendlyneClient, YFinanceClient
+from src.api import (
+    BreezeClient,
+    BSEClient,
+    NSEClient,
+    ScreenerClient,
+    TrendlyneClient,
+    YFinanceClient,
+)
 from src.api.cache import data_cache
 from src.config import settings
 from src.logging_config import get_logger
@@ -56,6 +63,7 @@ class InvestmentPipeline:
         self.screener = ScreenerClient()
         self.bse = BSEClient()
         self.trendlyne = TrendlyneClient()
+        self.breeze = BreezeClient()
         self.yfinance = YFinanceClient()
         self.log = get_logger("pipeline")
 
@@ -73,12 +81,13 @@ class InvestmentPipeline:
         reset_run_usage()
         _t_start = time.monotonic()
 
-        async with self.nse, self.screener, self.bse, self.trendlyne, self.yfinance:
+        async with self.nse, self.screener, self.bse, self.trendlyne, self.breeze, self.yfinance:
             clients = {
                 "nse": self.nse,
                 "screener": self.screener,
                 "bse": self.bse,
                 "trendlyne": self.trendlyne,
+                "breeze": self.breeze,
                 "yfinance": self.yfinance,
             }
 
@@ -286,7 +295,8 @@ class InvestmentPipeline:
         quote_source = "nse"
         valuation_source = "trendlyne"
 
-        # Quote — fall back to Yahoo Finance if NSE is blocked
+        # Quote fallback chain: NSE (primary) → Breeze (real-time, authenticated)
+        #                       → Yahoo Finance (last resort, 15–20 min delayed)
         quote_result = results[0]
         if isinstance(quote_result, Exception) or quote_result is None:
             if isinstance(quote_result, Exception):
@@ -297,14 +307,24 @@ class InvestmentPipeline:
                     error_tag="ER-01",
                 )
                 state.add_error("ER-01")
-            self.log.info("prefetch_quote_yfinance_fallback", ticker=ticker)
-            quote_result = await clients["yfinance"].get_stock_quote(ticker)
+
+            # Try Breeze before falling back to delayed yfinance
+            self.log.info("prefetch_quote_breeze_fallback", ticker=ticker)
+            quote_result = await clients["breeze"].get_stock_quote(ticker)
             if quote_result is not None:
-                quote_source = "yfinance"
+                quote_source = "breeze"
                 data_cache.set(data_cache.quote_key(ticker), quote_result, settings.cache_ttl_quote)
-                state.add_flag("[stock_quote via Yahoo Finance — ~15 min delayed]")
+                # market_cap_cr is not available from Breeze; Screener will populate it
+                state.add_flag("[stock_quote via Breeze — real-time; market_cap from Screener]")
             else:
-                state.add_flag("[DATA UNVERIFIED: stock_quote]")
+                self.log.info("prefetch_quote_yfinance_fallback", ticker=ticker)
+                quote_result = await clients["yfinance"].get_stock_quote(ticker)
+                if quote_result is not None:
+                    quote_source = "yfinance"
+                    data_cache.set(data_cache.quote_key(ticker), quote_result, settings.cache_ttl_quote)
+                    state.add_flag("[stock_quote via Yahoo Finance — ~15 min delayed]")
+                else:
+                    state.add_flag("[DATA UNVERIFIED: stock_quote]")
         if quote_result is not None:
             state.quote = quote_result
             state.company_name = quote_result.company_name

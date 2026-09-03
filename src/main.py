@@ -2386,5 +2386,76 @@ def cost_summary(
     console.print(t)
 
 
+@cli.command("breeze-login")
+def breeze_login() -> None:
+    """Authenticate with ICICI Direct Breeze API for real-time stock quotes.
+
+    Run once each morning. The session token is cached at
+    ~/.tradedesk_breeze_session and auto-expires at midnight.
+
+    \b
+    Steps:
+      1. Open the printed URL in your browser
+      2. Log in with your ICICI Direct credentials
+      3. After login, browser redirects to https://127.0.0.1/?apisession=XXXX
+      4. Copy the token (the XXXX part after "apisession=")
+      5. Paste it at the prompt below
+    """
+    from src.api.breeze_client import (
+        get_login_url,
+        is_configured,
+        load_cached_token,
+        save_session_token,
+    )
+
+    if not is_configured():
+        console.print(
+            "[red]Breeze credentials not configured.[/red]\n"
+            "Add BREEZE_API_KEY and BREEZE_API_SECRET to your .env file."
+        )
+        return
+
+    existing = load_cached_token()
+    if existing:
+        console.print("[green]✓ Breeze session already active for today.[/green]")
+        if not click.confirm("Log in again anyway?", default=False):
+            return
+
+    url = get_login_url()
+    console.print(f"\n[bold]Open this URL in your browser:[/bold]\n\n  [cyan]{url}[/cyan]\n")
+    console.print(
+        "After login, copy the token from the redirect URL:\n"
+        "  https://127.0.0.1/?apisession=[bold yellow]XXXXXXXXXX[/bold yellow]\n"
+    )
+
+    token = click.prompt("Paste session token").strip()
+    if not token:
+        console.print("[red]No token entered — cancelled.[/red]")
+        return
+
+    save_session_token(token)
+
+    console.print("\n[dim]Verifying session (~5s)…[/dim]")
+    try:
+        import os
+
+        from breeze_connect import BreezeConnect  # type: ignore[import-untyped]
+
+        client = BreezeConnect(api_key=os.getenv("BREEZE_API_KEY", ""))
+        client.generate_session(
+            api_secret=os.getenv("BREEZE_API_SECRET", ""),
+            session_token=token,
+        )
+        console.print(
+            "[green]✓ Breeze session verified.[/green] "
+            "Real-time quotes active for today's analyses."
+        )
+    except Exception as exc:
+        console.print(
+            f"[yellow]Warning: verification failed ({exc}).[/yellow]\n"
+            "Token saved — it may still work during pipeline runs."
+        )
+
+
 if __name__ == "__main__":
     cli()

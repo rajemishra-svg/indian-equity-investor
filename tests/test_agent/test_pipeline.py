@@ -146,6 +146,11 @@ def mock_pipeline_env():
     mock_yfinance.get_stock_quote = AsyncMock(return_value=None)
     mock_yfinance.get_valuation_data = AsyncMock(return_value=None)
 
+    mock_breeze = AsyncMock()
+    mock_breeze.__aenter__ = AsyncMock(return_value=mock_breeze)
+    mock_breeze.__aexit__ = AsyncMock(return_value=None)
+    mock_breeze.get_stock_quote = AsyncMock(return_value=None)
+
     return {
         "claude": mock_claude,
         "nse": mock_nse,
@@ -153,6 +158,7 @@ def mock_pipeline_env():
         "bse": mock_bse,
         "trendlyne": mock_trendlyne,
         "yfinance": mock_yfinance,
+        "breeze": mock_breeze,
     }
 
 
@@ -167,6 +173,7 @@ async def test_happy_path_buy_recommendation(mock_pipeline_env):
     pipeline.bse = env["bse"]
     pipeline.trendlyne = env["trendlyne"]
     pipeline.yfinance = env["yfinance"]
+    pipeline.breeze = env["breeze"]
     from src.logging_config import get_logger
     pipeline.log = get_logger("pipeline_test")
 
@@ -196,6 +203,7 @@ async def test_governance_snapshot_resaved_after_step1(mock_pipeline_env):
     pipeline.bse = env["bse"]
     pipeline.trendlyne = env["trendlyne"]
     pipeline.yfinance = env["yfinance"]
+    pipeline.breeze = env["breeze"]
     from src.logging_config import get_logger
     pipeline.log = get_logger("pipeline_test")
 
@@ -232,6 +240,7 @@ async def test_step1_governance_fail_terminates_with_rejection(mock_pipeline_env
     pipeline.bse = env["bse"]
     pipeline.trendlyne = env["trendlyne"]
     pipeline.yfinance = env["yfinance"]
+    pipeline.breeze = env["breeze"]
     from src.logging_config import get_logger
     pipeline.log = get_logger("pipeline_test")
 
@@ -274,6 +283,7 @@ async def test_step3_financials_fail_terminates(mock_pipeline_env):
     pipeline.bse = env["bse"]
     pipeline.trendlyne = env["trendlyne"]
     pipeline.yfinance = env["yfinance"]
+    pipeline.breeze = env["breeze"]
     from src.logging_config import get_logger
     pipeline.log = get_logger("pipeline_test")
 
@@ -312,6 +322,7 @@ async def test_mode_detection_sets_market_mode(mock_pipeline_env):
     pipeline.bse = env["bse"]
     pipeline.trendlyne = env["trendlyne"]
     pipeline.yfinance = env["yfinance"]
+    pipeline.breeze = env["breeze"]
     from src.logging_config import get_logger
     pipeline.log = get_logger("pipeline_test")
 

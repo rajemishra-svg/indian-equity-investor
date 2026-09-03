@@ -21,6 +21,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "yfinance>=0.2.40",
     "aiosqlite>=0.20.0",
+    "breeze-connect>=1.0.69",
 ]
 
 [project.scripts]

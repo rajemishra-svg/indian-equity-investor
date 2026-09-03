@@ -472,6 +472,7 @@ async def test_prescreen_populates_tiebreaker_fields():
         patch("src.agent.batch_scanner.ScreenerClient", return_value=mock_screener),
         patch("src.agent.batch_scanner.BSEClient", return_value=mock_bse),
         patch("src.agent.batch_scanner.YFinanceClient", return_value=_mock_yfinance_client()),
+        patch("src.agent.batch_scanner.get_fresh_snapshot", new=AsyncMock(return_value=None)),
     ):
         summaries = await scanner.prescreen_universe(["RELIANCE"])
 
