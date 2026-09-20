@@ -432,7 +432,15 @@ async def get_analysis_history(
 async def list_recommendations(
     db_path: str, recommendation: str = "BUY"
 ) -> list[dict]:
-    """Return all analyses with the given recommendation, newest first."""
+    """Return every ticker whose *most recent* analysis carries the given
+    recommendation, newest first.
+
+    A ticker's latest row is resolved first (across ALL recommendation
+    types), and only then filtered — not the other way around. Filtering
+    by type before finding MAX(id) would let a ticker's stale BUY row
+    surface here even after a newer REJECT has superseded it. To browse a
+    single ticker's full history instead, use ``get_analysis_history``.
+    """
     await init_db(db_path)
     rows = []
     async with aiosqlite.connect(db_path) as db:
@@ -440,7 +448,11 @@ async def list_recommendations(
         async with db.execute(
             """
             SELECT * FROM analyses
-            WHERE recommendation = ?
+            WHERE id IN (
+                SELECT MAX(id) FROM analyses
+                GROUP BY ticker
+            )
+              AND recommendation = ?
             ORDER BY analysis_date DESC, mos_pct DESC
             """,
             (recommendation.upper(),),
@@ -451,11 +463,16 @@ async def list_recommendations(
 
 
 async def get_watchlist_with_targets(db_path: str) -> list[dict]:
-    """Return the latest WATCHLIST analysis for every ticker that has one.
+    """Return every ticker whose *most recent* analysis is a WATCHLIST entry.
 
     Includes ``target_buy_price``, ``cmp`` (at time of analysis), ``dcf_intrinsic_weighted``,
     and ``required_mos_pct``.  Used by ``investor watchlist-alerts`` to compare live
     CMP against the stored DCF target without re-running the full pipeline.
+
+    A ticker's latest row is resolved first (across ALL recommendation
+    types), and only then filtered to WATCHLIST — so a ticker that has
+    since flipped to BUY or REJECT no longer surfaces here on a stale
+    target price.
     """
     await init_db(db_path)
     rows = []
@@ -473,12 +490,11 @@ async def get_watchlist_with_targets(db_path: str) -> list[dict]:
                 sector_name,
                 termination_reason
             FROM analyses
-            WHERE recommendation = 'WATCHLIST'
-              AND id IN (
-                  SELECT MAX(id) FROM analyses
-                  WHERE recommendation = 'WATCHLIST'
-                  GROUP BY ticker
-              )
+            WHERE id IN (
+                SELECT MAX(id) FROM analyses
+                GROUP BY ticker
+            )
+              AND recommendation = 'WATCHLIST'
             ORDER BY watchlist_tier ASC, analysis_date DESC
             """
         ) as cursor:
@@ -488,9 +504,15 @@ async def get_watchlist_with_targets(db_path: str) -> list[dict]:
 
 
 async def get_all_tracked_tickers(db_path: str) -> list[dict]:
-    """Return the latest BUY and WATCHLIST analyses for all tickers.
+    """Return every ticker whose *most recent* analysis is BUY or WATCHLIST.
 
     Used by the surveillance command to check all positions in one sweep.
+
+    A ticker's latest row is resolved first (across ALL recommendation
+    types), and only then filtered — so a ticker that has since been
+    REJECTed or PEER_SWITCHed no longer surfaces here on a stale BUY row
+    (which would otherwise compare live CMP against a thesis that no
+    longer holds).
     """
     await init_db(db_path)
     rows = []
@@ -504,12 +526,11 @@ async def get_all_tracked_tickers(db_path: str) -> list[dict]:
                 dcf_intrinsic_weighted, required_mos_pct, mos_pct,
                 governance_score, financial_score, sector_name, conviction
             FROM analyses
-            WHERE recommendation IN ('BUY', 'WATCHLIST')
-              AND id IN (
-                  SELECT MAX(id) FROM analyses
-                  WHERE recommendation IN ('BUY', 'WATCHLIST')
-                  GROUP BY ticker
-              )
+            WHERE id IN (
+                SELECT MAX(id) FROM analyses
+                GROUP BY ticker
+            )
+              AND recommendation IN ('BUY', 'WATCHLIST')
             ORDER BY recommendation, analysis_date DESC
             """
         ) as cursor:

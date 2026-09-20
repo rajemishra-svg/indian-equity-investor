@@ -6,6 +6,12 @@
       "runtimeExecutable": "python3",
       "runtimeArgs": ["-m", "http.server", "7842", "--directory", "docs"],
       "port": 7842
+    },
+    {
+      "name": "prediction-league-dev",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "/Users/arcadia/projects/agents/claude/prediction-league", "run", "dev"],
+      "port": 3000
     }
   ]
 }

@@ -99,8 +99,15 @@ _CONGLOMERATE_NAMES = frozenset({
 })
 
 # Moat narrative keywords for financial sector (used after Step 2)
+# "deposit" alone is deliberately excluded — it's a mining/geology homonym
+# ("world's largest bauxite deposit") as often as a banking term, and caused
+# NATIONALUM (an aluminium miner) to misclassify as financial_services. The
+# banking-specific phrases below catch genuine deposit-franchise moat
+# narratives without matching mineral/ore/coal deposit language.
 _FINANCIAL_MOAT_KEYWORDS = frozenset({
-    "bank", "nbfc", "insurance", "lending", "loan", "deposit",
+    "bank", "nbfc", "insurance", "lending", "loan",
+    "deposit base", "deposit franchise", "casa deposit", "customer deposit",
+    "retail deposit", "current account", "savings account",
     "credit portfolio", "npa", "net interest margin", "nim",
     "asset under management", "aum", "mutual fund",
 })

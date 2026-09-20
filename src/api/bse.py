@@ -153,8 +153,16 @@ class BSEClient(BaseHTTPClient):
 
     async def _get_quarter_summary(
         self, scripcode: str, qtrid: int
-    ) -> tuple[float | None, float | None]:
-        """Return (promoter_holding_pct, promoter_pledging_pct) for one quarter."""
+    ) -> tuple[float | None, float | None, float | None]:
+        """Return (promoter_holding_pct, promoter_pledging_pct, public_holding_pct)
+        for one quarter.
+
+        Table1 carries one row per SEBI shareholding category — Promoter and
+        Promoter Group, Public shareholder, Non Promoter-Non Public shareholder
+        (×3, custodian/trust sub-categories), GRAND TOTAL. "Public shareholder"
+        must not accidentally match the "Non Promoter- Non Public shareholder"
+        rows, whose label also contains the substring "public shareholder".
+        """
         resp = await self.get(
             "/BseIndiaAPI/api/Corp_shpSec_SHPSUMMARY_ng/w",
             params={"scripcode": scripcode, "qtrcode": qtrid},
@@ -162,6 +170,7 @@ class BSEClient(BaseHTTPClient):
         data = resp.json()
         holding: float | None = None
         pledging: float | None = None
+        public_holding: float | None = None
         rows = data.get("Table1", []) or [] if isinstance(data, dict) else []
         for row in rows:
             category = str(row.get("Fld_ShortCatg", "")).lower()
@@ -174,8 +183,12 @@ class BSEClient(BaseHTTPClient):
                     pledging = float(row["Fld_PledgeEncumberedPercentage"])
                 except (KeyError, TypeError, ValueError):
                     pass
-                break
-        return holding, pledging
+            elif "public shareholder" in category and "non" not in category:
+                try:
+                    public_holding = float(row["Fld_TotalPercentageOf_A_B_C2"])
+                except (KeyError, TypeError, ValueError):
+                    pass
+        return holding, pledging, public_holding
 
     async def get_shareholding(self, ticker: str) -> GovernanceData | None:
         """Fetch promoter holding and pledging data from BSE.
@@ -226,14 +239,14 @@ class BSEClient(BaseHTTPClient):
         self,
         ticker: str,
         scripcode: str,
-        summaries: list[tuple[float | None, float | None] | BaseException],
+        summaries: list[tuple[float | None, float | None, float | None] | BaseException],
     ) -> GovernanceData | None:
-        """Assemble GovernanceData from per-quarter (holding, pledging) tuples.
+        """Assemble GovernanceData from per-quarter (holding, pledging, public) tuples.
 
         ``summaries`` is newest-first; older quarters that errored are dropped.
         """
         per_quarter = [s for s in summaries if not isinstance(s, BaseException)]
-        promoter_holding, promoter_pledging = per_quarter[0]
+        promoter_holding, promoter_pledging, public_holding = per_quarter[0]
 
         if promoter_holding is None and promoter_pledging is None:
             # Filing exists but no promoter row was parseable — return None so
@@ -245,7 +258,7 @@ class BSEClient(BaseHTTPClient):
 
         # Trend lists are chronological: oldest first, latest last.
         pledging_trend = [
-            pledge for _holding, pledge in reversed(per_quarter) if pledge is not None
+            pledge for _holding, pledge, _public in reversed(per_quarter) if pledge is not None
         ]
         trend_direction: str | None = None
         if len(pledging_trend) >= 2:
@@ -259,7 +272,12 @@ class BSEClient(BaseHTTPClient):
         # Same quarters, holding side — this is the only source of a real (not
         # inferred) promoter holding trend; feeds GrowthMetrics.promoter_holding_trend_5y.
         holding_trend = [
-            holding for holding, _pledge in reversed(per_quarter) if holding is not None
+            holding for holding, _pledge, _public in reversed(per_quarter) if holding is not None
+        ]
+
+        # Public shareholder % trend — same quarters, forensic "who's selling" signal.
+        public_holding_trend = [
+            public for _holding, _pledge, public in reversed(per_quarter) if public is not None
         ]
 
         flags: list[str] = []
@@ -284,5 +302,7 @@ class BSEClient(BaseHTTPClient):
             promoter_pledging_trend=pledging_trend,
             pledging_trend_direction=trend_direction,
             promoter_holding_trend=holding_trend,
+            public_holding_pct=public_holding,
+            public_holding_trend=public_holding_trend,
             data_flags=flags,
         )

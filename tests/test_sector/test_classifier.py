@@ -32,6 +32,39 @@ def test_financial_sector_from_moat_narrative():
     assert result == "financial_services"
 
 
+def test_mineral_deposit_does_not_trigger_financial_services():
+    """Regression: NATIONALUM (NALCO) misclassified as financial_services because
+    bare 'deposit' matched 'the world's largest bauxite deposits' — a mining term,
+    not a banking one. Real NALCO moat narrative, verbatim."""
+    result = classify_sector(
+        "NATIONALUM", "NATIONALUM",
+        moat_narrative=(
+            "NALCO's moat is anchored in structural cost leadership: captive "
+            "bauxite mines (Panchpatmali, one of the world's largest deposits), "
+            "a captive 1,200 MW coal-based power plant, and full vertical "
+            "integration from bauxite to aluminium metal ensure one of the "
+            "lowest cash costs of aluminium production in Asia. As a Navaratna "
+            "CPSE under the Ministry of Mines, NALCO also benefits from "
+            "quasi-regulatory advantages including preferential resource access "
+            "and sovereign backing that private peers cannot easily replicate."
+        ),
+    )
+    assert result != "financial_services"
+
+
+def test_genuine_deposit_franchise_language_still_matches_financial_services():
+    """The fix must not lose real detection — a bank moat narrative describing
+    its deposit franchise should still classify correctly."""
+    result = classify_sector(
+        "Some Bank Ltd", "SOMEBANK",
+        moat_narrative=(
+            "The bank has built a strong low-cost CASA deposit base and "
+            "retail deposit franchise, driving best-in-class NIM."
+        ),
+    )
+    assert result == "financial_services"
+
+
 # ---------------------------------------------------------------------------
 # Defence / govt contractor detection
 # ---------------------------------------------------------------------------

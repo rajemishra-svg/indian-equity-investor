@@ -49,7 +49,78 @@ class ScreenerClient(BaseHTTPClient):
             return None
 
         soup = BeautifulSoup(resp.text, "lxml")
-        return self._parse_financials(soup, ticker)
+        financials = self._parse_financials(soup, ticker)
+
+        # Depreciation-effect forensic check: Gross Block / Accumulated
+        # Depreciation aren't in the static balance-sheet table (Screener
+        # only shows net Fixed Assets there) — they live behind the
+        # "Fixed Assets+" expandable row, loaded via a separate endpoint.
+        company_id = self._extract_company_id(soup)
+        if company_id:
+            gross_block, accum_depr = await self._fetch_fixed_assets_schedule(
+                company_id, consolidated=True
+            )
+            if gross_block or accum_depr:
+                financials = financials.model_copy(
+                    update={
+                        "gross_block_cr_series": gross_block,
+                        "accumulated_depreciation_cr_series": accum_depr,
+                    }
+                )
+
+        return financials
+
+    def _extract_company_id(self, soup: BeautifulSoup) -> str | None:
+        """Screener's internal numeric company id, needed for schedule endpoints
+        (e.g. the Fixed Assets Gross Block / Accumulated Depreciation breakdown)
+        that aren't present in the main page's static HTML."""
+        el = soup.find(id="company-info")
+        company_id = el.get("data-company-id") if el else None
+        return str(company_id) if company_id else None
+
+    async def _fetch_fixed_assets_schedule(
+        self, company_id: str, consolidated: bool
+    ) -> tuple[list[float], list[float]]:
+        """Fetch Gross Block / Accumulated Depreciation from Screener's Fixed
+        Assets schedule (``Company.showSchedule('Fixed Assets', ...)`` in the
+        browser — an AJAX-only breakdown, not part of the static page).
+
+        Returns (gross_block_series, accumulated_depreciation_series), both
+        chronological oldest→newest ₹ Cr. Either list is empty on any
+        failure — this is enrichment, not core financials, so a failure here
+        must never break the main get_financials() call.
+        """
+        try:
+            resp = await self.get(
+                f"/api/company/{company_id}/schedules/",
+                params={
+                    "parent": "Fixed Assets",
+                    "section": "balance-sheet",
+                    "consolidated": "true" if consolidated else "false",
+                },
+            )
+            data = resp.json()
+        except Exception as exc:
+            self.log.debug(
+                "screener_fixed_assets_schedule_failed", company_id=company_id, error=str(exc)
+            )
+            return [], []
+
+        def _series(key: str) -> list[float]:
+            year_values = data.get(key) or {}
+            parsed: list[tuple[int, float]] = []
+            for year_label, val in year_values.items():
+                match = re.search(r"(\d{4})", str(year_label))
+                if not match:
+                    continue
+                try:
+                    parsed.append((int(match.group(1)), float(str(val).replace(",", ""))))
+                except (TypeError, ValueError):
+                    continue
+            parsed.sort(key=lambda t: t[0])
+            return [v for _year, v in parsed]
+
+        return _series("Gross Block"), _series("Accumulated Depreciation")
 
     async def _fetch_with_rate_limit_handling(self, url: str) -> httpx.Response | None:
         """Fetch with exponential back-off + jitter on Screener.in 429 responses.

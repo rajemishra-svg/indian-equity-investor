@@ -7,9 +7,11 @@ import os
 import pytest
 
 from src.db.repository import (
+    get_all_tracked_tickers,
     get_analysis_history,
     get_latest_analysis,
     get_summary,
+    get_watchlist_with_targets,
     init_db,
     list_recommendations,
     save_analysis,
@@ -318,6 +320,99 @@ async def test_list_recommendations_filters_by_type(db_path):
 
     watchlist = await list_recommendations(db_path, "WATCHLIST")
     assert len(watchlist) == 1
+
+
+@pytest.mark.asyncio
+async def test_list_recommendations_excludes_ticker_superseded_by_newer_type(db_path):
+    """A stale BUY row must not surface once a newer REJECT supersedes it.
+
+    Reproduces the RELIANCE case: an old BUY row and a newer REJECT row for
+    the same ticker. list_recommendations("BUY") must resolve each ticker's
+    true latest row first, then filter — not filter by type before picking
+    the latest — otherwise the stale BUY keeps appearing as if still current.
+    """
+    import aiosqlite
+
+    await init_db(db_path)
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            "INSERT INTO analyses (ticker, analysis_date, recommendation, market_mode) "
+            "VALUES (?, ?, ?, ?)",
+            ("RELIANCE", "2026-05-17", "BUY", "normal"),
+        )
+        await db.execute(
+            "INSERT INTO analyses (ticker, analysis_date, recommendation, market_mode) "
+            "VALUES (?, ?, ?, ?)",
+            ("RELIANCE", "2026-08-28", "REJECT", "correction"),
+        )
+        await db.commit()
+
+    buys = await list_recommendations(db_path, "BUY")
+    assert all(r["ticker"] != "RELIANCE" for r in buys)
+
+    rejects = await list_recommendations(db_path, "REJECT")
+    assert any(r["ticker"] == "RELIANCE" for r in rejects)
+
+
+# ---------------------------------------------------------------------------
+# get_watchlist_with_targets / get_all_tracked_tickers — staleness
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_watchlist_with_targets_excludes_ticker_superseded_by_buy(db_path):
+    """A ticker that flipped WATCHLIST → BUY must not keep surfacing on its
+    old target price."""
+    import aiosqlite
+
+    await init_db(db_path)
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            "INSERT INTO analyses (ticker, analysis_date, recommendation, market_mode, target_buy_price) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("EICHERMOT", "2026-05-18", "WATCHLIST", "normal", 6500.0),
+        )
+        await db.execute(
+            "INSERT INTO analyses (ticker, analysis_date, recommendation, market_mode) "
+            "VALUES (?, ?, ?, ?)",
+            ("EICHERMOT", "2026-08-28", "BUY", "correction"),
+        )
+        await db.commit()
+
+    rows = await get_watchlist_with_targets(db_path)
+    assert all(r["ticker"] != "EICHERMOT" for r in rows)
+
+
+@pytest.mark.asyncio
+async def test_all_tracked_tickers_excludes_ticker_superseded_by_reject(db_path):
+    """A ticker rejected after being tracked as BUY must drop out of
+    surveillance instead of comparing live CMP against a dead thesis."""
+    import aiosqlite
+
+    await init_db(db_path)
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            "INSERT INTO analyses (ticker, analysis_date, recommendation, market_mode) "
+            "VALUES (?, ?, ?, ?)",
+            ("RELIANCE", "2026-05-17", "BUY", "normal"),
+        )
+        await db.execute(
+            "INSERT INTO analyses (ticker, analysis_date, recommendation, market_mode) "
+            "VALUES (?, ?, ?, ?)",
+            ("RELIANCE", "2026-08-28", "REJECT", "correction"),
+        )
+        # A genuinely current BUY should still appear.
+        await db.execute(
+            "INSERT INTO analyses (ticker, analysis_date, recommendation, market_mode) "
+            "VALUES (?, ?, ?, ?)",
+            ("ADANIPORTS", "2026-08-28", "BUY", "correction"),
+        )
+        await db.commit()
+
+    rows = await get_all_tracked_tickers(db_path)
+    tickers = {r["ticker"] for r in rows}
+    assert "RELIANCE" not in tickers
+    assert "ADANIPORTS" in tickers
 
 
 # ---------------------------------------------------------------------------

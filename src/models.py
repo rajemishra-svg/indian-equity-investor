@@ -141,6 +141,16 @@ class FinancialMetrics(BaseModel):
     revenue_1y_ago_cr: float | None = None      # prior-year revenue for 1Y CAGR computation
     cash_cr_latest: float | None = None         # cash & equivalents from balance sheet ₹ Cr
 
+    # ── Depreciation effect (forensic check) ───────────────────────────────
+    # Gross Block / Accumulated Depreciation, annual series oldest→newest, from
+    # Screener's "Fixed Assets" schedule breakdown (a separate API call, not
+    # the main balance-sheet table — that only shows net Fixed Assets).
+    # A declining depreciation-to-gross-block ratio while profit rises is a
+    # forensic red flag: profit may be inflated by slower asset write-down
+    # rather than genuine operating improvement.
+    gross_block_cr_series: list[float] = Field(default_factory=list)
+    accumulated_depreciation_cr_series: list[float] = Field(default_factory=list)
+
     data_flags: list[str] = Field(default_factory=list)
 
 
@@ -152,6 +162,12 @@ class GovernanceData(BaseModel):
     # Chronological (oldest→latest) promoter holding % across the same BSE filing
     # quarters as promoter_pledging_trend — populated alongside it, not derived.
     promoter_holding_trend: list[float] = Field(default_factory=list)
+    # Public shareholder % — same BSE SHPSUMMARY filing, "Public shareholder"
+    # category row (aggregate: institutions + non-institutions + retail; BSE's
+    # summary endpoint doesn't split out true individual/retail holding — that
+    # needs a more detailed SHP-1 pattern filing, not yet implemented).
+    public_holding_pct: float | None = None
+    public_holding_trend: list[float] = Field(default_factory=list)
     auditor_name: str | None = None
     auditor_changed_3y: bool = False
     audit_qualifications: list[str] = Field(default_factory=list)
@@ -508,3 +524,17 @@ class AnalysisState(BaseModel):
         elif self.mode == MarketMode.CORRECTION:
             base -= 5.0   # Nifty 8–15% below peak — modest concession
         return base
+
+
+class ScorecardItem(BaseModel):
+    """One check in the forensic scorecard (`investor forensic TICKER`).
+
+    Deterministic, no LLM — mirrors the Tijori-style green/amber/red
+    accounting-and-price checklist. ``status`` is one of "green" | "amber" |
+    "red"; amber means "insufficient data to judge", never "mixed signal".
+    """
+
+    category: str        # "Accounting & Shareholding" | "Price & Performance"
+    name: str
+    status: str
+    explanation: str

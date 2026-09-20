@@ -102,6 +102,86 @@ def _save_report(ticker: str, state: AnalysisState) -> None:
 
 
 # ---------------------------------------------------------------------------
+# forensic command
+# ---------------------------------------------------------------------------
+
+
+@cli.command()
+@click.argument("ticker")
+def forensic(ticker: str) -> None:
+    """Run the 17-check forensic scorecard on TICKER (accounting + price/performance).
+
+    Deterministic, no Claude calls — a Tijori-style green/amber/red checklist
+    built from a fresh live fetch (Screener financials, BSE shareholding,
+    Yahoo Finance valuation). Complements `investor analyze`, which runs the
+    full 9-step qualitative pipeline; this is a quick red-flag screen.
+    """
+    ticker = _validate_ticker(ticker)
+    asyncio.run(_run_forensic(ticker))
+
+
+async def _run_forensic(ticker: str) -> None:
+    from src.api import BSEClient, ScreenerClient, YFinanceClient
+    from src.forensic.scorecard import build_scorecard
+    from src.sector.classifier import classify_sector
+
+    async with ScreenerClient() as screener, BSEClient() as bse, YFinanceClient() as yf:
+        financials = await screener.get_financials(ticker)
+        if financials is None:
+            console.print(f"[red]Could not fetch financials for {ticker} — aborting.[/red]")
+            return
+
+        governance = await bse.get_shareholding(ticker)
+        if governance is None:
+            governance = await screener.get_shareholding(ticker)
+        if governance is None:
+            console.print(f"[yellow]Warning:[/yellow] no shareholding data for {ticker} — governance checks will show amber.")
+
+        from src.models import GovernanceData
+        governance = governance or GovernanceData()
+
+        valuation = await yf.get_valuation_data(ticker)
+
+        # Sector detection only gates 5 of 17 checks (see scorecard module
+        # docstring) — a quote fetch failure shouldn't block the rest.
+        quote = await yf.get_stock_quote(ticker)
+
+    company_name = quote.company_name if quote else ticker
+    sector_name = classify_sector(company_name, ticker)
+
+    items = build_scorecard(financials, governance, valuation, sector_name)
+
+    colours = {"green": "green", "amber": "yellow", "red": "red"}
+    icons = {"green": "✓", "amber": "●", "red": "✗"}
+
+    for category in ("Accounting & Shareholding", "Price & Performance"):
+        table = Table(title=category, show_lines=True)
+        table.add_column("", width=3)
+        table.add_column("Check", style="bold", width=26)
+        table.add_column("Explanation")
+        for item in items:
+            if item.category != category:
+                continue
+            colour = colours[item.status]
+            table.add_row(f"[{colour}]{icons[item.status]}[/{colour}]", item.name, item.explanation)
+        console.print(table)
+
+    green_n = sum(1 for i in items if i.status == "green")
+    red_n = sum(1 for i in items if i.status == "red")
+    amber_n = sum(1 for i in items if i.status == "amber")
+    console.print(
+        f"\n[bold]{ticker}[/bold]: [green]{green_n} green[/green] · "
+        f"[yellow]{amber_n} amber[/yellow] · [red]{red_n} red[/red] out of {len(items)} checks"
+    )
+    if sector_name == "financial_services":
+        console.print("[dim]Sector: financial_services — Other Income, ROCE, Balance Sheet, Debt and Margin checks use bank/NBFC-specific thresholds (CAR/GNPA-NNPA/ROA/NIM).[/dim]")
+    console.print(
+        "[dim]Deterministic screen, no LLM. For a full qualitative verdict "
+        f"(governance, moat, valuation, premortem), run: investor analyze {ticker}[/dim]"
+    )
+
+
+# ---------------------------------------------------------------------------
 # portfolio command
 # ---------------------------------------------------------------------------
 

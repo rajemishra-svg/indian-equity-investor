@@ -8,6 +8,7 @@ import pytest
 import respx
 
 from src.api.nse import NSEClient
+from src.config import settings
 from src.models import AnalysisState
 from tests.fixtures.sample_data import (
     BAD_GOVERNANCE,
@@ -18,6 +19,32 @@ from tests.fixtures.sample_data import (
     SAMPLE_VALUATION,
     WEAK_FINANCIALS,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_db_path(tmp_path, monkeypatch):
+    """Force every test onto an isolated SQLite file — never the real investor.db.
+
+    Several code paths (batch_scanner's save_snapshot/get_fresh_snapshot,
+    the pipeline's post-analysis persistence) read ``settings.db_path``
+    directly rather than taking an explicit path parameter. A test that
+    mocks the HTTP/Claude clients but not persistence would silently write
+    mock fixtures (SAMPLE_QUOTE, BADCO, WEAKCO — see tests/fixtures/sample_data.py)
+    into the project's real investor.db on every ``uv run pytest``.
+
+    This is what actually happened: the RELIANCE quote in investor.db was
+    frozen at SAMPLE_QUOTE's values (cmp=2850.50, data_timestamp=2026-05-15)
+    for months, silently overwriting real analyses each time the suite ran,
+    and BADCO/WEAKCO — fixture-only tickers that don't exist on NSE — ended
+    up as full rows in a production portfolio-tracking database.
+
+    Autouse + tmp_path (unique per test) closes this at the root: no
+    individual test has to remember to patch persistence for isolation to
+    hold. Tests that pass their own explicit ``db_path`` (e.g. via a
+    tmp_path-backed fixture) are unaffected — this only redirects the
+    ``settings.db_path`` singleton that untouched code falls back to.
+    """
+    monkeypatch.setattr(settings, "db_path", str(tmp_path / "isolated_test.db"))
 
 
 @pytest.fixture

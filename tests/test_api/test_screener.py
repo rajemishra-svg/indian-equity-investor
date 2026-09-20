@@ -104,6 +104,60 @@ async def test_get_financials_parses_data_correctly():
 
 
 @pytest.mark.asyncio
+async def test_get_financials_fetches_gross_block_schedule_when_company_id_present():
+    """Gross Block / Accumulated Depreciation come from a separate schedule
+    endpoint keyed by Screener's internal company id — only reachable once
+    that id is found on the page (the '#company-info' div)."""
+    html_with_company_id = SCREENER_HTML + '<div id="company-info" data-company-id="57"></div>'
+    with respx.mock(base_url="https://www.screener.in") as mock:
+        mock.get("/company/RELIANCE/consolidated/").mock(
+            return_value=httpx.Response(200, text=html_with_company_id)
+        )
+        mock.get(
+            "/api/company/57/schedules/",
+            params={"parent": "Fixed Assets", "section": "balance-sheet", "consolidated": "true"},
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "Gross Block": {"Mar 2024": "100", "Mar 2023": "80", "Mar 2025": "120"},
+                    "Accumulated Depreciation": {"Mar 2023": "10", "Mar 2024": "15", "Mar 2025": "22"},
+                },
+            )
+        )
+
+        async with ScreenerClient() as client:
+            metrics = await client.get_financials("RELIANCE")
+
+    assert metrics is not None
+    # Chronological oldest→newest, regardless of the dict's key order.
+    assert metrics.gross_block_cr_series == [80.0, 100.0, 120.0]
+    assert metrics.accumulated_depreciation_cr_series == [10.0, 15.0, 22.0]
+
+
+@pytest.mark.asyncio
+async def test_get_financials_survives_gross_block_schedule_failure():
+    """A failed/missing schedule call must not break the main financials fetch —
+    it's enrichment, not core data."""
+    html_with_company_id = SCREENER_HTML + '<div id="company-info" data-company-id="57"></div>'
+    with respx.mock(base_url="https://www.screener.in") as mock:
+        mock.get("/company/RELIANCE/consolidated/").mock(
+            return_value=httpx.Response(200, text=html_with_company_id)
+        )
+        mock.get("/api/company/57/schedules/").mock(
+            return_value=httpx.Response(404)
+        )
+
+        async with ScreenerClient() as client:
+            metrics = await client.get_financials("RELIANCE")
+
+    assert metrics is not None
+    assert metrics.revenue_cagr_5y == pytest.approx(18.0)  # main parse unaffected
+    assert metrics.gross_block_cr_series == []
+    assert metrics.accumulated_depreciation_cr_series == []
+
+
+@pytest.mark.asyncio
 async def test_get_financials_returns_none_on_network_error():
     """get_financials should return None on request error."""
     with respx.mock(base_url="https://www.screener.in") as mock:

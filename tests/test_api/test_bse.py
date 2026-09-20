@@ -44,9 +44,14 @@ def _quarters(*qtrids: float) -> dict:
     return {"Table": [{"qtrid": q, "qtr": f"Q{q}"} for q in qtrids]}
 
 
-def _summary(holding: float | None, pledge: float | None) -> dict:
+def _summary(
+    holding: float | None, pledge: float | None, public_holding: float = 48.22
+) -> dict:
     """SHPSUMMARY response. The non-promoter row comes first deliberately —
-    a naive 'promoter in category' match would pick it up."""
+    a naive 'promoter in category' match would pick it up. Its category label
+    ("Non Promoter- Non Public shareholder") also deliberately contains the
+    substring "public shareholder", to guard against a naive public-holding
+    match picking it up too."""
     promoter_row = {"Fld_ShortCatg": "Promoter and Promoter Group"}
     if holding is not None:
         promoter_row["Fld_TotalPercentageOf_A_B_C2"] = holding
@@ -62,7 +67,7 @@ def _summary(holding: float | None, pledge: float | None) -> dict:
             promoter_row,
             {
                 "Fld_ShortCatg": "Public shareholder",
-                "Fld_TotalPercentageOf_A_B_C2": 48.22,
+                "Fld_TotalPercentageOf_A_B_C2": public_holding,
                 "Fld_PledgeEncumberedPercentage": 0.0,
             },
         ]
@@ -70,12 +75,16 @@ def _summary(holding: float | None, pledge: float | None) -> dict:
 
 
 def _mock_happy_path(
-    mock: respx.MockRouter, pledges: list[float], holdings: list[float] | None = None
+    mock: respx.MockRouter,
+    pledges: list[float],
+    holdings: list[float] | None = None,
+    public_holdings: list[float] | None = None,
 ) -> None:
     """Mock the full chain: search → quarter list → one summary per quarter.
 
-    ``pledges`` (and ``holdings`` if given) is newest-first, one entry per mocked
-    quarter. ``holdings`` defaults to a flat 50.0 for every quarter when omitted.
+    ``pledges`` (and ``holdings``/``public_holdings`` if given) is newest-first,
+    one entry per mocked quarter. ``holdings`` defaults to a flat 50.0 and
+    ``public_holdings`` to a flat 48.22 for every quarter when omitted.
     """
     mock.get(SEARCH_PATH, params={"Type": "EQ", "text": "RELIANCE"}).mock(
         return_value=httpx.Response(
@@ -87,10 +96,15 @@ def _mock_happy_path(
         return_value=httpx.Response(200, json=_quarters(*[float(q) for q in qtrids]))
     )
     holdings = holdings if holdings is not None else [50.0] * len(pledges)
-    for qtrid, pledge, holding in zip(qtrids, pledges, holdings, strict=True):
+    public_holdings = public_holdings if public_holdings is not None else [48.22] * len(pledges)
+    for qtrid, pledge, holding, public_holding in zip(
+        qtrids, pledges, holdings, public_holdings, strict=True
+    ):
         mock.get(
             SUMMARY_PATH, params={"scripcode": "500325", "qtrcode": str(qtrid)}
-        ).mock(return_value=httpx.Response(200, json=_summary(holding, pledge)))
+        ).mock(
+            return_value=httpx.Response(200, json=_summary(holding, pledge, public_holding))
+        )
 
 
 # ── Happy path ───────────────────────────────────────────────────────────────
@@ -112,6 +126,26 @@ async def test_get_shareholding_parses_promoter_row_and_trend():
     assert gov.pledging_trend_direction == "increasing"
     assert gov.promoter_holding_trend == [50.0, 50.0, 50.0, 50.0]  # flat holding
     assert not is_circuit_open()
+
+
+@pytest.mark.asyncio
+async def test_get_shareholding_parses_public_holding_and_trend():
+    """Public shareholder % is captured alongside promoter data, chronologically,
+    and must not be confused with the "Non Promoter- Non Public shareholder"
+    row whose label also contains the substring "public shareholder"."""
+    with respx.mock(base_url=BASE) as mock:
+        _mock_happy_path(
+            mock,
+            pledges=[1.0, 1.0, 1.0, 1.0],
+            public_holdings=[30.0, 32.0, 34.0, 36.0],  # newest first → rising
+        )
+
+        async with BSEClient() as client:
+            gov = await client.get_shareholding("RELIANCE")
+
+    assert isinstance(gov, GovernanceData)
+    assert gov.public_holding_pct == pytest.approx(30.0)  # latest quarter
+    assert gov.public_holding_trend == [36.0, 34.0, 32.0, 30.0]  # oldest → newest
 
 
 @pytest.mark.asyncio
