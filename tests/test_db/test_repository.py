@@ -530,3 +530,35 @@ async def test_init_db_enables_wal_journal_mode(db_path):
         async with db.execute("PRAGMA journal_mode") as cur:
             (mode,) = await cur.fetchone()
     assert mode.lower() == "wal"
+
+
+@pytest.mark.asyncio
+async def test_exit_plan_persisted(db_path):
+    """Step 9's exit ladder + stop multiplier round-trip for holdings-alerts."""
+    from src.models import ExitStrategy
+
+    state = _make_minimal_state()
+    state.exit_strategy = ExitStrategy(
+        fundamental_trigger="ROCE < 12%",
+        valuation_exit_price=4500.0,
+        exit_trim_price=3450.0,
+        exit_full_price=6000.0,
+        stop_loss_price=2337.0,
+        stop_loss_multiplier=0.82,
+    )
+    await save_analysis(db_path, state)
+
+    row = await get_latest_analysis(db_path, "RELIANCE")
+    assert row["exit_trim_price"] == 3450.0
+    assert row["exit_reduce_price"] == 4500.0
+    assert row["exit_full_price"] == 6000.0
+    assert row["stop_loss_price"] == 2337.0
+    assert row["stop_loss_multiplier"] == 0.82
+
+
+@pytest.mark.asyncio
+async def test_exit_plan_columns_null_without_exit_strategy(db_path):
+    await save_analysis(db_path, _make_minimal_state())
+    row = await get_latest_analysis(db_path, "RELIANCE")
+    assert row["exit_full_price"] is None
+    assert row["stop_loss_multiplier"] is None

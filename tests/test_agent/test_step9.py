@@ -306,3 +306,27 @@ async def test_growth_buy_high_conviction_allocation():
 
     assert state.conviction == ConvictionLevel.HIGH
     assert state.suggested_allocation_pct == 1.5
+
+
+# ---------------------------------------------------------------------------
+# Exit strategy carries the full ladder for holdings-alerts
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_exit_strategy_has_full_ladder_and_stop_multiplier():
+    from src.models import GateResult, StockQuote, ValuationResult
+
+    state = _buy_state()
+    state.quote = StockQuote(
+        ticker="GOODCO", company_name="Good Co", cmp=100.0,
+        w52_high=120.0, w52_low=80.0, market_cap_cr=2_000.0,
+    )
+    state.valuation = ValuationResult(gate=GateResult.PASS_GREEN, dcf_intrinsic_weighted=200.0)
+
+    await Step9Output(MagicMock(), {})._build_exit_strategy(state)
+
+    ex = state.exit_strategy
+    assert (ex.exit_trim_price, ex.valuation_exit_price, ex.exit_full_price) == (230.0, 300.0, 400.0)
+    assert ex.stop_loss_multiplier == 0.70
+    assert ex.stop_loss_price == 70.0

@@ -44,6 +44,7 @@ uv run investor correction-scan                            # market mode + Tier-
 uv run investor watchlist-alerts                           # live CMP vs DCF target price
 uv run investor surveillance                               # staleness + price drift + fundamental drift sweep
 uv run investor surveillance --days-since 14              # flag analyses older than 14 days
+uv run investor holdings-alerts --user rm                  # exit alerts for held positions (stop / exit ladder / thesis)
 
 # CLI — backtesting (validate the gates against history; no Claude calls)
 uv run investor backtest                            # replay all snapshots ≥ 90 days old
@@ -232,6 +233,7 @@ Also exposes `is_conglomerate(company_name, ticker)` — checks against `_CONGLO
 | P1-4 Earnings quality | `screener.py` + Step 3 | Other income > 15% of revenue flagged |
 | P2-1 Surveillance | `main.py` + `repository.py` + `monitor/deltas.py` | `investor surveillance` sweeps all BUY+WATCHLIST for staleness/price drift AND fundamental drift (diffs the two most recent financials/governance snapshots; HIGH severity when a metric crosses a pipeline hard-trigger level — pledging > 10%, CFO/NP < 50%, D/E > 3, ICR < 3 — and HIGH alerts join the re-analysis list) |
 | P2-2 Watchlist alerts | `main.py` + `repository.py` | `investor watchlist-alerts` compares live CMP vs stored DCF target price |
+| Holdings exit alerts | `main.py` + `monitor/holdings.py` | `investor holdings-alerts` rolls portfolio lots per ticker and checks live CMP against a stop-loss anchored to the investor's **average cost** (`settings.stop_loss_multiplier(cap_size)`), the Step 9 exit ladder (trim/reduce/full = DCF × sector `exit_mult_1x/2x/3x`, persisted on `analyses` as `exit_trim/reduce/full_price`; re-derived from `dcf_intrinsic_weighted` for older rows), and thesis breaks (latest analysis REJECT/PEER_SWITCH/GROWTH_REJECT). HIGH/MEDIUM/LOW severity; adds an LTCG-timing note when an exit fires ≤60 days before the oldest lot turns long-term. Growth-mode analyses get stop-loss only (their forward-revenue DCF is not trusted for exits) |
 | P2-3 ROCE/ROE trends | `screener.py` + Step 3 | Recent 2Y vs prior 3Y delta; deteriorating/improving flagged |
 | P3-1 Concall quality | Step 2 system prompt | Claude searches concall transcripts; `management_guidance_reliability` stored on `MoatAssessment` |
 | P3-2 Insider activity | Step 1 enrichment loop | Claude searches BSE bulk/block deals; `insider_net_buying_3m` stored on `GovernanceData` |
