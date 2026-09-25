@@ -39,15 +39,15 @@ def _analysis(**overrides) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def test_stop_anchored_to_avg_cost_by_cap_size():
-    assert exit_levels(_pos(), _analysis()).stop_loss == 820.0            # large 18%
-    assert exit_levels(_pos(), _analysis(cap_size="small_cap")).stop_loss == 700.0
-    assert exit_levels(_pos(), None).stop_loss == 750.0                    # mid default
+def test_review_level_anchored_to_avg_cost_by_cap_size():
+    assert exit_levels(_pos(), _analysis()).review_price == 820.0            # large 18%
+    assert exit_levels(_pos(), _analysis(cap_size="small_cap")).review_price == 700.0
+    assert exit_levels(_pos(), None).review_price == 750.0                    # mid default
 
 
 def test_stored_multiplier_wins_over_cap_size():
     lv = exit_levels(_pos(), _analysis(stop_loss_multiplier=0.9))
-    assert lv.stop_loss == 900.0
+    assert lv.review_price == 900.0
 
 
 def test_exit_ladder_derived_from_dcf_for_legacy_rows():
@@ -85,14 +85,31 @@ def test_healthy_position_is_ok():
     assert a.pnl_pct == 10.0
 
 
-def test_stop_hit_is_high():
-    a = evaluate_holding(_pos(), _analysis(), 800.0, TODAY)
-    assert (a.severity, a.action) == ("HIGH", "STOP HIT")
+def test_sharp_fall_asks_for_reanalysis_not_exit():
+    a = evaluate_holding(_pos(), _analysis(cmp=1100.0), 800.0, TODAY)
+    assert (a.severity, a.action) == ("MEDIUM", "SHARP FALL")
+    assert "re-analyse the thesis" in a.reasons[0]
+    assert "20% below avg cost" in a.reasons[0]
 
 
-def test_near_stop_is_medium():
-    a = evaluate_holding(_pos(), _analysis(), 850.0, TODAY)   # stop 820, +3.7%
-    assert (a.severity, a.action) == ("MEDIUM", "Near stop")
+def test_fall_already_reanalysed_with_thesis_intact_is_low():
+    a = evaluate_holding(_pos(), _analysis(cmp=790.0), 800.0, TODAY)
+    assert (a.severity, a.action) == ("LOW", "Fall re-checked")
+    assert "→ BUY" in a.reasons[0]
+
+
+def test_fall_reanalysed_but_thesis_broken_stays_high():
+    a = evaluate_holding(
+        _pos(), _analysis(cmp=790.0, recommendation="REJECT"), 800.0, TODAY
+    )
+    assert (a.severity, a.action) == ("HIGH", "THESIS BROKEN")
+    assert not any("re-analyse" in r for r in a.reasons)
+    assert any("below avg cost" in r for r in a.reasons)
+
+
+def test_small_dip_above_review_level_is_ok():
+    a = evaluate_holding(_pos(), _analysis(), 850.0, TODAY)
+    assert a.severity == "OK"
 
 
 @pytest.mark.parametrize(
@@ -124,7 +141,7 @@ def test_stale_analysis_is_low():
 
 def test_no_analysis_still_checks_stop():
     a = evaluate_holding(_pos(), None, 700.0, TODAY)
-    assert a.action == "STOP HIT"
+    assert a.action == "SHARP FALL"
     assert any("Never analysed" in r for r in a.reasons)
 
 
@@ -146,7 +163,7 @@ def test_ltcg_note_when_exit_fires_close_to_eligibility():
     assert any("turns LTCG in 25d" in r for r in a.reasons)
 
 
-def test_no_ltcg_note_on_stop_hit():
+def test_no_ltcg_note_on_sharp_fall():
     a = evaluate_holding(_pos(first_buy="2025-10-20"), _analysis(), 700.0, TODAY)
     assert not any("LTCG" in r for r in a.reasons)
 
@@ -169,15 +186,18 @@ def test_rollup_weights_cost_and_keeps_oldest_buy():
 
 def test_sort_alerts_most_urgent_first():
     ok = evaluate_holding(_pos(), _analysis(), 1100.0, TODAY)
-    stop = evaluate_holding(_pos(), _analysis(), 700.0, TODAY)
-    assert [x.action for x in sort_alerts([ok, stop])] == ["STOP HIT", "Hold"]
+    broken = evaluate_holding(_pos(), _analysis(recommendation="REJECT"), 1100.0, TODAY)
+    fall = evaluate_holding(_pos(), _analysis(), 700.0, TODAY)
+    assert [x.action for x in sort_alerts([ok, fall, broken])] == [
+        "THESIS BROKEN", "SHARP FALL", "Hold"
+    ]
 
 
 def test_growth_mode_analysis_skips_exit_ladder():
     a = evaluate_holding(_pos(), _analysis(analysis_mode="growth", dcf_intrinsic_weighted=50_000.0),
                          1100.0, TODAY)
     assert a.levels.trim is a.levels.full is None
-    assert a.levels.stop_loss == 820.0
+    assert a.levels.review_price == 820.0
     assert a.severity == "OK"
     assert any("Growth-mode DCF" in r for r in a.reasons)
 
