@@ -415,6 +415,35 @@ async def test_all_tracked_tickers_excludes_ticker_superseded_by_reject(db_path)
     assert "ADANIPORTS" in tickers
 
 
+@pytest.mark.asyncio
+async def test_growth_outcomes_are_tracked_and_watchlisted(db_path):
+    """Growth-mode buy/watchlist outcomes must reach the monitoring commands."""
+    import aiosqlite
+
+    await init_db(db_path)
+    async with aiosqlite.connect(db_path) as db:
+        for ticker, rec in [
+            ("SUZLON", "GROWTH_BUY"),
+            ("HBLENGINE", "GROWTH_WATCHLIST"),
+            ("ZENTEC", "MULTIBAGGER_CANDIDATE"),
+            ("OLDCO", "GROWTH_REJECT"),
+        ]:
+            await db.execute(
+                "INSERT INTO analyses (ticker, analysis_date, recommendation, market_mode, "
+                "analysis_mode) VALUES (?, ?, ?, ?, 'growth')",
+                (ticker, "2026-09-01", rec, "correction"),
+            )
+        await db.commit()
+
+    tracked = {r["ticker"] for r in await get_all_tracked_tickers(db_path)}
+    assert tracked == {"SUZLON", "HBLENGINE", "ZENTEC"}
+
+    watch = await get_watchlist_with_targets(db_path)
+    assert [r["ticker"] for r in watch] == ["HBLENGINE"]
+    assert watch[0]["analysis_mode"] == "growth"
+    assert watch[0]["market_mode"] == "correction"
+
+
 # ---------------------------------------------------------------------------
 # get_summary
 # ---------------------------------------------------------------------------
