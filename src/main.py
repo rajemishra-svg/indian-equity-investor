@@ -1706,18 +1706,19 @@ def surveillance(days_since: int) -> None:
     help="Flag holdings whose last analysis is older than this many days",
 )
 def holdings_alerts(user_id: str | None, days_since: int) -> None:
-    """Exit alerts for held positions — stop-loss, valuation exits, thesis breaks.
+    """Exit alerts for long-term holdings — thesis breaks and valuation exits.
 
-    Zero-LLM sweep: live CMP (Yahoo Finance) against a stop-loss anchored to
-    YOUR average cost (cap-size based: large 18% / mid 25% / small 30% below)
-    and against the Step 9 exit ladder from the latest analysis
-    (DCF × sector exit multipliers: trim / reduce / full exit).
+    Zero-LLM sweep of every holding against live CMP (Yahoo Finance):
+    the latest analysis's verdict, the Step 9 exit ladder (DCF × sector exit
+    multipliers: trim / reduce / full exit), and a sharp-fall review level
+    anchored to YOUR average cost (large 18% / mid 25% / small 30% below).
+    A sharp fall asks for a fresh analysis — it is not a sell signal.
 
     \b
     Severity:
-      HIGH    stop hit · full-exit target reached · latest analysis REJECT/PEER_SWITCH
-      MEDIUM  near stop (≤5% above) · trim/reduce target reached · no live price
-      LOW     stale or missing analysis
+      HIGH    latest analysis REJECT/PEER_SWITCH · full-exit target reached
+      MEDIUM  trim/reduce target reached · sharp fall (re-analyse) · no live price
+      LOW     stale or missing analysis · fall already re-checked
     """
     from src.db.repository import get_latest_analysis
     from src.monitor.holdings import evaluate_holding, rollup_lots, sort_alerts
@@ -1763,7 +1764,7 @@ def holdings_alerts(user_id: str | None, days_since: int) -> None:
     table.add_column("Ticker", style="bold", no_wrap=True)
     table.add_column("CMP", justify="right", overflow="fold")
     table.add_column("P&L", justify="right", overflow="fold")
-    table.add_column("Stop", justify="right", overflow="fold")
+    table.add_column("Review ≤", justify="right", overflow="fold")
     table.add_column("Exits T/R/F", justify="right", overflow="fold")
     table.add_column("Action", no_wrap=True)
 
@@ -1783,7 +1784,7 @@ def holdings_alerts(user_id: str | None, days_since: int) -> None:
             a.ticker,
             f"{a.live_cmp:,.2f}" if a.live_cmp is not None else "[dim]N/A[/dim]",
             pnl,
-            f"{lv.stop_loss:,.2f}" if lv else "—",
+            f"{lv.review_price:,.2f}" if lv else "—",
             ladder,
             f"[{colour}]{a.action}[/{colour}]",
         )
@@ -1807,13 +1808,13 @@ def holdings_alerts(user_id: str | None, days_since: int) -> None:
     unanalysed = [a.ticker for a in alerts if analyses[a.ticker] is None]
     if unanalysed:
         console.print(
-            f"[cyan]No analysis yet (stop-loss only):[/cyan] {', '.join(unanalysed)}\n"
+            f"[cyan]No analysis yet (no exit targets):[/cyan] {', '.join(unanalysed)}\n"
             f"[dim]Run: investor analyze {unanalysed[0]}  (or investor portfolio-review)[/dim]"
         )
     console.print(
-        "\n[dim]Prices in ₹ via Yahoo Finance (~15-20 min delayed). Stop-loss is measured "
-        "from your average cost; exit targets come from the latest analysis's DCF. "
-        "Signals only — review before trading.[/dim]"
+        "\n[dim]Prices in ₹ via Yahoo Finance (~15-20 min delayed). Exit targets come "
+        "from the latest analysis's DCF; the review level is measured from your average "
+        "cost and only prompts a re-analysis. Signals only — review before trading.[/dim]"
     )
 
 

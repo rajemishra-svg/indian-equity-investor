@@ -1,10 +1,18 @@
-"""Exit monitoring for held positions — stop-loss, valuation exits, thesis breaks.
+"""Exit monitoring for long-term holdings — thesis breaks and valuation exits.
 
-`surveillance` watches *analyses*; this watches *holdings*: it compares each
-position's live CMP against a stop-loss anchored to the investor's actual
-average cost (not the CMP on the analysis date) and against the Step 9 exit
-ladder (DCF × sector exit multipliers).  Deterministic and side-effect free —
-the CLI supplies holdings, latest analyses and live prices.
+`surveillance` watches *analyses*; this watches *holdings*.  Exits are driven
+by the business and its valuation, not by price alone:
+
+  • thesis break  — the latest analysis is REJECT / PEER_SWITCH / GROWTH_REJECT
+  • valuation     — live CMP reaches the Step 9 exit ladder (DCF × sector multipliers)
+  • sharp fall    — CMP drops below the cap-size review level (the Step 9
+                    stop-loss multiplier applied to the investor's average cost).
+                    This is a prompt to re-analyse the thesis, never a sell signal:
+                    for a long-term holder a fall with the thesis intact can be an
+                    opportunity.
+
+Deterministic and side-effect free — the CLI supplies holdings, latest
+analyses and live prices.
 
 Analyses saved before the exit ladder was persisted still work: targets are
 re-derived from the stored ``dcf_intrinsic_weighted`` and ``sector_name``.
@@ -21,7 +29,6 @@ from src.sector.profiles import get_sector_profile
 # Recommendations whose latest analysis says the investment case no longer holds
 BROKEN_THESIS = {"REJECT", "PEER_SWITCH", "GROWTH_REJECT"}
 
-NEAR_STOP_PCT = 5.0        # warn when CMP is within this % above the stop
 LTCG_WAIT_WINDOW_DAYS = 60  # mention LTCG timing when eligibility is this close
 
 _SEVERITY_RANK = {"HIGH": 3, "MEDIUM": 2, "LOW": 1, "OK": 0}
@@ -39,8 +46,8 @@ class HoldingPosition:
 
 @dataclass
 class ExitLevels:
-    stop_loss: float
-    stop_multiplier: float
+    review_price: float        # sharp-fall level: avg cost × stop-loss multiplier
+    review_multiplier: float
     trim: float | None = None
     reduce: float | None = None
     full: float | None = None
@@ -52,7 +59,7 @@ class ExitLevels:
 class HoldingAlert:
     ticker: str
     severity: str                     # HIGH | MEDIUM | LOW | OK
-    action: str                       # headline, e.g. "STOP HIT — exit"
+    action: str                       # headline, e.g. "THESIS BROKEN"
     reasons: list[str] = field(default_factory=list)
     live_cmp: float | None = None
     pnl_pct: float | None = None
@@ -60,21 +67,21 @@ class HoldingAlert:
 
 
 def exit_levels(position: HoldingPosition, analysis: dict | None) -> ExitLevels:
-    """Stop-loss from actual cost; exit ladder from the latest analysis."""
+    """Sharp-fall review level from actual cost; exit ladder from the latest analysis."""
     cap_size = analysis.get("cap_size") if analysis else None
     multiplier = (analysis or {}).get("stop_loss_multiplier") or settings.stop_loss_multiplier(
         cap_size
     )
     levels = ExitLevels(
-        stop_loss=round(position.avg_cost * multiplier, 2),
-        stop_multiplier=multiplier,
+        review_price=round(position.avg_cost * multiplier, 2),
+        review_multiplier=multiplier,
     )
     if not analysis:
         return levels
     if analysis.get("analysis_mode") == "growth":
         # The growth-mode forward-revenue DCF overstates per-share value by an
         # order of magnitude; exits on it would never fire. Stop-loss only.
-        levels.note = "Growth-mode DCF unreliable — exit ladder skipped (stop-loss only)"
+        levels.note = "Growth-mode DCF unreliable — exit ladder skipped"
         return levels
 
     levels.dcf = analysis.get("dcf_intrinsic_weighted")
@@ -102,7 +109,7 @@ def _ltcg_note(first_buy: str | None, today: date) -> str | None:
     if 0 < days_left <= LTCG_WAIT_WINDOW_DAYS:
         return (
             f"Oldest lot turns LTCG in {days_left}d ({eligible.isoformat()}) — "
-            "STCG 20% vs LTCG 12.5%; weigh waiting unless the stop is hit"
+            "STCG 20% vs LTCG 12.5%; weigh waiting before selling"
         )
     return None
 
@@ -126,17 +133,30 @@ def evaluate_holding(
         if position.avg_cost > 0:
             alert.pnl_pct = round((live_cmp - position.avg_cost) / position.avg_cost * 100, 2)
 
-        if live_cmp <= levels.stop_loss:
-            fired.append((
-                "HIGH", "STOP HIT",
-                f"CMP ₹{live_cmp:,.2f} ≤ stop ₹{levels.stop_loss:,.2f} "
-                f"({(1 - levels.stop_multiplier) * 100:.0f}% below avg cost ₹{position.avg_cost:,.2f})",
-            ))
-        elif live_cmp <= levels.stop_loss * (1 + NEAR_STOP_PCT / 100):
-            fired.append((
-                "MEDIUM", "Near stop",
-                f"CMP ₹{live_cmp:,.2f} within {NEAR_STOP_PCT:.0f}% of stop ₹{levels.stop_loss:,.2f}",
-            ))
+        if live_cmp <= levels.review_price:
+            fell = (
+                f"CMP ₹{live_cmp:,.2f} is {(1 - live_cmp / position.avg_cost) * 100:.0f}% "
+                f"below avg cost ₹{position.avg_cost:,.2f} (review level ₹{levels.review_price:,.2f})"
+            )
+            analysed_cmp = (analysis or {}).get("cmp")
+            rec = (analysis or {}).get("recommendation") or ""
+            if rec in BROKEN_THESIS:
+                # The thesis-break rule below already says what to do.
+                fired.append(("LOW", "Price fall", fell))
+            elif analysed_cmp and analysed_cmp <= levels.review_price:
+                # The latest analysis already ran at a post-fall price and the
+                # thesis held — nothing new to do.
+                fired.append((
+                    "LOW", "Fall re-checked",
+                    f"{fell}; thesis re-checked at ₹{analysed_cmp:,.2f} on "
+                    f"{analysis.get('analysis_date')} → {rec}",
+                ))
+            else:
+                fired.append((
+                    "MEDIUM", "SHARP FALL",
+                    f"{fell} — re-analyse the thesis before deciding "
+                    f"(investor analyze {position.ticker})",
+                ))
 
         dcf_ctx = f" ({live_cmp / levels.dcf:.1f}× DCF ₹{levels.dcf:,.0f})" if levels.dcf else ""
         if levels.full and live_cmp >= levels.full:
@@ -176,8 +196,7 @@ def evaluate_holding(
         alert.reasons.append(levels.note)
 
     is_exit = any(a.startswith(("TRIM", "REDUCE", "FULL", "THESIS")) for _, a, _ in fired)
-    stop_hit = any(a.startswith("STOP HIT") for _, a, _ in fired)
-    if is_exit and not stop_hit:
+    if is_exit:
         note = _ltcg_note(position.first_buy, today)
         if note:
             alert.reasons.append(note)
