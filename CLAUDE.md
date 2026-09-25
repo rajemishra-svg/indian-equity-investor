@@ -38,10 +38,10 @@ uv run investor scan --concurrency 3                      # gentler on Screener
 # CLI — portfolio and market mode
 uv run investor portfolio                                  # per-ticker totals (W.avg cost across lots)
 uv run investor portfolio --lots                           # individual purchase lots
-uv run investor correction-scan                            # market mode + Tier-1 entry alerts
+uv run investor correction-scan                            # market mode + all watchlist names vs mode-adjusted entry targets
 
 # CLI — post-buy monitoring
-uv run investor watchlist-alerts                           # live CMP vs DCF target price
+uv run investor watchlist-alerts                           # live CMP vs DCF target price (re-priced for current market mode)
 uv run investor surveillance                               # staleness + price drift + fundamental drift sweep
 uv run investor surveillance --days-since 14              # flag analyses older than 14 days
 uv run investor holdings-alerts --user rm                  # exit alerts for held positions (thesis / exit ladder / sharp fall)
@@ -232,7 +232,7 @@ Also exposes `is_conglomerate(company_name, ticker)` — checks against `_CONGLO
 | P1-3 Working capital | `screener.py` + Step 3 | Debtor/inventory days computed; >30% deterioration flagged |
 | P1-4 Earnings quality | `screener.py` + Step 3 | Other income > 15% of revenue flagged |
 | P2-1 Surveillance | `main.py` + `repository.py` + `monitor/deltas.py` | `investor surveillance` sweeps all BUY+WATCHLIST for staleness/price drift AND fundamental drift (diffs the two most recent financials/governance snapshots; HIGH severity when a metric crosses a pipeline hard-trigger level — pledging > 10%, CFO/NP < 50%, D/E > 3, ICR < 3 — and HIGH alerts join the re-analysis list) |
-| P2-2 Watchlist alerts | `main.py` + `repository.py` | `investor watchlist-alerts` compares live CMP vs stored DCF target price |
+| P2-2 Watchlist alerts | `main.py` + `monitor/watchlist.py` | `watchlist-alerts`, `correction-scan` and `surveillance` share `evaluate_watchlist_row()`: the target is re-priced for the **current** market mode from the stored DCF (`mode_adjusted_target()` undoes the analysis-date MoS concession and applies today's: 0 / 5 / 10pp for normal / correction / max opportunity), so a quality name analysed in a normal market surfaces on time during a correction. An unconfirmed mode (ER-08) keeps stored targets. All tiers are shown (Tier 1 is rarely assigned — see governance note below); GROWTH_WATCHLIST rows are listed without a target. `get_all_tracked_tickers()` includes MULTIBAGGER_CANDIDATE / GROWTH_BUY / GROWTH_WATCHLIST |
 | Holdings exit alerts | `main.py` + `monitor/holdings.py` | `investor holdings-alerts` rolls portfolio lots per ticker and checks live CMP for long-term exit signals: thesis break (latest analysis REJECT/PEER_SWITCH/GROWTH_REJECT) and the Step 9 exit ladder (trim/reduce/full = DCF × sector `exit_mult_1x/2x/3x`, persisted on `analyses` as `exit_trim/reduce/full_price`; re-derived from `dcf_intrinsic_weighted` for older rows). A fall below `avg cost × settings.stop_loss_multiplier(cap_size)` is a **SHARP FALL → re-analyse the thesis** prompt (MEDIUM), never a sell signal; it drops to LOW once an analysis has run at the lower price with the thesis intact. LTCG-timing note when an exit fires ≤60 days before the oldest lot turns long-term. Growth-mode analyses get no exit ladder (their forward-revenue DCF is not trusted) |
 | P2-3 ROCE/ROE trends | `screener.py` + Step 3 | Recent 2Y vs prior 3Y delta; deteriorating/improving flagged |
 | P3-1 Concall quality | Step 2 system prompt | Claude searches concall transcripts; `management_guidance_reliability` stored on `MoatAssessment` |
@@ -374,7 +374,7 @@ These rules are baked into the step prompts and scoring logic — do not weaken 
 
 If Nifty data unavailable, defaults to Normal + adds `[MODE UNCONFIRMED]` flag.
 
-**Watchlist tiers**: Tier 1 = all steps passed + valuation in buy zone (max 15). Tier 2 = Steps 1–5 passed, valuation not attractive (max 30). Tier 3 = Steps 1–3 passed, research pending. All tiers persisted to `investor.db` — no markdown files.
+**Watchlist tiers**: Tier 1 = all steps passed + valuation in buy zone (max 15). Tier 2 = Steps 1–5 passed, valuation not attractive (max 30). Tier 3 = Steps 1–3 passed, research pending. All tiers persisted to `investor.db` — no markdown files. In code, a valuation-FAIL watchlist entry is Tier 1 only when pre-screen, governance and financials are all PASS_GREEN and moat durability is High/Medium; governance PASS_GREEN (≥ 12/15) is almost never reached because the audit (auditor name) and RPT sub-scores fall back to data-gap defaults (2/3 and 1/3), so watchlist commands must not filter on Tier 1.
 
 **Position sizing**: conviction sets the base allocation (HIGH 5% / MEDIUM 3% / LOW 2%), then Step 9 risk-adjusts BUYs by realized volatility: `allocation × clamp(sizing_target_vol_pct / annualized_vol, sizing_min_factor, 1.0)`, rounded to 0.5%, floored at 1%. Volatility comes from 1Y daily returns via yfinance (`get_annualized_volatility`); when unavailable the allocation is left unchanged and flagged `[DATA UNVERIFIED: realized volatility]`. EC-01 pre-profit cap (≤4%) applies before scaling.
 

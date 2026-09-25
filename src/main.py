@@ -498,24 +498,98 @@ def watchlist(ticker: str, tier: str, reason: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+async def _load_watchlist_statuses() -> tuple:
+    """Market mode, watchlist rows, live prices and mode-adjusted entry statuses."""
+    from src.agent.mode_detector import detect_mode
+    from src.api.nse import NSEClient
+    from src.api.yfinance_client import YFinanceClient
+    from src.db.repository import get_watchlist_with_targets
+    from src.monitor.watchlist import evaluate_watchlist_row, sort_statuses
+
+    nifty_state = AnalysisState(ticker="NIFTY")
+    async with NSEClient() as nse_client:
+        mode = await detect_mode(nse_client, nifty_state)
+    # An unconfirmed mode must not loosen targets — keep the stored ones.
+    mode_for_targets = None if nifty_state.error_tags else mode
+
+    rows = await get_watchlist_with_targets(settings.db_path)
+    yf_client = YFinanceClient()
+    quotes = await asyncio.gather(*(yf_client.get_stock_quote(r["ticker"]) for r in rows))
+    prices = {r["ticker"]: (q.cmp if q else None) for r, q in zip(rows, quotes, strict=True)}
+    statuses = sort_statuses([
+        evaluate_watchlist_row(r, prices[r["ticker"]], mode_for_targets) for r in rows
+    ])
+    return mode, nifty_state, {r["ticker"]: r for r in rows}, prices, statuses
+
+
+def _print_watchlist_table(title: str, rows_by_ticker: dict, prices: dict, statuses: list) -> None:
+    status_style = {
+        "ENTER ZONE": "[green]🟢 ENTER ZONE[/green]",
+        "APPROACHING": "[yellow]🟡 APPROACHING[/yellow]",
+        "MONITORING": "[dim]⚪ MONITORING[/dim]",
+        "NO PRICE": "[dim]NO PRICE[/dim]",
+        "NO TARGET": "[dim]NO TARGET[/dim]",
+    }
+    table = Table(title=title, show_header=True, header_style="bold cyan")
+    table.add_column("Ticker", style="bold", no_wrap=True)
+    table.add_column("Tier", justify="center")
+    table.add_column("Analysed", no_wrap=True)
+    table.add_column("CMP", justify="right", overflow="fold")
+    table.add_column("Target", justify="right", overflow="fold")
+    table.add_column("Gap", justify="right", no_wrap=True)
+    table.add_column("Status", no_wrap=True)
+    for st in statuses:
+        row = rows_by_ticker[st.ticker]
+        live = prices.get(st.ticker)
+        table.add_row(
+            st.ticker,
+            str(row.get("watchlist_tier") or "—"),
+            row.get("analysis_date", ""),
+            f"{live:,.2f}" if live else "[dim]N/A[/dim]",
+            f"{st.target:,.2f}" if st.target else "—",
+            f"{st.gap_pct:+.1f}%" if st.gap_pct is not None else "—",
+            status_style[st.status],
+        )
+    console.print(table)
+    notes = [(st.ticker, st.note) for st in statuses if st.note and st.status != "NO TARGET"]
+    for ticker, note in notes:
+        console.print(f"[dim]  {ticker}: {note}[/dim]")
+    untargeted = [st.ticker for st in statuses if st.status == "NO TARGET"]
+    if untargeted:
+        console.print(
+            f"[dim]  No entry target (growth mode or missing DCF): {', '.join(untargeted)}[/dim]"
+        )
+
+
+def _print_watchlist_summary(statuses: list) -> None:
+    enter = [s.ticker for s in statuses if s.status == "ENTER ZONE"]
+    near = [s.ticker for s in statuses if s.status == "APPROACHING"]
+    if enter:
+        console.print(f"\n[bold green]🟢 In buy zone:[/bold green] {', '.join(enter)}")
+        console.print(
+            "[dim]Re-run the full analysis before buying: "
+            + "  |  ".join(f"investor analyze {t}" for t in enter[:5]) + "[/dim]"
+        )
+    if near:
+        console.print(f"[yellow]🟡 Within 10% of target:[/yellow] {', '.join(near)}")
+    if not enter and not near:
+        console.print("\n[dim]No watchlist names near their entry targets.[/dim]")
+    console.print(
+        "[dim]Prices in ₹ via Yahoo Finance (~15-20 min delayed). Targets = latest DCF × "
+        "(1 − required MoS for the current market mode).[/dim]"
+    )
+
+
 @cli.command("correction-scan")
 def correction_scan() -> None:
-    """Check current market mode and show Tier-1 watchlist entry opportunities."""
+    """Market mode plus every watchlist name against its mode-adjusted entry target.
 
-    async def _run() -> tuple:
-        from src.agent.mode_detector import detect_mode
-        from src.api.nse import NSEClient
-        from src.db.repository import get_watchlist_with_targets
-        from src.models import AnalysisState
-
-        nifty_state = AnalysisState(ticker="NIFTY")
-        async with NSEClient() as nse_client:
-            mode = await detect_mode(nse_client, nifty_state)
-        tier1_rows = await get_watchlist_with_targets(settings.db_path)
-        tier1_rows = [r for r in tier1_rows if (r.get("watchlist_tier") or 99) == 1]
-        return mode, nifty_state, tier1_rows
-
-    mode, nifty_state, tier1_rows = asyncio.run(_run())
+    During a correction the required margin of safety drops (5pp in CORRECTION,
+    10pp in MAXIMUM OPPORTUNITY), so targets stored during a normal market are
+    re-priced upward — quality names that got cheap surface on time.
+    """
+    with console.status("[bold green]Checking market mode and live prices...[/bold green]"):
+        mode, nifty_state, rows, prices, statuses = asyncio.run(_load_watchlist_statuses())
 
     console.print(f"\n[bold]Market Mode: {mode.value.upper()}[/bold]")
     if nifty_state.nifty_level:
@@ -524,34 +598,14 @@ def correction_scan() -> None:
         console.print(f"52W High: {nifty_state.nifty_52w_high:,.2f}")
     if nifty_state.nifty_decline_pct:
         console.print(f"Decline from peak: {nifty_state.nifty_decline_pct:.2f}%")
+    if nifty_state.error_tags:
+        console.print("[yellow]Market mode unconfirmed — using stored targets unchanged.[/yellow]")
 
-    # Show Tier 1 watchlist from SQLite
-    if tier1_rows:
-        console.print("\n[bold cyan]Tier 1 Watchlist (from DB):[/bold cyan]")
-        t1_table = Table(show_header=True, header_style="bold")
-        t1_table.add_column("Ticker", style="bold", width=12)
-        t1_table.add_column("Company", width=24)
-        t1_table.add_column("Analysis Date", width=13)
-        t1_table.add_column("CMP @ Analysis", justify="right", width=15)
-        t1_table.add_column("Target Buy", justify="right", width=12)
-        t1_table.add_column("Req MoS%", justify="right", width=10)
-        for r in tier1_rows:
-            cmp_val = r.get("cmp_at_analysis")
-            target = r.get("target_buy_price")
-            t1_table.add_row(
-                r.get("ticker", ""),
-                r.get("company_name", "") or "",
-                r.get("analysis_date", ""),
-                f"₹{cmp_val:.2f}" if cmp_val else "—",
-                f"₹{target:.2f}" if target else "—",
-                f"{r.get('required_mos_pct', '')}%",
-            )
-        console.print(t1_table)
-        console.print(
-            "[dim]Run [bold]investor watchlist-alerts[/bold] to compare live prices against targets.[/dim]"
-        )
-    else:
-        console.print("\n[dim]No Tier 1 watchlist entries in database yet.[/dim]")
+    if not statuses:
+        console.print("\n[dim]No watchlist entries in the database yet.[/dim]")
+        return
+    _print_watchlist_table("Watchlist — entry targets", rows, prices, statuses)
+    _print_watchlist_summary(statuses)
 
 
 # ---------------------------------------------------------------------------
@@ -1358,123 +1412,31 @@ def db_entry_plan(ticker: str) -> None:
 
 @cli.command("watchlist-alerts")
 def watchlist_alerts() -> None:
-    """Compare every WATCHLIST ticker's DCF target buy price against live CMP.
+    """Compare every watchlist ticker's DCF entry target against live CMP.
 
-    Fetches current prices via Yahoo Finance and flags tickers that have
-    entered (or are close to) their required margin-of-safety zone.
+    Targets are re-priced for the current market mode (the required margin of
+    safety is lower in a correction). Growth-mode watchlist names are listed
+    without a target.
 
     \b
     Alert levels:
-      🟢 ENTER ZONE   — CMP ≤ target buy price (MoS met — run full analysis now)
+      🟢 ENTER ZONE   — CMP ≤ target (MoS met — re-run the full analysis now)
       🟡 APPROACHING  — CMP within 10 % above target
       ⚪ MONITORING   — CMP still above target zone
     """
-    import asyncio as _asyncio
+    with console.status("[bold green]Fetching market mode and live prices...[/bold green]"):
+        mode, _nifty, rows, prices, statuses = asyncio.run(_load_watchlist_statuses())
 
-    from src.db.repository import get_watchlist_with_targets
-
-    rows = _asyncio.run(get_watchlist_with_targets(settings.db_path))
-
-    if not rows:
+    if not statuses:
         console.print(
-            f"[yellow]No WATCHLIST tickers found in {settings.db_path}. "
+            f"[yellow]No watchlist tickers found in {settings.db_path}. "
             "Run 'investor analyze TICKER' to add stocks to the watchlist.[/yellow]"
         )
         return
-
-    async def _fetch_prices(tickers: list[str]) -> dict[str, float | None]:
-        """Fetch live CMP for a list of tickers via YFinance."""
-        from src.api.yfinance_client import YFinanceClient
-
-        async with YFinanceClient() as yf_client:
-            results: dict[str, float | None] = {}
-            for t in tickers:
-                quote = await yf_client.get_stock_quote(t)
-                results[t] = quote.cmp if quote else None
-        return results
-
-    tickers = [r["ticker"] for r in rows]
-    with console.status("[bold green]Fetching live prices...[/bold green]"):
-        live_prices = asyncio.run(_fetch_prices(tickers))
-
-    table = Table(
-        title="Watchlist Alerts — Live CMP vs DCF Target",
-        show_header=True,
-        header_style="bold cyan",
-        show_lines=True,
+    _print_watchlist_table(
+        f"Watchlist Alerts — live CMP vs target ({mode.value} market)", rows, prices, statuses
     )
-    table.add_column("Ticker", style="bold", width=10)
-    table.add_column("Company", width=22)
-    table.add_column("Tier", justify="center", width=5)
-    table.add_column("Last Analysis", width=12)
-    table.add_column("CMP @ Analysis", justify="right", width=14)
-    table.add_column("Live CMP", justify="right", width=10)
-    table.add_column("Target Buy ₹", justify="right", width=12)
-    table.add_column("Gap %", justify="right", width=8)
-    table.add_column("Status", width=16)
-
-    enter_zone, approaching, monitoring = [], [], []
-
-    for row in rows:
-        ticker = row["ticker"]
-        live_cmp = live_prices.get(ticker)
-        target = row.get("target_buy_price")
-        cmp_at_analysis = row.get("cmp_at_analysis")
-        tier = row.get("watchlist_tier") or "—"
-
-        live_str = f"₹{live_cmp:.2f}" if live_cmp else "[dim]N/A[/dim]"
-        target_str = f"₹{target:.2f}" if target else "—"
-        old_cmp_str = f"₹{cmp_at_analysis:.2f}" if cmp_at_analysis else "—"
-
-        if live_cmp and target:
-            gap_pct = (live_cmp - target) / target * 100
-            gap_str = f"{gap_pct:+.1f}%"
-            if gap_pct <= 0:
-                status = "[green]🟢 ENTER ZONE[/green]"
-                enter_zone.append(ticker)
-            elif gap_pct <= 10:
-                status = "[yellow]🟡 APPROACHING[/yellow]"
-                approaching.append(ticker)
-            else:
-                status = "[dim]⚪ MONITORING[/dim]"
-                monitoring.append(ticker)
-        else:
-            gap_str = "—"
-            status = "[dim]⚪ NO TARGET[/dim]"
-            monitoring.append(ticker)
-
-        table.add_row(
-            ticker,
-            (row.get("company_name") or "")[:22],
-            str(tier),
-            row.get("analysis_date", ""),
-            old_cmp_str,
-            live_str,
-            target_str,
-            gap_str,
-            status,
-        )
-
-    console.print(table)
-
-    summary_parts = []
-    if enter_zone:
-        summary_parts.append(f"[green]{len(enter_zone)} in buy zone: {', '.join(enter_zone)}[/green]")
-    if approaching:
-        summary_parts.append(f"[yellow]{len(approaching)} approaching: {', '.join(approaching)}[/yellow]")
-    if monitoring:
-        summary_parts.append(f"[dim]{len(monitoring)} monitoring[/dim]")
-    console.print("\n" + "  |  ".join(summary_parts))
-
-    if enter_zone:
-        console.print(
-            f"\n[bold green]⚡ Action required:[/bold green] "
-            f"Run full analysis on: {', '.join(f'investor analyze {t}' for t in enter_zone)}"
-        )
-    console.print(
-        "\n[dim]Prices via Yahoo Finance (~15-20 min delayed). "
-        "Targets derived from DCF intrinsic at time of last analysis.[/dim]"
-    )
+    _print_watchlist_summary(statuses)
 
 
 # ---------------------------------------------------------------------------
@@ -1515,34 +1477,42 @@ def surveillance(days_since: int) -> None:
 
     if not rows:
         console.print(
-            f"[yellow]No BUY or WATCHLIST tickers found in {settings.db_path}.[/yellow]"
+            f"[yellow]No buy or watchlist tickers found in {settings.db_path}.[/yellow]"
         )
         return
 
-    async def _fetch_prices(tickers: list[str]) -> dict[str, float | None]:
+    async def _fetch_prices(tickers: list[str]) -> tuple[dict[str, float | None], object]:
+        from src.agent.mode_detector import detect_mode
+        from src.api.nse import NSEClient
         from src.api.yfinance_client import YFinanceClient
 
+        nifty_state = AnalysisState(ticker="NIFTY")
+        async with NSEClient() as nse_client:
+            mode = await detect_mode(nse_client, nifty_state)
         async with YFinanceClient() as yf_client:
             out: dict[str, float | None] = {}
             for t in tickers:
                 quote = await yf_client.get_stock_quote(t)
                 out[t] = quote.cmp if quote else None
-        return out
+        # An unconfirmed mode must not loosen watchlist targets
+        return out, (None if nifty_state.error_tags else mode)
+
+    from src.monitor.watchlist import WATCHLIST_RECS, evaluate_watchlist_row
 
     tickers = [r["ticker"] for r in rows]
     with console.status("[bold green]Fetching live prices for surveillance...[/bold green]"):
-        live_prices = asyncio.run(_fetch_prices(tickers))
+        live_prices, current_mode = asyncio.run(_fetch_prices(tickers))
 
     today = date.today()
 
     table = Table(
-        title="Surveillance — All BUY / WATCHLIST Positions",
+        title="Surveillance — Buy and Watchlist Positions (value + growth)",
         show_header=True,
         header_style="bold cyan",
         show_lines=False,
     )
     table.add_column("Ticker", style="bold", width=10)
-    table.add_column("Rec", width=10)
+    table.add_column("Rec", no_wrap=True)
     table.add_column("Last Analysis", width=12)
     table.add_column("Stale?", justify="center", width=8)
     table.add_column("CMP @ Analysis", justify="right", width=14)
@@ -1587,16 +1557,18 @@ def surveillance(days_since: int) -> None:
                 drift_action = "↓ Opportunity / thesis?"
 
         # Watchlist zone check
+        # (mode-adjusted target; growth-mode rows carry none)
         zone_str = "—"
-        if rec == "WATCHLIST" and live_cmp and target:
-            gap = (live_cmp - target) / target * 100
-            if gap <= 0:
+        if rec in WATCHLIST_RECS:
+            st = evaluate_watchlist_row(row, live_cmp, current_mode)
+            target = st.target
+            if st.status == "ENTER ZONE":
                 zone_str = "[green]✓ IN[/green]"
                 enter_zone.append(ticker)
-            elif gap <= 10:
+            elif st.status == "APPROACHING":
                 zone_str = "[yellow]~10%[/yellow]"
-            else:
-                zone_str = f"[dim]+{gap:.0f}%[/dim]"
+            elif st.gap_pct is not None:
+                zone_str = f"[dim]+{st.gap_pct:.0f}%[/dim]"
 
         # Recommended action
         if stale:
@@ -1610,7 +1582,7 @@ def surveillance(days_since: int) -> None:
         else:
             action = "[dim]Continue monitoring[/dim]"
 
-        rec_colour = "green" if rec == "BUY" else "yellow"
+        rec_colour = "yellow" if rec in WATCHLIST_RECS else "green"
         live_str = f"₹{live_cmp:.2f}" if live_cmp else "[dim]N/A[/dim]"
         prev_str = f"₹{cmp_prev:.2f}" if cmp_prev else "—"
         target_str = f"₹{target:.2f}" if target else "—"
