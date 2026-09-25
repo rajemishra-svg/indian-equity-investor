@@ -73,6 +73,12 @@ async def init_db(db_path: str) -> None:
             ("analyses", "analysis_mode",    "ALTER TABLE analyses ADD COLUMN analysis_mode TEXT DEFAULT 'value'"),
             ("analyses", "multibagger_total_score", "ALTER TABLE analyses ADD COLUMN multibagger_total_score INTEGER"),
             ("analyses", "multibagger_verdict",     "ALTER TABLE analyses ADD COLUMN multibagger_verdict TEXT"),
+            # Exit plan (Step 9) — read by `investor holdings-alerts`
+            ("analyses", "stop_loss_price",      "ALTER TABLE analyses ADD COLUMN stop_loss_price REAL"),
+            ("analyses", "stop_loss_multiplier", "ALTER TABLE analyses ADD COLUMN stop_loss_multiplier REAL"),
+            ("analyses", "exit_trim_price",      "ALTER TABLE analyses ADD COLUMN exit_trim_price REAL"),
+            ("analyses", "exit_reduce_price",    "ALTER TABLE analyses ADD COLUMN exit_reduce_price REAL"),
+            ("analyses", "exit_full_price",      "ALTER TABLE analyses ADD COLUMN exit_full_price REAL"),
         ]
         for table, column, ddl in migrations:
             async with db.execute(
@@ -132,6 +138,8 @@ async def save_analysis(db_path: str, state: AnalysisState) -> None:
     watchlist_tier = int(state.watchlist_tier) if state.watchlist_tier else None
     conviction = state.conviction.value if state.conviction else None
 
+    ex = state.exit_strategy
+
     # P2-2: Compute DCF-derived target buy price for WATCHLIST entries.
     # target = DCF intrinsic × (1 - required MoS %) — the price at which the
     # required safety margin is just met.  Stored so watchlist-alerts can compare
@@ -167,7 +175,9 @@ async def save_analysis(db_path: str, state: AnalysisState) -> None:
                 analysis_mode, multibagger_total_score, multibagger_verdict,
                 terminated_at_step, termination_reason, recommendation, conviction,
                 watchlist_tier, target_buy_price, investment_thesis,
-                all_data_flags, error_tags
+                all_data_flags, error_tags,
+                stop_loss_price, stop_loss_multiplier,
+                exit_trim_price, exit_reduce_price, exit_full_price
             ) VALUES (
                 ?, ?, ?, ?, ?, ?,
                 ?, ?,
@@ -179,7 +189,9 @@ async def save_analysis(db_path: str, state: AnalysisState) -> None:
                 ?, ?, ?,
                 ?, ?, ?, ?,
                 ?, ?, ?,
-                ?, ?
+                ?, ?,
+                ?, ?,
+                ?, ?, ?
             )
             """,
             (
@@ -217,6 +229,11 @@ async def save_analysis(db_path: str, state: AnalysisState) -> None:
                 state.investment_thesis,
                 json.dumps(state.all_data_flags),
                 json.dumps(state.error_tags),
+                ex.stop_loss_price if ex else None,
+                ex.stop_loss_multiplier if ex else None,
+                ex.exit_trim_price if ex else None,
+                ex.valuation_exit_price if ex else None,
+                ex.exit_full_price if ex else None,
             ),
         )
         await db.commit()

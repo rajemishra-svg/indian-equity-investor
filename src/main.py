@@ -1687,6 +1687,138 @@ def surveillance(days_since: int) -> None:
 
 
 # ---------------------------------------------------------------------------
+# holdings-alerts command
+# ---------------------------------------------------------------------------
+
+
+@cli.command("holdings-alerts")
+@click.option(
+    "--user",
+    "user_id",
+    default=None,
+    envvar="INVESTOR_USER",
+    help="Portfolio user ID.",
+)
+@click.option(
+    "--days-since",
+    default=30,
+    show_default=True,
+    help="Flag holdings whose last analysis is older than this many days",
+)
+def holdings_alerts(user_id: str | None, days_since: int) -> None:
+    """Exit alerts for long-term holdings — thesis breaks and valuation exits.
+
+    Zero-LLM sweep of every holding against live CMP (Yahoo Finance):
+    the latest analysis's verdict, the Step 9 exit ladder (DCF × sector exit
+    multipliers: trim / reduce / full exit), and a sharp-fall review level
+    anchored to YOUR average cost (large 18% / mid 25% / small 30% below).
+    A sharp fall asks for a fresh analysis — it is not a sell signal.
+
+    \b
+    Severity:
+      HIGH    latest analysis REJECT/PEER_SWITCH · full-exit target reached
+      MEDIUM  trim/reduce target reached · sharp fall (re-analyse) · no live price
+      LOW     stale or missing analysis · fall already re-checked
+    """
+    from src.db.repository import get_latest_analysis
+    from src.monitor.holdings import evaluate_holding, rollup_lots, sort_alerts
+
+    tracker = PortfolioTracker(user_id=user_id)
+    positions = rollup_lots(asyncio.run(tracker.get_holdings()))
+    if not positions:
+        console.print(f"[yellow]No holdings found for user '{tracker.user_id}'.[/yellow]")
+        return
+
+    async def _gather() -> tuple[dict, dict]:
+        from src.api.yfinance_client import YFinanceClient
+
+        tickers = [p.ticker for p in positions]
+        yf_client = YFinanceClient()
+        quotes = await asyncio.gather(*(yf_client.get_stock_quote(t) for t in tickers))
+        analyses = await asyncio.gather(
+            *(get_latest_analysis(settings.db_path, t) for t in tickers)
+        )
+        return (
+            {t: (q.cmp if q else None) for t, q in zip(tickers, quotes, strict=True)},
+            dict(zip(tickers, analyses, strict=True)),
+        )
+
+    with console.status("[bold green]Fetching live prices...[/bold green]"):
+        prices, analyses = asyncio.run(_gather())
+
+    today = date.today()
+    alerts = sort_alerts([
+        evaluate_holding(p, analyses[p.ticker], prices[p.ticker], today, days_since)
+        for p in positions
+    ])
+
+    colours = {"HIGH": "red", "MEDIUM": "yellow", "LOW": "cyan", "OK": "green"}
+    table = Table(
+        title=f"Holdings Exit Alerts — user '{tracker.user_id}'",
+        show_header=True,
+        header_style="bold cyan",
+        show_lines=True,
+    )
+    # Compact numeric table; the reasons are listed underneath so they stay
+    # readable in an 80-column terminal.
+    table.add_column("Ticker", style="bold", no_wrap=True)
+    table.add_column("CMP", justify="right", overflow="fold")
+    table.add_column("P&L", justify="right", overflow="fold")
+    table.add_column("Review ≤", justify="right", overflow="fold")
+    table.add_column("Exits T/R/F", justify="right", overflow="fold")
+    table.add_column("Action", no_wrap=True)
+
+    for a in alerts:
+        lv = a.levels
+        colour = colours[a.severity]
+        ladder = (
+            "/".join(f"{x:,.0f}" if x else "—" for x in (lv.trim, lv.reduce, lv.full))
+            if lv and (lv.trim or lv.reduce or lv.full)
+            else "—"
+        )
+        pnl = (
+            f"[{'green' if a.pnl_pct >= 0 else 'red'}]{a.pnl_pct:+.1f}%[/]"
+            if a.pnl_pct is not None else "—"
+        )
+        table.add_row(
+            a.ticker,
+            f"{a.live_cmp:,.2f}" if a.live_cmp is not None else "[dim]N/A[/dim]",
+            pnl,
+            f"{lv.review_price:,.2f}" if lv else "—",
+            ladder,
+            f"[{colour}]{a.action}[/{colour}]",
+        )
+    console.print(table)
+
+    for a in alerts:
+        if a.severity in ("HIGH", "MEDIUM"):
+            colour = colours[a.severity]
+            console.print(f"\n[bold {colour}]{a.ticker} — {a.action}[/bold {colour}]")
+            for reason in a.reasons:
+                console.print(f"  • {reason}")
+
+    high = [a.ticker for a in alerts if a.severity == "HIGH"]
+    medium = [a.ticker for a in alerts if a.severity == "MEDIUM"]
+    if high:
+        console.print(f"\n[bold red]⚠ Act now:[/bold red] {', '.join(high)}")
+    if medium:
+        console.print(f"[bold yellow]Review:[/bold yellow] {', '.join(medium)}")
+    if not high and not medium:
+        console.print("\n[green]No exit signals.[/green]")
+    unanalysed = [a.ticker for a in alerts if analyses[a.ticker] is None]
+    if unanalysed:
+        console.print(
+            f"[cyan]No analysis yet (no exit targets):[/cyan] {', '.join(unanalysed)}\n"
+            f"[dim]Run: investor analyze {unanalysed[0]}  (or investor portfolio-review)[/dim]"
+        )
+    console.print(
+        "\n[dim]Prices in ₹ via Yahoo Finance (~15-20 min delayed). Exit targets come "
+        "from the latest analysis's DCF; the review level is measured from your average "
+        "cost and only prompts a re-analysis. Signals only — review before trading.[/dim]"
+    )
+
+
+# ---------------------------------------------------------------------------
 # import-pnl command
 # ---------------------------------------------------------------------------
 

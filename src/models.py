@@ -428,8 +428,11 @@ class TrancheEntry(BaseModel):
 
 class ExitStrategy(BaseModel):
     fundamental_trigger: str
-    valuation_exit_price: float | None = None
-    stop_loss_price: float | None = None
+    valuation_exit_price: float | None = None   # T2 "reduce" target (report summary)
+    exit_trim_price: float | None = None        # T1: DCF × exit_mult_1x
+    exit_full_price: float | None = None        # T3: DCF × exit_mult_3x
+    stop_loss_price: float | None = None        # from CMP at analysis time
+    stop_loss_multiplier: float | None = None   # apply to actual cost for held positions
     ltcg_eligible_after: str | None = None  # date string
 
 

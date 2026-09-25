@@ -82,6 +82,14 @@ class Settings(BaseSettings):
     stop_loss_mid_cap: float = 0.75
     stop_loss_small_cap: float = 0.70
 
+    def stop_loss_multiplier(self, cap_size: str | None) -> float:
+        """Stop-loss as a fraction of entry price for a cap-size bucket (mid-cap default)."""
+        return {
+            "large_cap": self.stop_loss_large_cap,
+            "mid_cap": self.stop_loss_mid_cap,
+            "small_cap": self.stop_loss_small_cap,
+        }.get(cap_size or "", self.stop_loss_mid_cap)
+
     # --- Volatility-aware position sizing (Step 9) ---
     # Allocation is scaled by clamp(target_vol / realized_vol, min_factor, 1.0):
     # a stock at/below target volatility keeps its full conviction-based
