@@ -480,7 +480,7 @@ async def list_recommendations(
 
 
 async def get_watchlist_with_targets(db_path: str) -> list[dict]:
-    """Return every ticker whose *most recent* analysis is a WATCHLIST entry.
+    """Return every ticker whose *most recent* analysis is a WATCHLIST or GROWTH_WATCHLIST entry.
 
     Includes ``target_buy_price``, ``cmp`` (at time of analysis), ``dcf_intrinsic_weighted``,
     and ``required_mos_pct``.  Used by ``investor watchlist-alerts`` to compare live
@@ -505,13 +505,16 @@ async def get_watchlist_with_targets(db_path: str) -> list[dict]:
                 required_mos_pct,
                 mos_pct,
                 sector_name,
-                termination_reason
+                termination_reason,
+                recommendation,
+                market_mode,
+                analysis_mode
             FROM analyses
             WHERE id IN (
                 SELECT MAX(id) FROM analyses
                 GROUP BY ticker
             )
-              AND recommendation = 'WATCHLIST'
+              AND recommendation IN ('WATCHLIST', 'GROWTH_WATCHLIST')
             ORDER BY watchlist_tier ASC, analysis_date DESC
             """
         ) as cursor:
@@ -521,7 +524,10 @@ async def get_watchlist_with_targets(db_path: str) -> list[dict]:
 
 
 async def get_all_tracked_tickers(db_path: str) -> list[dict]:
-    """Return every ticker whose *most recent* analysis is BUY or WATCHLIST.
+    """Return every ticker whose *most recent* analysis is a buy or watchlist outcome.
+
+    Covers value mode (BUY, WATCHLIST) and growth mode (MULTIBAGGER_CANDIDATE,
+    GROWTH_BUY, GROWTH_WATCHLIST).
 
     Used by the surveillance command to check all positions in one sweep.
 
@@ -541,13 +547,17 @@ async def get_all_tracked_tickers(db_path: str) -> list[dict]:
                 ticker, company_name, analysis_date, recommendation,
                 watchlist_tier, target_buy_price, cmp AS cmp_at_analysis,
                 dcf_intrinsic_weighted, required_mos_pct, mos_pct,
-                governance_score, financial_score, sector_name, conviction
+                governance_score, financial_score, sector_name, conviction,
+                market_mode, analysis_mode
             FROM analyses
             WHERE id IN (
                 SELECT MAX(id) FROM analyses
                 GROUP BY ticker
             )
-              AND recommendation IN ('BUY', 'WATCHLIST')
+              AND recommendation IN (
+                  'BUY', 'WATCHLIST',
+                  'MULTIBAGGER_CANDIDATE', 'GROWTH_BUY', 'GROWTH_WATCHLIST'
+              )
             ORDER BY recommendation, analysis_date DESC
             """
         ) as cursor:
