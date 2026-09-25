@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 import structlog
 import yfinance as yf
 
+from src.api.technicals import compute_52w_range, compute_dma, compute_rsi
 from src.models import StockQuote, ValuationData
 
 log = structlog.get_logger(__name__)
@@ -138,6 +139,38 @@ def _compute_volume_trend_sync(hist_30d: object) -> str | None:
         return None
 
 
+# Last ~30 calendar days of a daily series, used for the volume trend (P3-4).
+_VOLUME_TREND_BARS = 21
+
+
+def _history_technicals(hist: object) -> dict:
+    """RSI-14, 200-DMA, 52W range and volume trend from a 1Y daily history.
+
+    Returns an empty dict when ``hist`` is not a usable DataFrame, so callers
+    can ``.get()`` each field and fall back to None.
+    """
+    try:
+        import pandas as pd
+
+        if not isinstance(hist, pd.DataFrame) or hist.empty:
+            return {}
+        closes = [float(c) for c in hist["Close"].dropna()]
+        highs = [float(h) for h in hist["High"].dropna()] if "High" in hist else []
+        lows = [float(lo) for lo in hist["Low"].dropna()] if "Low" in hist else []
+        w52_high, w52_low = compute_52w_range(highs, lows)
+        return {
+            "rsi_14": compute_rsi(closes),
+            "dma_200": compute_dma(closes),
+            "w52_high": w52_high,
+            "w52_low": w52_low,
+            "volume_trend_down_days": _compute_volume_trend_sync(
+                hist.tail(_VOLUME_TREND_BARS)
+            ),
+        }
+    except Exception:
+        return {}
+
+
 class YFinanceClient:
     """Async wrapper around the synchronous yfinance library.
 
@@ -157,17 +190,18 @@ class YFinanceClient:
             def _fetch_quote_data():
                 t = yf.Ticker(yf_symbol)
                 fi = t.fast_info
-                # Also grab 30-day daily history for volume trend (P3-4).
-                # Failures here are non-fatal — silently return None for hist.
+                # 1Y daily history feeds RSI-14, 200-DMA, the 52W range fallback
+                # and the volume trend (P3-4). Failures here are non-fatal.
                 try:
-                    hist_30d = t.history(period="30d", interval="1d")
+                    hist_1y = t.history(period="1y", interval="1d")
                 except Exception:
-                    hist_30d = None
-                return fi, hist_30d
+                    hist_1y = None
+                return fi, hist_1y
 
-            fast_info, hist_30d = await asyncio.get_event_loop().run_in_executor(
+            fast_info, hist_1y = await asyncio.get_event_loop().run_in_executor(
                 None, _fetch_quote_data
             )
+            tech = _history_technicals(hist_1y)
 
             cmp = _safe_float(fast_info.get("lastPrice") or fast_info.get("last_price"))
             if cmp is None or cmp == 0:
@@ -179,15 +213,17 @@ class YFinanceClient:
             )
             market_cap_cr = market_cap / 1e7 if market_cap else 0.0
 
+            # fast_info names the 52W range yearHigh/yearLow (there is no
+            # fiftyTwoWeekHigh key — reading that left every quote at 0).
             w52_high = _safe_float(
-                fast_info.get("fiftyTwoWeekHigh") or fast_info.get("fifty_two_week_high")
-            ) or 0.0
+                fast_info.get("yearHigh") or fast_info.get("year_high")
+            ) or tech.get("w52_high") or 0.0
             w52_low = _safe_float(
-                fast_info.get("fiftyTwoWeekLow") or fast_info.get("fifty_two_week_low")
-            ) or 0.0
+                fast_info.get("yearLow") or fast_info.get("year_low")
+            ) or tech.get("w52_low") or 0.0
             dma_200 = _safe_float(
                 fast_info.get("twoHundredDayAverage") or fast_info.get("two_hundred_day_average")
-            )
+            ) or tech.get("dma_200")
 
             # P2-5: Average daily traded value (3-month avg volume × CMP)
             avg_vol = _safe_float(
@@ -197,7 +233,8 @@ class YFinanceClient:
             avg_daily_value_cr = round(avg_vol * cmp / 1e7, 2) if avg_vol and cmp else None
 
             # P3-4: Volume trend on down-price days
-            volume_trend_down_days = _compute_volume_trend_sync(hist_30d)
+            volume_trend_down_days = tech.get("volume_trend_down_days")
+            rsi_14 = tech.get("rsi_14")
 
             log.info(
                 "yfinance_quote_ok",
@@ -206,6 +243,9 @@ class YFinanceClient:
                 market_cap_cr=round(market_cap_cr, 1),
                 avg_daily_value_cr=avg_daily_value_cr,
                 volume_trend=volume_trend_down_days,
+                rsi_14=rsi_14,
+                w52_high=w52_high,
+                dma_200=dma_200,
             )
             return StockQuote(
                 ticker=ticker,
@@ -220,10 +260,31 @@ class YFinanceClient:
                 is_stale=True,
                 avg_daily_value_cr=avg_daily_value_cr,
                 volume_trend_down_days=volume_trend_down_days,
+                rsi_14=rsi_14,
             )
         except Exception as exc:
             log.warning("yfinance_quote_failed", ticker=ticker, error=str(exc))
             return None
+
+    async def get_price_technicals(self, ticker: str) -> dict:
+        """RSI-14 / 200-DMA / 52W range / volume trend from 1Y daily history.
+
+        Used to backfill quotes from sources that carry only a price (NSE's
+        quote endpoint has no DMA, RSI or volume data). Empty dict on failure.
+        """
+        yf_symbol = _to_yf_symbol(ticker)
+
+        def _fetch() -> object:
+            try:
+                return yf.Ticker(yf_symbol).history(period="1y", interval="1d")
+            except Exception:
+                return None
+
+        hist = await asyncio.get_event_loop().run_in_executor(None, _fetch)
+        tech = _history_technicals(hist)
+        if not tech:
+            log.warning("yfinance_technicals_unavailable", ticker=ticker)
+        return tech
 
     async def get_nifty50(self) -> tuple[float, float]:
         """Fetch Nifty 50 current level and 52-week high via Yahoo Finance.

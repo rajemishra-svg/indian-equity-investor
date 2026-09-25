@@ -32,7 +32,7 @@ from src.api import (
 from src.api.cache import data_cache
 from src.config import settings
 from src.logging_config import get_logger
-from src.models import AnalysisState, GovernanceData
+from src.models import AnalysisState, GovernanceData, StockQuote
 from src.sector.classifier import classify_sector_with_confidence, is_conglomerate
 
 # Low-confidence threshold below which we attempt post-Step-2 reclassification
@@ -326,6 +326,7 @@ class InvestmentPipeline:
                 else:
                     state.add_flag("[DATA UNVERIFIED: stock_quote]")
         if quote_result is not None:
+            quote_result = await self._backfill_technicals(ticker, quote_result, clients)
             state.quote = quote_result
             state.company_name = quote_result.company_name
 
@@ -499,6 +500,44 @@ class InvestmentPipeline:
                 f"[ER-07: DB SNAPSHOT FAILURES — {snapshot_failures}/{len(snap_tasks)} snapshots "
                 "could not be saved; check db_path permissions and disk space]"
             )
+
+    async def _backfill_technicals(
+        self, ticker: str, quote: StockQuote, clients: dict
+    ) -> StockQuote:
+        """Fill Step 6 inputs a quote source didn't provide from yfinance history.
+
+        NSE's quote endpoint carries price and 52W range but no 200-DMA, RSI or
+        volume data, which left three of the five technical signals dead. A
+        failed backfill is non-fatal: Step 6 flags whichever inputs stay None.
+        """
+        missing = (
+            quote.dma_200 is None
+            or quote.rsi_14 is None
+            or quote.volume_trend_down_days is None
+            or not quote.w52_high
+            or not quote.w52_low
+        )
+        if not missing:
+            return quote
+        try:
+            tech = await clients["yfinance"].get_price_technicals(ticker)
+        except Exception as exc:
+            self.log.warning("technicals_backfill_failed", ticker=ticker, error=str(exc))
+            return quote
+        if not isinstance(tech, dict):
+            return quote
+        update = {
+            field: tech[field]
+            for field in ("dma_200", "rsi_14", "volume_trend_down_days")
+            if getattr(quote, field) is None and tech.get(field) is not None
+        }
+        for field in ("w52_high", "w52_low"):
+            if not getattr(quote, field) and tech.get(field):
+                update[field] = tech[field]
+        if update:
+            self.log.info("technicals_backfilled", ticker=ticker, fields=sorted(update))
+        # model_copy: the quote object may be shared through DataCache
+        return quote.model_copy(update=update) if update else quote
 
     async def _enrich_governance_from_trendlyne(
         self, ticker: str, state: AnalysisState, clients: dict
