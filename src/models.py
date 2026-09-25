@@ -129,7 +129,7 @@ class FinancialMetrics(BaseModel):
     ebitda_margin_5y_avg: float | None = None  # 5Y OPM avg; used in DCF for cyclicals
 
     # ── Revenue (absolute) — needed for P/S ratio on pre-profit companies ──
-    trailing_revenue_cr: float | None = None   # latest annual revenue in ₹ Crore
+    trailing_revenue_cr: float | None = None   # TTM revenue in ₹ Crore (latest FY if no TTM)
 
     # ── Growth mode: capex, D&A, gross margin (populated by Screener extension) ──
     capex_cr_latest: float | None = None        # latest year capital expenditure ₹ Cr (absolute)
@@ -138,7 +138,8 @@ class FinancialMetrics(BaseModel):
     ebit_cr_latest: float | None = None         # EBITDA - D&A, latest year
     gross_profit_margin_pct: float | None = None  # gross margin % latest year
     gross_profit_margin_series: list[float] = Field(default_factory=list)  # annual series
-    revenue_1y_ago_cr: float | None = None      # prior-year revenue for 1Y CAGR computation
+    revenue_latest_fy_cr: float | None = None   # latest full fiscal-year revenue ₹ Cr
+    revenue_1y_ago_cr: float | None = None      # fiscal year before revenue_latest_fy_cr
     cash_cr_latest: float | None = None         # cash & equivalents from balance sheet ₹ Cr
 
     # ── Depreciation effect (forensic check) ───────────────────────────────
