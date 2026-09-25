@@ -1,8 +1,13 @@
 """Tests for compute_growth_metrics — specifically promoter_holding_trend_5y sourcing."""
 from __future__ import annotations
 
-from src.agent.growth_pipeline import compute_growth_metrics
-from src.models import AnalysisState, FinancialMetrics, GovernanceData
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from src.agent.growth_pipeline import GrowthPipeline, compute_growth_metrics
+from src.agent.pipeline import InvestmentPipeline
+from src.models import AnalysisState, FinancialMetrics, GovernanceData, MarketMode
 
 
 def _state(governance_data: GovernanceData | None) -> AnalysisState:
@@ -78,3 +83,31 @@ def test_no_governance_data_leaves_trend_none():
     compute_growth_metrics(state)
 
     assert state.growth_metrics.promoter_holding_trend_5y is None
+
+
+class _StopAfterPrefetchError(Exception):
+    pass
+
+
+@pytest.mark.asyncio
+async def test_growth_pipeline_passes_same_clients_as_value_pipeline():
+    """_prefetch_data falls back NSE → Breeze → yfinance; GrowthPipeline once
+    omitted "breeze" from its clients dict, so every NSE miss raised KeyError."""
+    seen: dict[str, set[str]] = {}
+
+    def capture(label):
+        async def fake_prefetch(self, state, clients):
+            seen[label] = set(clients)
+            raise _StopAfterPrefetchError
+
+        return fake_prefetch
+
+    with patch("src.agent.growth_pipeline.detect_mode", AsyncMock(return_value=MarketMode.NORMAL)), \
+         patch("src.agent.pipeline.detect_mode", AsyncMock(return_value=MarketMode.NORMAL)):
+        for label, cls in (("growth", GrowthPipeline), ("value", InvestmentPipeline)):
+            with patch.object(cls, "_prefetch_data", capture(label)):
+                with pytest.raises(_StopAfterPrefetchError):
+                    await cls(claude=AsyncMock()).analyze("TESTCO")
+
+    assert "breeze" in seen["growth"]
+    assert seen["growth"] == seen["value"]

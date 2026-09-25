@@ -188,12 +188,13 @@ class GrowthPipeline(InvestmentPipeline):
         state = AnalysisState(ticker=ticker)
         state.analysis_mode = AnalysisMode.GROWTH
 
-        async with self.nse, self.screener, self.bse, self.trendlyne, self.yfinance:
+        async with self.nse, self.screener, self.bse, self.trendlyne, self.breeze, self.yfinance:
             clients = {
                 "nse": self.nse,
                 "screener": self.screener,
                 "bse": self.bse,
                 "trendlyne": self.trendlyne,
+                "breeze": self.breeze,
                 "yfinance": self.yfinance,
             }
 
