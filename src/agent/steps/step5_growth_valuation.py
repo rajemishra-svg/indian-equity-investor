@@ -62,23 +62,32 @@ def _forward_revenue_dcf(
     wacc_pct: float,
     terminal_ps_multiple: float = 3.0,
     projection_years: int = 7,
+    terminal_growth_pct: float | None = None,
 ) -> float:
-    """Project revenue at 3Y CAGR for `projection_years`, then apply terminal P/S.
+    """Project revenue with a fading growth rate, apply terminal P/S, discount back.
 
-    Returns present value (intrinsic value) per share in ₹ Crore (total company).
-    Caller divides by shares outstanding to get per-share value.
+    Year-1 growth is the 3Y revenue CAGR (clamped to [0%, 60%]); it fades
+    linearly to `terminal_growth_pct` (default ``settings.wacc_terminal_growth``)
+    by the final projection year.  Compounding a 40–60% CAGR flat for 7 years
+    produced 15–26× today's revenue and intrinsic values many multiples of CMP;
+    the fade keeps the projection consistent with growth mean-reversion.
+
+    Returns the present value of the company's equity in ₹ Crore (total, not
+    per share).  Divide by shares outstanding *in crores* to get ₹ per share.
     """
-    g = revenue_cagr_3y_pct / 100
+    if terminal_growth_pct is None:
+        terminal_growth_pct = settings.wacc_terminal_growth
+    g0 = min(max(revenue_cagr_3y_pct / 100, 0.0), 0.60)
+    g_terminal = min(terminal_growth_pct / 100, g0)
     r = wacc_pct / 100
-    # Cap growth at realistic bounds
-    g = min(g, 0.60)
-    g = max(g, 0.0)
 
-    # Terminal revenue at end of projection period
-    terminal_revenue = trailing_revenue_cr * ((1 + g) ** projection_years)
+    revenue = trailing_revenue_cr
+    for year in range(projection_years):
+        frac = year / (projection_years - 1) if projection_years > 1 else 1.0
+        revenue *= 1 + g0 + (g_terminal - g0) * frac
+
     # Terminal value = terminal revenue × P/S multiple, discounted back
-    terminal_value = terminal_revenue * terminal_ps_multiple / ((1 + r) ** projection_years)
-    return terminal_value
+    return revenue * terminal_ps_multiple / ((1 + r) ** projection_years)
 
 
 class Step5GrowthValuation(BaseStep):
@@ -201,7 +210,7 @@ class Step5GrowthValuation(BaseStep):
 
         # ==================================================================
         # Method G5-3 — Forward Revenue DCF
-        # Project at 3Y CAGR for 7 years, terminal P/S = 2-4× (sector-dependent)
+        # Project 7 years (3Y CAGR fading to terminal growth), terminal P/S = 2-4× (sector-dependent)
         # ==================================================================
         rev_cr = f.trailing_revenue_cr if f else None
         shares = v.shares_outstanding_cr if v else None
@@ -224,7 +233,8 @@ class Step5GrowthValuation(BaseStep):
                 terminal_ps_multiple=terminal_ps,
                 projection_years=7,
             )
-            intrinsic_per_share_rs = intrinsic_total_cr / shares * 10  # ₹ (Cr → Rs conversion)
+            # ₹ Cr / crore shares = ₹ per share — the crore factors cancel.
+            intrinsic_per_share_rs = intrinsic_total_cr / shares
 
             mos_pct = (intrinsic_per_share_rs - cmp) / intrinsic_per_share_rs * 100 if intrinsic_per_share_rs > 0 else 0
 

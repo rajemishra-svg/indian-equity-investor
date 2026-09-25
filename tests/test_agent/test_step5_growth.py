@@ -5,7 +5,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from src.agent.steps.step5_growth_valuation import Step5GrowthValuation
+from src.agent.steps.step5_growth_valuation import Step5GrowthValuation, _forward_revenue_dcf
+from src.config import settings
 from src.models import (
     AnalysisMode,
     AnalysisState,
@@ -163,3 +164,87 @@ async def test_no_tam_gives_skip_flag():
     flags = " ".join(state.all_data_flags)
     assert "TAM-ceiling check skipped" in flags
     assert "TAM UNVERIFIED" not in flags
+
+
+# ---------------------------------------------------------------------------
+# G5-3: Forward Revenue DCF — units and growth fade (regression)
+# ---------------------------------------------------------------------------
+#
+# Hand computation for revenue ₹1,000 Cr, 3Y CAGR 30%, terminal growth 6%,
+# 7 years, WACC 17%, terminal P/S 2.5:
+#   growth fades linearly 30% → 6% in 4pp steps: 30, 26, 22, 18, 14, 10, 6
+#   revenue_y7 = 1000 × 1.30 × 1.26 × 1.22 × 1.18 × 1.14 × 1.10 × 1.06 = 3,134.434 Cr
+#   TV         = 3,134.434 × 2.5                                        = 7,836.085 Cr
+#   PV         = 7,836.085 / 1.17^7 (3.0012421)                         = 2,610.947 Cr
+#   per share  = 2,610.947 Cr / 10 Cr shares                            = ₹261.09
+
+
+def test_forward_revenue_dcf_hand_computed():
+    pv_cr = _forward_revenue_dcf(
+        trailing_revenue_cr=1_000.0,
+        revenue_cagr_3y_pct=30.0,
+        wacc_pct=17.0,
+        terminal_ps_multiple=2.5,
+        projection_years=7,
+        terminal_growth_pct=6.0,
+    )
+    assert pv_cr == pytest.approx(2_610.947, abs=0.01)
+
+
+def test_forward_revenue_dcf_growth_below_terminal_does_not_accelerate():
+    """A 3% grower stays at 3% — the fade never pushes growth *up* to terminal."""
+    pv_cr = _forward_revenue_dcf(1_000.0, 3.0, 17.0, 2.5, 7, terminal_growth_pct=6.0)
+    assert pv_cr == pytest.approx(1_000.0 * 1.03**7 * 2.5 / 1.17**7, rel=1e-9)
+
+
+@pytest.fixture
+def pinned_wacc(monkeypatch):
+    """Pin WACC inputs so .env overrides can't move the hand-computed values."""
+    monkeypatch.setattr(settings, "wacc_large_cap", 13.0)
+    monkeypatch.setattr(settings, "wacc_mid_cap", 15.0)
+    monkeypatch.setattr(settings, "wacc_small_cap", 16.5)
+    monkeypatch.setattr(settings, "wacc_terminal_growth", 6.0)
+
+
+@pytest.mark.asyncio
+async def test_forward_dcf_per_share_has_no_crore_factor(pinned_wacc):
+    """₹ Cr / crore shares is already ₹/share — regression for the old `* 10`
+    that inflated every growth-mode intrinsic value tenfold.
+
+    Mid-cap (₹5,000 Cr) → WACC 15% + 2% high_growth adjustment = 17%; no moat
+    → terminal P/S 2.5 — i.e. exactly the hand computation above.
+    """
+    state = make_state(
+        rev_3y=30.0,
+        trailing_revenue_cr=1_000.0,
+        shares_outstanding_cr=10.0,
+        cmp=500.0,
+        market_cap_cr=5_000.0,
+    )
+    state = await make_step().run(state)
+
+    assert state.valuation.dcf_intrinsic_weighted == pytest.approx(261.09, abs=0.01)
+    ratio = state.valuation.dcf_intrinsic_weighted / 500.0
+    assert 0.2 <= ratio <= 3.0
+    # MoS = (261.09 − 500) / 261.09 → CMP above intrinsic
+    assert state.valuation.margin_of_safety_pct == pytest.approx(-91.5, abs=0.1)
+
+
+@pytest.mark.asyncio
+async def test_forward_dcf_hypergrowth_stays_within_sane_band(pinned_wacc):
+    """DIXON-like inputs (59% 3Y CAGR, P/S ~1.5) previously produced ~250× CMP.
+
+    With the unit fix and growth fade the intrinsic value must land within a
+    few multiples of CMP, not orders of magnitude away.
+    """
+    state = make_state(
+        rev_3y=59.0,
+        trailing_revenue_cr=48_873.0,
+        shares_outstanding_cr=6.08,
+        cmp=12_506.0,
+        market_cap_cr=76_039.0,
+    )
+    state = await make_step().run(state)
+
+    ratio = state.valuation.dcf_intrinsic_weighted / 12_506.0
+    assert 0.2 <= ratio <= 5.0
