@@ -271,6 +271,34 @@ async def test_severe_revenue_deceleration_fails_g1():
 
 
 @pytest.mark.asyncio
+async def test_extreme_deceleration_hard_fails_even_with_high_score():
+    """PREMIERENE scenario: 3Y CAGR 76% vs YoY 8.2% (Δ67.8pp) — every other
+    gate passes (score would be 9/10, comfortably PASS_GREEN), but the
+    HT-G1 hard trigger must override the score and force FAIL so Steps
+    1-8 never run on a story Step 3G would reject anyway."""
+    state = make_state(
+        rev_3y=76.0,
+        rev_1y=8.2,  # decel 67.8pp > 15, and 8.2 < 15 → HT-G1 fires
+        gross_margin_trend="stable",
+        cash_runway_months=24.0,  # passes cash runway (>= 18mo)
+        ev_revenue_ratio=3.5,  # passes valuation cap
+        de=0.5,
+        market_cap_cr=45_772.0,
+        pledging=0.0,
+        promoter_holding=60.0,
+        holding_trend="stable",
+        avg_daily_value_cr=5.0,
+    )
+    state = await make_step().run(state)
+
+    assert state.pre_screen.score == 9  # only revenue_acceleration fails
+    assert state.pre_screen.gate == GateResult.FAIL
+    assert any("HT-G1" in t for t in state.pre_screen.hard_triggers)
+    assert state.terminated_at_step == 0
+    assert state.recommendation_type == "GROWTH_REJECT"
+
+
+@pytest.mark.asyncio
 async def test_momentum_threshold_is_80pct_of_cagr():
     """YoY at exactly 80% of 3Y CAGR passes; just below fails."""
     # 80% of 30 = 24 → YoY=24 passes, YoY=23 fails

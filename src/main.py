@@ -14,7 +14,7 @@ from src.agent.growth_pipeline import GrowthPipeline
 from src.agent.pipeline import InvestmentPipeline
 from src.config import settings
 from src.logging_config import configure_logging
-from src.models import AnalysisState
+from src.models import AnalysisState, GateResult
 from src.portfolio.tracker import PortfolioTracker, add_one_year
 
 _TICKER_RE = re.compile(r"^[A-Z0-9&\-\.]{1,20}$")
@@ -687,15 +687,28 @@ def scan(
             ", ".join(s.failed_metrics[:3]) + ("…" if len(s.failed_metrics) > 3 else ""),
         )
 
+    # `passed` (score-qualifying) still drives which rows the table shows —
+    # that's intentional, it's how a hard-triggered ticker (high score, gate
+    # FAIL) stays visible in red rather than disappearing silently. But the
+    # summary count below must not call a hard-triggered ticker "passed".
+    hard_rejected = [s for s in passed if s.gate == GateResult.FAIL]
+    passed_gate = [s for s in passed if s.gate != GateResult.FAIL]
+
     console.print(ps_table)
+    hard_reject_note = (
+        f" (of which {len(hard_rejected)} scored above threshold but hit a Step 0 hard trigger)"
+        if hard_rejected
+        else ""
+    )
     console.print(
         f"\n[bold]Pre-screen summary:[/bold] "
-        f"{len(passed)} passed / {len(failed)} failed / {len(errors)} errors "
+        f"{len(passed_gate)} passed / {len(failed) + len(hard_rejected)} failed{hard_reject_note} / "
+        f"{len(errors)} errors "
         f"out of {len(summaries)} tickers"
     )
 
     if prescreen_only or not results:
-        if not prescreen_only and passed:
+        if not prescreen_only and passed_gate:
             console.print(
                 "\n[yellow]No full analyses completed "
                 "(all candidates may have been rejected at Step 0).[/yellow]"

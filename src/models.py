@@ -239,6 +239,7 @@ class PreScreenResult(BaseModel):
     failed_metrics: list[str] = Field(default_factory=list)
     conditional_exceptions: list[str] = Field(default_factory=list)
     data_flags: list[str] = Field(default_factory=list)
+    hard_triggers: list[str] = Field(default_factory=list)
 
 
 class GovernanceScore(BaseModel):
