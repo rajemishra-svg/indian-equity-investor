@@ -210,7 +210,8 @@ class Step5GrowthValuation(BaseStep):
 
         # ==================================================================
         # Method G5-3 — Forward Revenue DCF
-        # Project 7 years (3Y CAGR fading to terminal growth), terminal P/S = 2-4× (sector-dependent)
+        # Project 7 years (3Y CAGR fading to terminal growth), terminal P/S = 2.5-4× by moat,
+        # capped at EBITDA margin × growth_terminal_ev_ebitda
         # ==================================================================
         rev_cr = f.trailing_revenue_cr if f else None
         shares = v.shares_outstanding_cr if v else None
@@ -225,6 +226,29 @@ class Step5GrowthValuation(BaseStep):
                 terminal_ps = 3.0
             else:
                 terminal_ps = 2.5
+
+            # Margin check: a mature company's P/S ≈ EBITDA margin × EV/EBITDA.
+            # Without it a 4%-margin assembler gets the same 2.5–4× sales
+            # multiple as a 30%-margin platform.
+            margin = f.ebitda_margin_latest
+            if margin is not None and margin > 0:
+                margin_ps = round(margin / 100 * settings.growth_terminal_ev_ebitda, 2)
+                if margin_ps < terminal_ps:
+                    data_flags.append(
+                        f"[G5-3: terminal P/S capped {terminal_ps:.1f}× → {margin_ps:.2f}× "
+                        f"(EBITDA margin {margin:.1f}% × {settings.growth_terminal_ev_ebitda:.0f}× EV/EBITDA)]"
+                    )
+                    terminal_ps = margin_ps
+            elif margin is None:
+                data_flags.append(
+                    "[DATA UNVERIFIED: ebitda_margin — G5-3 terminal P/S "
+                    f"{terminal_ps:.1f}× not checked against margins]"
+                )
+            else:
+                data_flags.append(
+                    f"[G5-3: EBITDA margin {margin:.1f}% (pre-profit) — terminal P/S "
+                    f"{terminal_ps:.1f}× assumes margins not yet demonstrated]"
+                )
 
             intrinsic_total_cr = _forward_revenue_dcf(
                 trailing_revenue_cr=rev_cr,

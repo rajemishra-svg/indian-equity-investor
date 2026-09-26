@@ -42,7 +42,7 @@ def _pl_rows(table) -> list[tuple[str, list[float], float | None]]:
         ttm: float | None = None
         for col, c in enumerate(cells[1:], start=1):
             try:
-                val = float(c.get_text(strip=True).replace(",", ""))
+                val = float(c.get_text(strip=True).replace(",", "").rstrip("%"))
             except ValueError:
                 continue
             if col == ttm_col:
@@ -51,6 +51,29 @@ def _pl_rows(table) -> list[tuple[str, list[float], float | None]]:
                 annual.append(val)
         rows.append((label, annual, ttm))
     return rows
+
+
+def _ebitda_margin_fields(margins: list[float]) -> dict:
+    """Latest EBITDA margin, 5Y average and trend from an annual OPM % series
+    (oldest → newest)."""
+    result: dict = {}
+    if not margins:
+        return result
+    result["ebitda_margin_latest"] = margins[-1]
+    # P2-3: EBITDA margin trend; P2-4: 5Y avg for cyclical normalization
+    if len(margins) >= 5:
+        result["ebitda_margin_5y_avg"] = round(sum(margins[-5:]) / 5, 1)
+        recent = sum(margins[-2:]) / 2
+        prior = sum(margins[-5:-2]) / 3
+        diff = recent - prior
+        result["ebitda_margin_trend"] = (
+            "expanding" if diff > 1.5 else
+            "compressing" if diff < -1.5 else
+            "stable"
+        )
+    else:
+        result["ebitda_margin_5y_avg"] = round(sum(margins) / len(margins), 1)
+    return result
 
 
 class ScreenerClient(BaseHTTPClient):
@@ -382,6 +405,7 @@ class ScreenerClient(BaseHTTPClient):
             return result
 
         sales_ttm: float | None = None
+        opm_vals: list[float] = []
         for label, vals, ttm in _pl_rows(main_pl):
             if not vals:
                 continue
@@ -390,6 +414,12 @@ class ScreenerClient(BaseHTTPClient):
                 sales_ttm = ttm
             elif "other income" in label:
                 other_income_vals = vals
+            elif label.startswith("opm"):
+                opm_vals = vals
+
+        # EBITDA margin: Screener's "OPM %" row lives in the P&L table (fiscal
+        # years only, TTM excluded like every other P&L metric).
+        result.update(_ebitda_margin_fields(opm_vals))
 
         if sales_vals:
             result["_sales_vals"] = sales_vals  # consumed later in _parse_financials
@@ -478,22 +508,12 @@ class ScreenerClient(BaseHTTPClient):
                         result["current_ratio"] = float_vals[-1]
 
                 elif "ebitda margin" in label or "opm" in label:
+                    # Fallback only — live Screener pages carry OPM % in the
+                    # P&L table (see _extract_pl_values), not in Ratios.
                     if float_vals and float_vals[-1] is not None:
-                        result["ebitda_margin_latest"] = float_vals[-1]
-                    # P2-3: EBITDA margin trend; P2-4: 5Y avg for cyclical normalization
-                    valid = [v for v in float_vals if v is not None]
-                    if len(valid) >= 5:
-                        result["ebitda_margin_5y_avg"] = round(sum(valid[-5:]) / 5, 1)
-                        recent = sum(valid[-2:]) / 2
-                        prior = sum(valid[-5:-2]) / 3
-                        diff = recent - prior
-                        result["ebitda_margin_trend"] = (
-                            "expanding" if diff > 1.5 else
-                            "compressing" if diff < -1.5 else
-                            "stable"
-                        )
-                    elif valid:
-                        result["ebitda_margin_5y_avg"] = round(sum(valid) / len(valid), 1)
+                        result.update(_ebitda_margin_fields(
+                            [v for v in float_vals if v is not None]
+                        ))
 
                 # ── P1-1: Bank / NBFC sector KPIs ────────────────────────
                 elif "net interest margin" in label or label.strip() in ("nim", "nim %"):
