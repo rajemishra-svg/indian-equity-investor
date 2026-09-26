@@ -321,8 +321,8 @@ def _margin_stability(f: FinancialMetrics, sector_name: str) -> ScorecardItem:
 
     if f.ebitda_margin_trend is None:
         return _amber(_PRICE, "Margin Stability", "Not available")
-    if f.ebitda_margin_trend == "deteriorating":
-        return _red(_PRICE, "Margin Stability", "EBITDA margin trend is deteriorating")
+    if f.ebitda_margin_trend == "compressing":
+        return _red(_PRICE, "Margin Stability", "EBITDA margin trend is compressing")
     return _green(_PRICE, "Margin Stability", f"EBITDA margin trend is {f.ebitda_margin_trend}")
 
 
