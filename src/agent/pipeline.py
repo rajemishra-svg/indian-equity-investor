@@ -533,7 +533,14 @@ class InvestmentPipeline:
         if g.auditor_name is None and filing.auditor_name:
             g.auditor_name = filing.auditor_name
         if g.rpt_pct_revenue is None and filing.rpt_pct_revenue is not None:
+            # Breakdown fields travel with the headline figure they explain.
             g.rpt_pct_revenue = filing.rpt_pct_revenue
+            g.rpt_funding_pct_networth = filing.rpt_funding_pct_networth
+            g.rpt_sales_pct_revenue = filing.rpt_sales_pct_revenue
+            g.rpt_prior_year_pct_revenue = filing.rpt_prior_year_pct_revenue
+            g.rpt_prior_fiscal_year = filing.rpt_prior_fiscal_year
+            g.rpt_over_approval_count = filing.rpt_over_approval_count
+            g.rpt_over_approval_pct_revenue = filing.rpt_over_approval_pct_revenue
         if filing.modified_opinion:
             qualification = (
                 "Modified audit opinion — statement on impact of audit qualifications "

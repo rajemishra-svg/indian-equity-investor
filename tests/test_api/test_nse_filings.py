@@ -56,6 +56,8 @@ def make_filing(
     nature: str = "Standalone",
     rpt_rows: list[dict] | None = None,
     rpt_declared: str | None = None,
+    equity: float | None = None,
+    fy_context_dates: tuple[str, str] | None = None,
 ) -> str:
     """Build an integrated-filing XBRL document.
 
@@ -67,8 +69,12 @@ def make_filing(
         'xmlns:xbrldi="http://xbrl.org/2006/xbrldi" '
         'xmlns:in-capmkt="http://www.sebi.gov.in/xbrl/2026-01-31/in-capmkt">',
         _ctx("OneD", quarter_start, period_end),
-        _ctx("FourD", ytd_start, period_end),
+        # Legacy annual results mis-date FourD with the quarter's dates
+        _ctx("FourD", *(fy_context_dates or (ytd_start, period_end))),
         _ctx("MainD", ytd_start, period_end),
+        f'<xbrli:context id="OneI"><xbrli:entity><xbrli:identifier scheme="x">1</xbrli:identifier>'
+        f"</xbrli:entity><xbrli:period><xbrli:instant>{period_end}</xbrli:instant></xbrli:period>"
+        "</xbrli:context>",
     ]
     for i in range(1, len(auditors) + 1):
         parts.append(_ctx(f"D_Auditor{i}", quarter_start, period_end))
@@ -89,6 +95,11 @@ def make_filing(
         '<in-capmkt:RevenueFromOperations contextRef="FourD" unitRef="INR" decimals="-5">'
         f"{ytd_revenue:.0f}</in-capmkt:RevenueFromOperations>"
     )
+    if equity is not None:
+        parts.append(
+            '<in-capmkt:EquityAttributableToOwnersOfParent contextRef="OneI" unitRef="INR" '
+            f'decimals="-5">{equity:.0f}</in-capmkt:EquityAttributableToOwnersOfParent>'
+        )
     for i, a in enumerate(auditors, 1):
         parts.append(
             f'<in-capmkt:AuditorsFirmName contextRef="D_Auditor{i}">{a.replace("&", "&amp;")}'
@@ -114,6 +125,9 @@ def make_filing(
             "RelationshipOfTheCounterpartyWithTheListedEntityOrItsSubsidiary": r["relationship"],
             "TypeOfRelatedPartyTransaction": r["type"],
             "DetailsOfOtherRelatedPartyTransaction": r.get("details", ""),
+            "ValueOfTheRelatedPartyTransactionAsApprovedByTheAuditCommittee": (
+                f"{r['approved']:.0f}" if r.get("approved") else ""
+            ),
         }
         for k, v in fields.items():
             if v:
@@ -136,8 +150,10 @@ def make_filing(
 CRORE = 1e7
 
 
-def _row(counterparty, relationship, txn_type, crore, details="", entity=COMPANY) -> dict:
+def _row(counterparty, relationship, txn_type, crore, details="", entity=COMPANY,
+         approved_crore=None) -> dict:
     return {
+        "approved": approved_crore * CRORE if approved_crore else None,
         "counterparty": counterparty,
         "relationship": relationship,
         "type": txn_type,
@@ -178,6 +194,7 @@ Q4_STANDALONE = make_filing(
 Q4_CONSOLIDATED = make_filing(
     quarter_start="2026-01-01", period_end="2026-03-31", ytd_start="2025-04-01",
     ytd_revenue=2000 * CRORE, nature="Consolidated", opinion="Declaration of unmodified opinion",
+    equity=1000 * CRORE,
 )
 Q1_CONSOLIDATED = make_filing(
     quarter_start="2026-04-01", period_end="2026-06-30", ytd_start="2026-04-01",
@@ -208,9 +225,15 @@ FULL_LISTING = {
 }
 
 
-def _mock_nse(respx_mock, listing=FULL_LISTING, files=None):
+LEGACY_RPT = f"{NSE}/api/related-party-transactions-master"
+ANNUAL_RESULTS = f"{NSE}/api/corporates-financial-results"
+
+
+def _mock_nse(respx_mock, listing=FULL_LISTING, files=None, legacy=None, annual=None):
     respx_mock.get(f"{NSE}/").mock(return_value=httpx.Response(403, text="denied"))
     respx_mock.get(LISTING).mock(return_value=httpx.Response(200, json=listing))
+    respx_mock.get(LEGACY_RPT).mock(return_value=httpx.Response(200, json={"data": legacy or []}))
+    respx_mock.get(ANNUAL_RESULTS).mock(return_value=httpx.Response(200, json=annual or []))
     files = files if files is not None else {
         "q1c": Q1_CONSOLIDATED, "q4c": Q4_CONSOLIDATED, "q4s": Q4_STANDALONE,
         "q2c": Q2_CONSOLIDATED, "q2s": Q2_STANDALONE,
@@ -361,14 +384,21 @@ async def test_client_full_year_rpt_and_latest_auditor(respx_mock):
     # Latest filing (Q1 FY27, joint audit) names the current auditors
     assert result.auditor_name == "S.R. Batliboi & Associates LLP; Chaturvedi & Shah LLP"
     assert result.modified_opinion is False
-    # (H1 100 + H2 50 purchases + 50 loan) / FY consolidated revenue 2000 = 10%
-    assert result.rpt_pct_revenue == 10.0
+    # Operating: (H1 100 sales + H2 50 purchases) / FY consolidated revenue 2000 = 7.5%
+    assert result.rpt_pct_revenue == 7.5
+    assert result.rpt_sales_pct_revenue == 5.0
+    # Funding: H2 50 loan / consolidated net worth 1000 = 5%
+    assert result.rpt_funding_pct_networth == 5.0
+    assert result.rpt_over_approval_count == 0
+    assert result.rpt_prior_year_pct_revenue is None  # no earlier disclosures on file
     assert result.rpt_fiscal_year == "FY2026"
-    assert any("[RPT 10.0% of revenue (FY2026)" in f for f in result.data_flags)
+    assert any("[RPT: operating RPT 7.5% of revenue (FY2026)" in f for f in result.data_flags)
     # Homepage 403 is tolerated; the listing call carries the symbol
     assert respx_mock.calls  # made requests
     listing_calls = [c for c in respx_mock.calls if c.request.url.path == "/api/integrated-filing-results"]
     assert listing_calls[0].request.url.params["symbol"] == "ACME"
+    # The listing is paginated — the client must ask for all rows
+    assert int(listing_calls[0].request.url.params["size"]) >= 100
 
 
 @pytest.mark.asyncio
@@ -377,9 +407,10 @@ async def test_client_h2_only_is_flagged_estimate(respx_mock):
     _mock_nse(respx_mock, listing=listing)
     async with NSEFilingsClient() as client:
         result = await client.get_filing_governance("ACME")
-    # H2 counted 100 Cr vs half of FY revenue (1000 Cr) = 10%
-    assert result.rpt_pct_revenue == 10.0
-    assert result.rpt_fiscal_year == "FY2026 H2"
+    # H2 operating 50 Cr vs half of FY revenue (1000 Cr) = 5%; funding annualised 100/1000
+    assert result.rpt_pct_revenue == 5.0
+    assert result.rpt_funding_pct_networth == 10.0
+    assert result.rpt_fiscal_year == "FY2026 (one half)"
     assert any(f.startswith("[ESTIMATE: rpt_pct_revenue") for f in result.data_flags)
 
 
@@ -407,13 +438,32 @@ async def test_client_missing_rpt_section_leaves_none(respx_mock):
         quarter_start="2026-01-01", period_end="2026-03-31", ytd_start="2025-04-01",
         ytd_revenue=1800 * CRORE,
     )
+    bare_q2 = make_filing(
+        quarter_start="2025-07-01", period_end="2025-09-30", ytd_start="2025-04-01",
+        ytd_revenue=900 * CRORE,
+    )
     _mock_nse(respx_mock, files={"q1c": Q1_CONSOLIDATED, "q4c": Q4_CONSOLIDATED, "q4s": bare_q4,
-                                 "q2c": Q2_CONSOLIDATED, "q2s": Q2_STANDALONE})
+                                 "q2c": Q2_CONSOLIDATED, "q2s": bare_q2})
     async with NSEFilingsClient() as client:
         result = await client.get_filing_governance("ACME")
     assert result.rpt_pct_revenue is None
     assert result.auditor_name  # auditor still sourced
     assert not any(f.startswith("[RPT") for f in result.data_flags)
+
+
+@pytest.mark.asyncio
+async def test_client_one_missing_half_estimates_from_the_other(respx_mock):
+    bare_q4 = make_filing(
+        quarter_start="2026-01-01", period_end="2026-03-31", ytd_start="2025-04-01",
+        ytd_revenue=1800 * CRORE,
+    )
+    _mock_nse(respx_mock, files={"q1c": Q1_CONSOLIDATED, "q4c": Q4_CONSOLIDATED, "q4s": bare_q4,
+                                 "q2c": Q2_CONSOLIDATED, "q2s": Q2_STANDALONE})
+    async with NSEFilingsClient() as client:
+        result = await client.get_filing_governance("ACME")
+    # H1 100 Cr vs half of FY revenue (1000 Cr)
+    assert result.rpt_pct_revenue == 10.0
+    assert any(f.startswith("[ESTIMATE: rpt_pct_revenue") for f in result.data_flags)
 
 
 @pytest.mark.asyncio
@@ -511,3 +561,98 @@ def test_benefit_trust_labelled_promoter_group_excluded():
     row = _r("Promoter Group", "Any other transaction", "Contribution",
              counterparty="Tata Elxsi (India) Ltd. Employees Provident Fund")
     assert is_counted_rpt(row, set()) is False
+
+
+# ---------------------------------------------------------------------------
+# Prior-year comparison and approvals
+# ---------------------------------------------------------------------------
+
+def _legacy_rpt(period_start: str, period_end: str, rows: list[dict]) -> str:
+    return make_filing(quarter_start=period_start, period_end=period_end,
+                       ytd_start=period_start, ytd_revenue=1, rpt_rows=rows)
+
+
+PROMOTER = "Acme Promoter Holdings Pvt Ltd"
+COMMON = "Entity under common control"
+
+# FY2024: both halves in the legacy format → valid comparison year (60 Cr / 1500 Cr = 4%)
+LEGACY_FILES = {
+    "rpt_h1fy24": _legacy_rpt("2023-04-01", "2023-09-30", [_row(PROMOTER, COMMON, "Sale of goods or services", 30)]),
+    "rpt_h2fy24": _legacy_rpt("2023-10-01", "2024-03-31", [_row(PROMOTER, COMMON, "Sale of goods or services", 30)]),
+    # FY2025 H1 legacy — pairs with the integrated Mar-2025 Q4 (mixed formats → skipped)
+    "rpt_h1fy25": _legacy_rpt("2024-04-01", "2024-09-30", [_row(PROMOTER, COMMON, "Sale of goods or services", 500)]),
+}
+LEGACY_LISTING = [
+    {"periodEndDate": "30-SEP-2023", "submissionDate": "01-NOV-2023 10:00:00",
+     "xbrlLink": f"{ARCHIVE}/rpt_h1fy24.xml"},
+    {"periodEndDate": "31-MAR-2024", "submissionDate": "01-MAY-2024 10:00:00",
+     "xbrlLink": f"{ARCHIVE}/rpt_h2fy24.xml"},
+    {"periodEndDate": "30-SEP-2024", "submissionDate": "01-NOV-2024 10:00:00",
+     "xbrlLink": f"{ARCHIVE}/rpt_h1fy25.xml"},
+]
+# Legacy annual results: FourD holds the FY figure but carries the quarter's dates
+FY24_RESULTS = make_filing(
+    quarter_start="2024-01-01", period_end="2024-03-31", ytd_start="2023-04-01",
+    ytd_revenue=1500 * CRORE, nature="Consolidated",
+    fy_context_dates=("2024-01-01", "2024-03-31"),
+)
+ANNUAL_LISTING = [
+    {"toDate": "31-Mar-2024", "consolidated": "Consolidated", "xbrl": f"{ARCHIVE}/fy24c.xml"},
+    {"toDate": "31-Mar-2024", "consolidated": "Non-Consolidated", "xbrl": f"{ARCHIVE}/fy24s.xml"},
+]
+Q4FY25_STANDALONE = make_filing(
+    quarter_start="2025-01-01", period_end="2025-03-31", ytd_start="2024-04-01",
+    ytd_revenue=1600 * CRORE, rpt_rows=[_row(PROMOTER, COMMON, "Sale of goods or services", 900)],
+)
+Q4FY25_CONSOLIDATED = make_filing(
+    quarter_start="2025-01-01", period_end="2025-03-31", ytd_start="2024-04-01",
+    ytd_revenue=1800 * CRORE, nature="Consolidated",
+)
+
+
+@pytest.mark.asyncio
+async def test_prior_year_uses_single_format_year_and_skips_transition(respx_mock):
+    listing = {"data": FULL_LISTING["data"] + [
+        _listing_row("31-MAR-2025", "Consolidated", "q4fy25c", "12-May-2025 10:00:00"),
+        _listing_row("31-MAR-2025", "Standalone", "q4fy25s", "12-May-2025 09:00:00"),
+    ]}
+    files = {
+        "q1c": Q1_CONSOLIDATED, "q4c": Q4_CONSOLIDATED, "q4s": Q4_STANDALONE,
+        "q2c": Q2_CONSOLIDATED, "q2s": Q2_STANDALONE,
+        "q4fy25c": Q4FY25_CONSOLIDATED, "q4fy25s": Q4FY25_STANDALONE,
+        "fy24c": FY24_RESULTS, "fy24s": 404, **LEGACY_FILES,
+    }
+    _mock_nse(respx_mock, listing=listing, files=files, legacy=LEGACY_LISTING, annual=ANNUAL_LISTING)
+    async with NSEFilingsClient() as client:
+        result = await client.get_filing_governance("ACME")
+    # FY2025 mixes legacy H1 with the integrated Q4 (which some filers reported
+    # full-year) → skipped; FY2024 = (30 + 30) / 1500 = 4%
+    assert result.rpt_prior_year_pct_revenue == 4.0
+    assert result.rpt_prior_fiscal_year == "FY2024"
+    assert any("FY2024 operating RPT 4.0%" in f for f in result.data_flags)
+
+
+@pytest.mark.asyncio
+async def test_approval_breach_counted_with_materiality(respx_mock):
+    q4s = make_filing(
+        quarter_start="2026-01-01", period_end="2026-03-31", ytd_start="2025-04-01",
+        ytd_revenue=1800 * CRORE,
+        rpt_rows=[_row(PROMOTER, COMMON, "Purchase of goods or services", 50, approved_crore=30)],
+    )
+    _mock_nse(respx_mock, files={"q1c": Q1_CONSOLIDATED, "q4c": Q4_CONSOLIDATED, "q4s": q4s,
+                                 "q2c": Q2_CONSOLIDATED, "q2s": Q2_STANDALONE})
+    async with NSEFilingsClient() as client:
+        result = await client.get_filing_governance("ACME")
+    assert result.rpt_over_approval_count == 1
+    # 20 Cr excess over approval / 2000 Cr revenue = 1%
+    assert result.rpt_over_approval_pct_revenue == 1.0
+
+
+@pytest.mark.asyncio
+async def test_standalone_revenue_never_used_when_company_files_consolidated(respx_mock):
+    """Consolidated-basis RPT over standalone revenue would inflate the ratio."""
+    _mock_nse(respx_mock, files={"q1c": Q1_CONSOLIDATED, "q4c": 404, "q4s": Q4_STANDALONE,
+                                 "q2c": Q2_CONSOLIDATED, "q2s": Q2_STANDALONE})
+    async with NSEFilingsClient() as client:
+        result = await client.get_filing_governance("ACME")
+    assert result.rpt_pct_revenue is None
