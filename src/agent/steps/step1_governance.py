@@ -11,6 +11,62 @@ from src.config import settings
 from src.models import AnalysisState, GateResult, GovernanceScore
 from src.sector.profiles import get_sector_profile
 
+# RPT thresholds (see _rpt_red_flags). Operating RPT above RPT_REJECT_PCT rejects
+# only when "unexplained" — i.e. any red flag below is present.
+RPT_REJECT_PCT = 20.0
+# Rise in operating RPT % vs the comparison year that counts as a spike. The
+# comparison year is the latest earlier FY with both halves in one filing format
+# (FY2024 for FY2026, because FY2025 straddles the switch to integrated filing).
+RPT_SPIKE_PP = 5.0
+RPT_SALES_DEPENDENCE_PCT = 50.0  # revenue share sold to related parties
+RPT_FUNDING_REJECT_PCT = 10.0  # funding given to related parties, % of net worth
+RPT_APPROVAL_BREACH_PCT = 0.5  # excess over audit-committee approvals, % of revenue
+
+
+def _rpt_red_flags(g) -> list[str]:
+    """Reasons operating RPT above RPT_REJECT_PCT counts as *unexplained*.
+
+    The structural exemption needs positive evidence from the exchange RPT
+    disclosures. When the breakdown isn't available (e.g. RPT % came from web
+    research) the RPT can't be shown to be explained, so it stays unexplained —
+    the original hard rule.
+    """
+    if g.rpt_over_approval_count is None:
+        return ["no exchange RPT breakdown to show the transactions are explained"]
+    flags = []
+    if g.rpt_prior_year_pct_revenue is None:
+        flags.append("no prior-year RPT figure to show the level is stable")
+    elif g.rpt_pct_revenue - g.rpt_prior_year_pct_revenue > RPT_SPIKE_PP:
+        since = g.rpt_prior_fiscal_year or "the comparison year"
+        flags.append(
+            f"RPT jumped {g.rpt_pct_revenue - g.rpt_prior_year_pct_revenue:.1f}pp since {since} "
+            f"({g.rpt_prior_year_pct_revenue:.1f}% → {g.rpt_pct_revenue:.1f}%)"
+        )
+    if (g.rpt_over_approval_pct_revenue or 0.0) > RPT_APPROVAL_BREACH_PCT:
+        flags.append(
+            f"{g.rpt_over_approval_count} transaction(s) exceeded audit-committee approvals by "
+            f"{g.rpt_over_approval_pct_revenue:.2f}% of revenue"
+        )
+    if g.rpt_sales_pct_revenue is None:
+        flags.append("related-party sales share unknown")
+    elif g.rpt_sales_pct_revenue > RPT_SALES_DEPENDENCE_PCT:
+        flags.append(
+            f"{g.rpt_sales_pct_revenue:.1f}% of revenue is sold to related parties "
+            "(revenue quality depends on the promoter group)"
+        )
+    if g.audit_qualifications:
+        flags.append("audit qualification on record")
+    return flags
+
+
+def _rpt_unexplained(g) -> bool:
+    return (
+        g.rpt_pct_revenue is not None
+        and g.rpt_pct_revenue > RPT_REJECT_PCT
+        and bool(_rpt_red_flags(g))
+    )
+
+
 # Immediate rejection triggers — any single one fails the gate
 IMMEDIATE_TRIGGER_CHECKS = [
     (
@@ -33,7 +89,16 @@ IMMEDIATE_TRIGGER_CHECKS = [
     ),
     (
         "rpt > 20% of revenue (unexplained)",
-        lambda g: g.rpt_pct_revenue is not None and g.rpt_pct_revenue > 20.0,
+        _rpt_unexplained,
+    ),
+    (
+        "rpt_funding_to_related_parties > 10% of net worth",
+        # Loans / ICDs / investments / guarantees given to promoter-group entities
+        # are never "explained" by the business model — the classic siphoning route.
+        lambda g: (
+            g.rpt_funding_pct_networth is not None
+            and g.rpt_funding_pct_networth > RPT_FUNDING_REJECT_PCT
+        ),
     ),
     (
         "auditor_resigned_mid_year",
@@ -208,12 +273,40 @@ class Step1Governance(BaseStep):
                 except Exception:
                     pass
 
+        # --- Structural RPT: > 20% but every red-flag check came back clean ---
+        structural_rpt = (
+            g is not None
+            and g.rpt_pct_revenue is not None
+            and g.rpt_pct_revenue > RPT_REJECT_PCT
+            and not _rpt_unexplained(g)
+        )
+        if g is not None and _rpt_unexplained(g):
+            concerns.append("RPT unexplained: " + "; ".join(_rpt_red_flags(g)))
+        if g is not None and g.rpt_over_approval_count:
+            # Immaterial breaches don't make RPT "unexplained" on their own,
+            # but a transaction above its approved value is still a process lapse.
+            concerns.append(
+                f"{g.rpt_over_approval_count} related-party transaction(s) exceeded "
+                "audit-committee approved values — verify ratification."
+            )
+        if structural_rpt:
+            data_flags.append(
+                f"[RPT STRUCTURAL: {g.rpt_pct_revenue:.1f}% of revenue with related parties "
+                f"({g.rpt_prior_fiscal_year} {g.rpt_prior_year_pct_revenue:.1f}%, within approvals, "
+                f"related-party sales {g.rpt_sales_pct_revenue:.1f}%) — pricing / royalty / "
+                "dependence risk; governance capped at PASS_CONDITIONAL]"
+            )
+            concerns.append(
+                f"Structural RPT at {g.rpt_pct_revenue:.1f}% of revenue — stable and approved, "
+                "but arm's-length pricing cannot be verified from filings."
+            )
+
         # --- Gate determination ---
         if immediate_triggers:
             gate = GateResult.FAIL
             for t in immediate_triggers:
                 concerns.append(f"IMMEDIATE TRIGGER FIRED: {t}")
-        elif total_score >= 12:
+        elif total_score >= 12 and not structural_rpt:
             gate = GateResult.PASS_GREEN
         elif total_score >= 9:
             gate = GateResult.PASS_CONDITIONAL
