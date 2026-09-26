@@ -29,6 +29,7 @@ from typing import Any
 
 import structlog
 
+from src.api.technicals import compute_52w_range, compute_dma, compute_rsi
 from src.models import StockQuote
 
 log = structlog.get_logger(__name__)
@@ -131,7 +132,7 @@ async def _get_client() -> Any | None:
 
 
 def _parse_history(rows: list[dict]) -> dict:
-    """Compute 52W high/low, 200 DMA, avg daily value, and volume trend.
+    """Compute 52W high/low, 200 DMA, RSI-14, avg daily value, and volume trend.
 
     Expects rows sorted oldest-first, each with string fields:
       open, high, low, close, volume, datetime
@@ -140,13 +141,12 @@ def _parse_history(rows: list[dict]) -> dict:
     highs: list[float] = []
     lows: list[float] = []
     daily_values: list[float] = []  # close × volume per day (₹)
-    down_vols: list[float] = []
-    all_vols: list[float] = []
+    vol_bars: list[tuple[float, bool]] = []  # (volume, is_down_day)
 
     for row in rows:
         c = _safe_float(row.get("close"))
         h = _safe_float(row.get("high"))
-        l = _safe_float(row.get("low"))
+        lo = _safe_float(row.get("low"))
         o = _safe_float(row.get("open"))
         v = _safe_float(row.get("volume"))
         if c is None:
@@ -154,25 +154,25 @@ def _parse_history(rows: list[dict]) -> dict:
         closes.append(c)
         if h is not None:
             highs.append(h)
-        if l is not None:
-            lows.append(l)
+        if lo is not None:
+            lows.append(lo)
         if v is not None:
             daily_values.append(c * v)
-            all_vols.append(v)
-            if o is not None and c < o:  # down-price day
-                down_vols.append(v)
+            vol_bars.append((v, o is not None and c < o))
 
-    w52_high = max(highs) if highs else 0.0
-    w52_low = min(lows) if lows else 0.0
-
-    # 200 DMA from the last 200 closes
-    dma_200 = round(sum(closes[-200:]) / len(closes[-200:]), 2) if len(closes) >= 50 else None
+    # History covers ~400 calendar days; the 52W range uses only the last 252 bars.
+    w52_high, w52_low = compute_52w_range(highs, lows)
+    dma_200 = compute_dma(closes)  # None until 200 closes exist
 
     # 3-month avg daily traded value (≈ last 63 trading days)
     recent_values = daily_values[-63:]
     avg_daily_value_cr = round(sum(recent_values) / len(recent_values) / 1e7, 2) if recent_values else None
 
-    # Volume trend: compare avg vol on down-price days vs overall median
+    # Volume trend over the last ~30 calendar days (21 bars), matching yfinance:
+    # compare avg vol on down-price days vs overall median
+    recent_bars = vol_bars[-21:]
+    all_vols = [v for v, _ in recent_bars]
+    down_vols = [v for v, is_down in recent_bars if is_down]
     volume_trend: str | None = None
     if len(all_vols) >= 10 and len(down_vols) >= 3:
         all_vols_sorted = sorted(all_vols)
@@ -182,9 +182,10 @@ def _parse_history(rows: list[dict]) -> dict:
         volume_trend = "declining" if ratio < 0.80 else "increasing" if ratio > 1.20 else "stable"
 
     return {
-        "w52_high": w52_high,
-        "w52_low": w52_low,
+        "w52_high": w52_high or 0.0,
+        "w52_low": w52_low or 0.0,
         "dma_200": dma_200,
+        "rsi_14": compute_rsi(closes),
         "avg_daily_value_cr": avg_daily_value_cr,
         "volume_trend_down_days": volume_trend,
     }
@@ -194,8 +195,8 @@ def _fetch_quote_sync(client: Any, ticker: str) -> StockQuote | None:
     """Run both Breeze calls synchronously (designed for run_in_executor)."""
     from zoneinfo import ZoneInfo
 
-    IST = ZoneInfo("Asia/Kolkata")
-    now_ist = datetime.now(IST)
+    ist = ZoneInfo("Asia/Kolkata")
+    now_ist = datetime.now(ist)
     today = now_ist.date()
 
     # Breeze requires the internal ISEC short code, not the NSE ticker.
@@ -256,6 +257,7 @@ def _fetch_quote_sync(client: Any, ticker: str) -> StockQuote | None:
         is_stale=False,                               # real-time price
         avg_daily_value_cr=hist_metrics.get("avg_daily_value_cr"),
         volume_trend_down_days=hist_metrics.get("volume_trend_down_days"),
+        rsi_14=hist_metrics.get("rsi_14"),
     )
 
 

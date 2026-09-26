@@ -83,6 +83,7 @@ class StockQuote(BaseModel):
     # P2-5 / P3-4: liquidity + technical signals
     avg_daily_value_cr: float | None = None   # 3-month avg daily traded value (₹ Cr)
     volume_trend_down_days: str | None = None  # "declining" | "stable" | "increasing"
+    rsi_14: float | None = None                # Wilder's 14-day RSI from daily closes
 
 
 class FinancialMetrics(BaseModel):
@@ -316,6 +317,8 @@ class TechnicalSignal(BaseModel):
     tranche_1_price: float | None = None
     tranche_2_price: float | None = None
     tranche_3_price: float | None = None
+    # True when guidance is RED: T1 waits for a pullback instead of entering at CMP
+    entry_deferred: bool = False
     data_flags: list[str] = Field(default_factory=list)
 
 

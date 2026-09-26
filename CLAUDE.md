@@ -128,7 +128,7 @@ CLI (src/main.py)
 | 3 — Financials | Deterministic (no LLM) | — | Pure arithmetic |
 | 4 — Tailwinds | Single Haiku call (no tools) | `model_light` | Context from Step 2 state is sufficient |
 | 5 — Valuation | Deterministic (no LLM, Python DCF) | — | Pure arithmetic — auditable, zero API cost |
-| 6 — Technical | Deterministic (no LLM) | — | Arithmetic from quote |
+| 6 — Technical | Deterministic (no LLM) | — | Arithmetic from quote (RSI-14 / 200-DMA / 52W range via `src/api/technicals.py`; pipeline backfills them from yfinance history for price-only NSE quotes) |
 | 7 — Peers | 1 Haiku call (peer identification) + deterministic comparison | `model_light` | Only peer *naming* needs an LLM; metric fetches (Screener + yfinance) and quality/valuation ranking + dominance test run in Python |
 | 8 — Premortem | Single Haiku call (no tools) | `model_light` | All risk context already in state |
 | 9 — Output | 1 Haiku call (thesis; BUY/WATCHLIST only) + deterministic format | `model_light` | Narrative from existing state; REJECT/PEER_SWITCH templates show no thesis, so the call is skipped |
@@ -376,7 +376,7 @@ If Nifty data unavailable, defaults to Normal + adds `[MODE UNCONFIRMED]` flag.
 
 **Position sizing**: conviction sets the base allocation (HIGH 5% / MEDIUM 3% / LOW 2%), then Step 9 risk-adjusts BUYs by realized volatility: `allocation × clamp(sizing_target_vol_pct / annualized_vol, sizing_min_factor, 1.0)`, rounded to 0.5%, floored at 1%. Volatility comes from 1Y daily returns via yfinance (`get_annualized_volatility`); when unavailable the allocation is left unchanged and flagged `[DATA UNVERIFIED: realized volatility]`. EC-01 pre-profit cap (≤4%) applies before scaling.
 
-**Tranche plan** (always in BUY output): T1 40% @ CMP, T2 35% @ CMP×(1−tranche_t2_discount), T3 25% @ CMP×(1−tranche_t3_discount). Default discounts: 8%/15%. Sector profiles (e.g., `commodities_cyclical`) override these. Stop-loss thresholds: large-cap 18%, mid-cap 25%, small-cap 30% — all configurable via settings.
+**Tranche plan** (always in BUY output): T1 40% @ CMP, T2 35% @ CMP×(1−tranche_t2_discount), T3 25% @ CMP×(1−tranche_t3_discount). Default discounts: 8%/15%. Sector profiles (e.g., `commodities_cyclical`) override these (applied in Step 6). When Step 6 guidance is RED (0/5 signals), T1 is deferred to a pullback: the 200-DMA if below CMP, never deeper than T2 (`TechnicalSignal.entry_deferred`, `[ENTRY DEFERRED]` flag). Stop-loss thresholds: large-cap 18%, mid-cap 25%, small-cap 30% — all configurable via settings.
 
 **Tax**: LTCG 12.5% on gains > ₹1.25L after 1 year; STCG 20% under 1 year. After any trade, update all four files in `portfolio/`.
 

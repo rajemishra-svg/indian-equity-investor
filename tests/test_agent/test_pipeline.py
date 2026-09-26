@@ -337,3 +337,57 @@ def test_pipeline_accepts_shared_claude_client():
     sentinel = object()
     pipeline = InvestmentPipeline(claude=sentinel)  # type: ignore[arg-type]
     assert pipeline.claude is sentinel
+
+
+# ---------------------------------------------------------------------------
+# Technical-input backfill for price-only quote sources (NSE)
+# ---------------------------------------------------------------------------
+
+
+def _bare_pipeline() -> InvestmentPipeline:
+    from src.logging_config import get_logger
+
+    pipeline = InvestmentPipeline.__new__(InvestmentPipeline)
+    pipeline.log = get_logger("pipeline_test")
+    return pipeline
+
+
+@pytest.mark.asyncio
+async def test_backfill_fills_missing_technicals_without_mutating_cached_quote():
+    quote = SAMPLE_QUOTE.model_copy(
+        update={"dma_200": None, "rsi_14": None, "volume_trend_down_days": None}
+    )
+    yf = MagicMock()
+    yf.get_price_technicals = AsyncMock(
+        return_value={"dma_200": 2500.0, "rsi_14": 38.5, "volume_trend_down_days": "declining"}
+    )
+
+    out = await _bare_pipeline()._backfill_technicals("RELIANCE", quote, {"yfinance": yf})
+
+    assert (out.dma_200, out.rsi_14, out.volume_trend_down_days) == (2500.0, 38.5, "declining")
+    assert quote.dma_200 is None  # original (possibly cached) object untouched
+
+
+@pytest.mark.asyncio
+async def test_backfill_keeps_source_values_and_skips_fetch_when_complete():
+    quote = SAMPLE_QUOTE.model_copy(
+        update={"dma_200": 2400.0, "rsi_14": 45.0, "volume_trend_down_days": "stable"}
+    )
+    yf = MagicMock()
+    yf.get_price_technicals = AsyncMock(return_value={"dma_200": 1.0})
+
+    out = await _bare_pipeline()._backfill_technicals("RELIANCE", quote, {"yfinance": yf})
+
+    assert out is quote
+    yf.get_price_technicals.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_backfill_failure_is_non_fatal():
+    quote = SAMPLE_QUOTE.model_copy(update={"rsi_14": None})
+    yf = MagicMock()
+    yf.get_price_technicals = AsyncMock(side_effect=RuntimeError("yahoo down"))
+
+    out = await _bare_pipeline()._backfill_technicals("RELIANCE", quote, {"yfinance": yf})
+
+    assert out is quote

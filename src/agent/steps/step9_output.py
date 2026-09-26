@@ -323,7 +323,8 @@ class Step9Output(BaseStep):
             return
 
         t = state.technical
-        cmp = t.tranche_1_price or (state.quote.cmp if state.quote else 0)
+        # T1 is not CMP when entry is deferred, so prefer the live quote here
+        cmp = (state.quote.cmp if state.quote else None) or t.tranche_1_price or 0
         base_alloc = int(state.suggested_allocation_pct or 3)
 
         profile = get_sector_profile(state.sector_name)
@@ -341,7 +342,11 @@ class Step9Output(BaseStep):
                 tranche=1,
                 pct_allocation=t1_alloc,
                 price=t.tranche_1_price or cmp,
-                condition="Enter now at CMP",
+                condition=(
+                    "Wait — technicals RED; enter on pullback to this level"
+                    if t.entry_deferred
+                    else "Enter now at CMP"
+                ),
             ),
             TrancheEntry(
                 tranche=2,
