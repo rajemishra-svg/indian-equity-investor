@@ -248,3 +248,59 @@ async def test_forward_dcf_hypergrowth_stays_within_sane_band(pinned_wacc):
 
     ratio = state.valuation.dcf_intrinsic_weighted / 12_506.0
     assert 0.2 <= ratio <= 5.0
+
+
+# ---------------------------------------------------------------------------
+# G5-3: terminal P/S capped at EBITDA margin × growth_terminal_ev_ebitda
+# ---------------------------------------------------------------------------
+
+
+def _margin_state(margin: float | None):
+    """Hand-computed base case above (₹261.09/share at P/S 2.5), plus a margin."""
+    state = make_state(
+        rev_3y=30.0,
+        trailing_revenue_cr=1_000.0,
+        shares_outstanding_cr=10.0,
+        cmp=500.0,
+        market_cap_cr=5_000.0,
+    )
+    state.financials.ebitda_margin_latest = margin
+    return state
+
+
+@pytest.mark.asyncio
+async def test_thin_margin_caps_terminal_ps(pinned_wacc, monkeypatch):
+    """4% margin × 20× EV/EBITDA → P/S 0.8 instead of 2.5.
+    PV = 3,134.434 × 0.8 / 1.17^7 = 835.503 Cr → ₹83.55/share."""
+    monkeypatch.setattr(settings, "growth_terminal_ev_ebitda", 20.0)
+    state = await make_step().run(_margin_state(4.0))
+
+    assert state.valuation.dcf_intrinsic_weighted == pytest.approx(83.55, abs=0.01)
+    assert "terminal P/S capped 2.5× → 0.80×" in " ".join(state.all_data_flags)
+
+
+@pytest.mark.asyncio
+async def test_high_margin_leaves_moat_ps_uncapped(pinned_wacc, monkeypatch):
+    """30% × 20× = 6.0× > 2.5× moat P/S → cap doesn't bind."""
+    monkeypatch.setattr(settings, "growth_terminal_ev_ebitda", 20.0)
+    state = await make_step().run(_margin_state(30.0))
+
+    assert state.valuation.dcf_intrinsic_weighted == pytest.approx(261.09, abs=0.01)
+    assert "terminal P/S capped" not in " ".join(state.all_data_flags)
+
+
+@pytest.mark.asyncio
+async def test_missing_margin_flags_unchecked_terminal_ps(pinned_wacc):
+    state = await make_step().run(_margin_state(None))
+
+    assert state.valuation.dcf_intrinsic_weighted == pytest.approx(261.09, abs=0.01)
+    assert "G5-3 terminal P/S 2.5× not checked against margins" in " ".join(state.all_data_flags)
+
+
+@pytest.mark.asyncio
+async def test_pre_profit_keeps_moat_ps_with_flag(pinned_wacc):
+    """Negative margin can't imply a P/S — keep the moat multiple, but say so."""
+    state = await make_step().run(_margin_state(-12.0))
+
+    assert state.valuation.dcf_intrinsic_weighted == pytest.approx(261.09, abs=0.01)
+    assert "G5-3: EBITDA margin -12.0% (pre-profit)" in " ".join(state.all_data_flags)

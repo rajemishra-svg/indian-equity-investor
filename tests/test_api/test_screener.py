@@ -263,6 +263,7 @@ SCREENER_TTM_HTML = """
     <tbody>
       <tr><td>Sales+</td><td>100</td><td>125</td><td>150</td><td>160</td></tr>
       <tr><td>Raw Materials</td><td>60</td><td>75</td><td>90</td><td>80</td></tr>
+      <tr><td>OPM %</td><td>10%</td><td>12%</td><td>14%</td><td>20%</td></tr>
       <tr><td>Other Income+</td><td>2</td><td>3</td><td>6</td><td>40</td></tr>
       <tr><td>Net Profit+</td><td>10</td><td>12</td><td>15</td><td>16</td></tr>
     </tbody>
@@ -344,3 +345,14 @@ async def test_no_ttm_column_latest_fy_equals_trailing():
     assert metrics.trailing_revenue_cr == pytest.approx(300000.0)
     assert metrics.revenue_latest_fy_cr == pytest.approx(300000.0)
     assert metrics.revenue_1y_ago_cr == pytest.approx(250000.0)
+
+
+@pytest.mark.asyncio
+async def test_ebitda_margin_parsed_from_pl_opm_row():
+    """Live Screener pages carry "OPM %" in the P&L table, not in Ratios — so
+    ebitda_margin_* was never populated.  Fiscal years only; TTM (20%) ignored."""
+    metrics = await _financials_from(SCREENER_TTM_HTML)
+
+    assert metrics.ebitda_margin_latest == pytest.approx(14.0)
+    assert metrics.ebitda_margin_5y_avg == pytest.approx(12.0)  # < 5 years → mean of 3
+    assert metrics.ebitda_margin_trend is None  # needs ≥ 5 years

@@ -72,6 +72,12 @@ class Settings(BaseSettings):
     wacc_small_cap: float = 16.5
     wacc_terminal_growth: float = 6.0  # India long-run nominal GDP ~10%; sustainable share <70%
 
+    # --- Growth-mode forward revenue DCF (Step 5G, G5-3) ---
+    # Terminal P/S is capped at EBITDA margin × this multiple, so thin-margin
+    # businesses can't be valued at software-like sales multiples.  20× is the
+    # top of Step 5's FAIR EV/EBITDA band (12–20×).
+    growth_terminal_ev_ebitda: float = 20.0
+
     # --- Tranche entry levels (relative to CMP) ---
     # T1 = CMP, T2 = CMP * (1 - t2_discount), T3 = CMP * (1 - t3_discount)
     tranche_t2_discount: float = 0.08   # 8% below CMP
