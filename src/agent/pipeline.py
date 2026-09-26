@@ -30,6 +30,7 @@ from src.api import (
     YFinanceClient,
 )
 from src.api.cache import data_cache
+from src.api.nse_filings import FilingGovernance, NSEFilingsClient
 from src.config import settings
 from src.logging_config import get_logger
 from src.models import AnalysisState, GovernanceData
@@ -60,6 +61,7 @@ class InvestmentPipeline:
             api_key=settings.anthropic_api_key.get_secret_value()
         )
         self.nse = NSEClient()
+        self.nse_filings = NSEFilingsClient()
         self.screener = ScreenerClient()
         self.bse = BSEClient()
         self.trendlyne = TrendlyneClient()
@@ -81,9 +83,13 @@ class InvestmentPipeline:
         reset_run_usage()
         _t_start = time.monotonic()
 
-        async with self.nse, self.screener, self.bse, self.trendlyne, self.breeze, self.yfinance:
+        async with (
+            self.nse, self.nse_filings, self.screener, self.bse, self.trendlyne, self.breeze,
+            self.yfinance,
+        ):
             clients = {
                 "nse": self.nse,
+                "nse_filings": self.nse_filings,
                 "screener": self.screener,
                 "bse": self.bse,
                 "trendlyne": self.trendlyne,
@@ -278,6 +284,12 @@ class InvestmentPipeline:
             clients["nse"].get_shareholding(ticker) if cached_shareholding is None else _noop(cached_shareholding),
             clients["trendlyne"].get_valuation_data(ticker) if cached_valuation is None else _noop(cached_valuation),
         ]
+        # Auditor + RPT from NSE integrated-filing XBRL — independent of the other
+        # fetches, so it runs in the same gather; merged after shareholding resolves.
+        filings_client = clients.get("nse_filings")
+        coros.append(
+            filings_client.get_filing_governance(ticker) if filings_client else _noop(None)
+        )
 
         results = await asyncio.gather(*coros, return_exceptions=True)
 
@@ -345,6 +357,7 @@ class InvestmentPipeline:
 
         # Shareholding / Governance — 3-layer fallback: NSE → BSE → Screener
         shareholding_result = results[2]
+        shareholding_source = "bse"  # NSE/BSE (historical snapshot label)
         if isinstance(shareholding_result, Exception) or shareholding_result is None:
             if isinstance(shareholding_result, Exception):
                 self.log.warning(
@@ -361,6 +374,7 @@ class InvestmentPipeline:
             # Layer 3: Screener.in (same page as financials — cheap re-fetch, usually cached)
             self.log.info("shareholding_fallback_screener", ticker=ticker)
             shareholding_result = await clients["screener"].get_shareholding(ticker)
+            shareholding_source = "screener"
 
         if shareholding_result is None:
             self.log.warning(
@@ -375,8 +389,10 @@ class InvestmentPipeline:
             data_cache.set(data_cache.shareholding_key(ticker), shareholding_result, settings.cache_ttl_financials)
             state.governance_data = shareholding_result
 
-        # Governance enrichment: fetch auditor + RPT from Trendlyne if not already populated
-        # This runs after primary shareholding so we can merge into existing GovernanceData
+        # Governance enrichment: statutory auditor + RPT % from NSE integrated filings
+        # (structured XBRL), then Trendlyne for an auditor still missing. Both run after
+        # primary shareholding so they merge into the existing GovernanceData.
+        self._merge_filing_governance(ticker, state, results[4])
         await self._enrich_governance_from_trendlyne(ticker, state, clients)
 
         # Valuation — fall back to Yahoo Finance if Trendlyne is blocked
@@ -473,10 +489,7 @@ class InvestmentPipeline:
             state.governance_data is not None
             and state.governance_data.promoter_holding_pct is not None
         )
-        gov_source = "screener" if (
-            gov_data_is_real and "ER-04" not in state.error_tags
-            and state.governance_data.auditor_name is None  # BSE usually has holding, not auditor
-        ) else "bse"
+        gov_source = shareholding_source
 
         snap_tasks = []
         if state.quote:
@@ -499,6 +512,46 @@ class InvestmentPipeline:
                 f"[ER-07: DB SNAPSHOT FAILURES — {snapshot_failures}/{len(snap_tasks)} snapshots "
                 "could not be saved; check db_path permissions and disk space]"
             )
+
+    def _merge_filing_governance(
+        self, ticker: str, state: AnalysisState, filing: object
+    ) -> None:
+        """Merge NSE integrated-filing governance facts into GovernanceData (fill-only).
+
+        Values the filings can't support stay None, so Step 1's web-research
+        enrichment and its [DATA UNVERIFIED] flags still apply to them.
+        """
+        g = state.governance_data
+        if g is None:
+            return
+        if isinstance(filing, Exception):
+            self.log.warning("nse_filing_governance_failed", ticker=ticker, error=str(filing))
+            return
+        if not isinstance(filing, FilingGovernance):
+            return
+
+        if g.auditor_name is None and filing.auditor_name:
+            g.auditor_name = filing.auditor_name
+        if g.rpt_pct_revenue is None and filing.rpt_pct_revenue is not None:
+            g.rpt_pct_revenue = filing.rpt_pct_revenue
+        if filing.modified_opinion:
+            qualification = (
+                "Modified audit opinion — statement on impact of audit qualifications "
+                "filed with annual results (NSE integrated filing)"
+            )
+            if qualification not in g.audit_qualifications:
+                g.audit_qualifications.append(qualification)
+        for flag in filing.data_flags:
+            if flag not in g.data_flags:
+                g.data_flags.append(flag)
+        self.log.info(
+            "governance_from_nse_filings",
+            ticker=ticker,
+            auditor=g.auditor_name,
+            rpt_pct=g.rpt_pct_revenue,
+            rpt_period=filing.rpt_fiscal_year,
+            modified_opinion=filing.modified_opinion,
+        )
 
     async def _enrich_governance_from_trendlyne(
         self, ticker: str, state: AnalysisState, clients: dict
