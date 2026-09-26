@@ -146,7 +146,7 @@ def _parse_history(rows: list[dict]) -> dict:
     for row in rows:
         c = _safe_float(row.get("close"))
         h = _safe_float(row.get("high"))
-        l = _safe_float(row.get("low"))
+        lo = _safe_float(row.get("low"))
         o = _safe_float(row.get("open"))
         v = _safe_float(row.get("volume"))
         if c is None:
@@ -154,8 +154,8 @@ def _parse_history(rows: list[dict]) -> dict:
         closes.append(c)
         if h is not None:
             highs.append(h)
-        if l is not None:
-            lows.append(l)
+        if lo is not None:
+            lows.append(lo)
         if v is not None:
             daily_values.append(c * v)
             all_vols.append(v)
@@ -194,8 +194,7 @@ def _fetch_quote_sync(client: Any, ticker: str) -> StockQuote | None:
     """Run both Breeze calls synchronously (designed for run_in_executor)."""
     from zoneinfo import ZoneInfo
 
-    IST = ZoneInfo("Asia/Kolkata")
-    now_ist = datetime.now(IST)
+    now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
     today = now_ist.date()
 
     # Breeze requires the internal ISEC short code, not the NSE ticker.
