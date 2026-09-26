@@ -258,9 +258,18 @@ def test_margin_stability_green_when_stable():
     assert _status(items, "Margin Stability") == "green"
 
 
-def test_margin_stability_red_when_deteriorating():
-    items = build_scorecard(_financials(ebitda_margin_trend="deteriorating"), _governance(), None)
-    assert _status(items, "Margin Stability") == "red"
+def test_margin_stability_red_when_compressing():
+    """The Screener parser emits "expanding" | "compressing" | "stable" for
+    EBITDA margin (not "deteriorating" like ROCE/ROE) — compressing must go red."""
+    items = build_scorecard(_financials(ebitda_margin_trend="compressing"), _governance(), None)
+    item = next(i for i in items if i.name == "Margin Stability")
+    assert item.status == "red"
+    assert "compressing" in item.explanation
+
+
+def test_margin_stability_green_when_expanding():
+    items = build_scorecard(_financials(ebitda_margin_trend="expanding"), _governance(), None)
+    assert _status(items, "Margin Stability") == "green"
 
 
 # ---------------------------------------------------------------------------
@@ -320,10 +329,10 @@ def test_debt_uses_gnpa_nnpa_for_financial_services():
 
 def test_margin_stability_uses_nim_for_financial_services():
     items_healthy = build_scorecard(
-        _financials(nim_pct=3.8, ebitda_margin_trend="deteriorating"),
+        _financials(nim_pct=3.8, ebitda_margin_trend="compressing"),
         _governance(), None, sector_name="financial_services",
     )
-    # ebitda_margin_trend="deteriorating" would be red under the generic path — confirms NIM drove the verdict.
+    # ebitda_margin_trend="compressing" would be red under the generic path — confirms NIM drove the verdict.
     assert _status(items_healthy, "Margin Stability") == "green"
 
     items_weak = build_scorecard(

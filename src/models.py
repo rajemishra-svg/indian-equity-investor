@@ -121,9 +121,10 @@ class FinancialMetrics(BaseModel):
 
     # ── P2-3: Trend direction signals ──────────────────────────────────────
     # Trajectory matters as much as the absolute level.
-    # Values: "improving" | "stable" | "deteriorating" | None
+    # roce_trend / roe_trend: "improving" | "stable" | "deteriorating" | None
     roce_trend: str | None = None
     roe_trend: str | None = None
+    # ebitda_margin_trend: "expanding" | "stable" | "compressing" | None
     ebitda_margin_trend: str | None = None
     # ── P2-4: EC-02 cyclical normalization ────────────────────────────────
     ebitda_margin_5y_avg: float | None = None  # 5Y OPM avg; used in DCF for cyclicals
