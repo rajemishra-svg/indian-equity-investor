@@ -791,3 +791,99 @@ async def test_missing_rpt_keeps_unverified_flag_and_default():
     assert state.governance.sub_scores["rpt"] == 1
     assert state.governance.sub_scores["audit"] == 3
     assert any("rpt_pct_revenue" in f for f in state.all_data_flags)
+
+
+# ---------------------------------------------------------------------------
+# RPT > 20%: structural vs unexplained, and the funding gate
+# ---------------------------------------------------------------------------
+
+
+def _rpt_gov(**overrides) -> GovernanceData:
+    """Clean governance with a Maruti-style structural RPT profile (stable, approved)."""
+    base = dict(
+        promoter_holding_pct=58.0,
+        promoter_pledging_pct=0.0,
+        auditor_name="Price Waterhouse Chartered Accountants LLP",
+        sebi_record_clean=True,
+        sebi_record_checked=True,
+        insider_net_buying_3m="NEUTRAL",
+        rpt_pct_revenue=33.6,
+        rpt_prior_year_pct_revenue=37.8,
+        rpt_prior_fiscal_year="FY2024",
+        rpt_sales_pct_revenue=15.9,
+        rpt_funding_pct_networth=0.0,
+        rpt_over_approval_count=0,
+        rpt_over_approval_pct_revenue=0.0,
+        capital_allocation_description="Consistent reinvestment, rising dividends, no bad M&A.",
+    )
+    base.update(overrides)
+    return GovernanceData(**base)
+
+
+async def _run_rpt(gov: GovernanceData):
+    state = AnalysisState(ticker="RPTCASE")
+    state.quote = SAMPLE_QUOTE
+    state.governance_data = gov
+    return await make_step(capital_alloc_score=3).run(state)
+
+
+@pytest.mark.asyncio
+async def test_structural_rpt_passes_but_is_capped_at_conditional():
+    state = await _run_rpt(_rpt_gov())
+    gov = state.governance
+    # pledging 3 + audit 3 + rpt 0 + capital 3 + regulatory 3 = 12 → would be GREEN
+    assert gov.score == 12
+    assert gov.sub_scores["rpt"] == 0
+    assert gov.immediate_triggers == []
+    assert gov.gate == GateResult.PASS_CONDITIONAL
+    assert state.terminated_at_step is None
+    assert any(f.startswith("[RPT STRUCTURAL: 33.6%") for f in state.all_data_flags)
+
+
+@pytest.mark.parametrize(
+    "overrides,reason",
+    [
+        ({"rpt_prior_year_pct_revenue": 20.1}, "jumped"),              # ADANIPORTS-style spike
+        ({"rpt_sales_pct_revenue": 71.7}, "sold to related parties"),   # OLECTRA-style dependence
+        ({"rpt_prior_year_pct_revenue": None, "rpt_prior_fiscal_year": None}, "no prior-year"),
+        ({"rpt_over_approval_count": 3, "rpt_over_approval_pct_revenue": 1.2}, "approvals"),
+        ({"audit_qualifications": ["Modified audit opinion"]}, "audit qualification"),
+        ({"rpt_over_approval_count": None}, "no exchange RPT breakdown"),  # web-research RPT
+    ],
+)
+@pytest.mark.asyncio
+async def test_unexplained_rpt_above_20_rejects(overrides, reason):
+    state = await _run_rpt(_rpt_gov(**overrides))
+    assert state.governance.gate == GateResult.FAIL
+    assert "rpt > 20% of revenue (unexplained)" in state.governance.immediate_triggers
+    assert any(reason in c for c in state.governance.concerns)
+    assert state.recommendation_type == "REJECT"
+
+
+@pytest.mark.asyncio
+async def test_immaterial_approval_breach_is_a_concern_not_a_reject():
+    """CUMMINSIND: 2 small export rows above approval (~0.2% of revenue)."""
+    state = await _run_rpt(_rpt_gov(rpt_over_approval_count=2, rpt_over_approval_pct_revenue=0.16))
+    assert state.governance.gate == GateResult.PASS_CONDITIONAL
+    assert any("exceeded audit-committee approved" in c for c in state.governance.concerns)
+
+
+@pytest.mark.asyncio
+async def test_spike_at_threshold_is_not_a_spike():
+    state = await _run_rpt(_rpt_gov(rpt_pct_revenue=29.2, rpt_prior_year_pct_revenue=24.2))
+    assert state.governance.gate == GateResult.PASS_CONDITIONAL
+
+
+@pytest.mark.asyncio
+async def test_funding_to_related_parties_above_10pct_networth_rejects_even_with_low_rpt():
+    state = await _run_rpt(_rpt_gov(rpt_pct_revenue=4.0, rpt_funding_pct_networth=12.5))
+    assert state.governance.gate == GateResult.FAIL
+    assert "rpt_funding_to_related_parties > 10% of net worth" in state.governance.immediate_triggers
+
+
+@pytest.mark.asyncio
+async def test_rpt_below_20_unaffected_by_red_flags():
+    """Bands still score normally; red flags only matter above 20%."""
+    state = await _run_rpt(_rpt_gov(rpt_pct_revenue=12.0, rpt_prior_year_pct_revenue=None))
+    assert state.governance.sub_scores["rpt"] == 2
+    assert state.governance.gate == GateResult.PASS_GREEN

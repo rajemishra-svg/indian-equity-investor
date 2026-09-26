@@ -172,7 +172,17 @@ class GovernanceData(BaseModel):
     auditor_name: str | None = None
     auditor_changed_3y: bool = False
     audit_qualifications: list[str] = Field(default_factory=list)
+    # Operating RPT with non-group related parties, % of revenue (Step 1 bands).
     rpt_pct_revenue: float | None = None
+    # Breakdown from exchange RPT disclosures (None when rpt_pct_revenue came from
+    # web research or isn't known). Step 1 uses these to tell structural RPT
+    # (stable, approved, parent-group trade) from unexplained RPT.
+    rpt_funding_pct_networth: float | None = None  # loans/ICDs/investments/guarantees given
+    rpt_sales_pct_revenue: float | None = None  # sales to related parties
+    rpt_prior_year_pct_revenue: float | None = None  # operating RPT, comparison fiscal year
+    rpt_prior_fiscal_year: str | None = None  # e.g. "FY2024"
+    rpt_over_approval_count: int | None = None  # rows above audit-committee approval
+    rpt_over_approval_pct_revenue: float | None = None  # excess over approvals, % of revenue
     contingent_liabilities_pct_networth: float | None = None
     sebi_orders: list[str] = Field(default_factory=list)
     # EC-14: severity tier for sebi_orders, classified by governance enrichment.
