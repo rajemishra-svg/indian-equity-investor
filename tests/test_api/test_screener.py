@@ -247,3 +247,100 @@ async def test_missing_data_adds_flags():
     assert metrics.revenue_cagr_5y is None
     assert len(metrics.data_flags) > 0
     assert any("DATA UNVERIFIED" in f for f in metrics.data_flags)
+
+
+# ---------------------------------------------------------------------------
+# TTM column — Screener appends it to the P&L table once a quarter past FY-end
+# is reported.  It must not be read as a fiscal year.
+# ---------------------------------------------------------------------------
+
+SCREENER_TTM_HTML = """
+<html>
+<body>
+<section id="profit-loss">
+  <table class="data-table responsive-text-nowrap">
+    <thead><tr><th></th><th>Mar 2024</th><th>Mar 2025</th><th>Mar 2026</th><th>TTM</th></tr></thead>
+    <tbody>
+      <tr><td>Sales+</td><td>100</td><td>125</td><td>150</td><td>160</td></tr>
+      <tr><td>Raw Materials</td><td>60</td><td>75</td><td>90</td><td>80</td></tr>
+      <tr><td>Other Income+</td><td>2</td><td>3</td><td>6</td><td>40</td></tr>
+      <tr><td>Net Profit+</td><td>10</td><td>12</td><td>15</td><td>16</td></tr>
+    </tbody>
+  </table>
+</section>
+<section id="cash-flow">
+  <table>
+    <tbody>
+      <tr><td>Cash from Operating Activity+</td><td>9</td><td>11</td><td>14</td></tr>
+    </tbody>
+  </table>
+</section>
+</body>
+</html>
+"""
+
+
+async def _financials_from(html: str) -> FinancialMetrics:
+    with respx.mock(base_url="https://www.screener.in") as mock:
+        mock.get("/company/TTMCO/consolidated/").mock(
+            return_value=httpx.Response(200, text=html)
+        )
+        async with ScreenerClient() as client:
+            metrics = await client.get_financials("TTMCO")
+    assert metrics is not None
+    return metrics
+
+
+@pytest.mark.asyncio
+async def test_ttm_column_is_trailing_revenue_not_a_fiscal_year():
+    """TTM feeds trailing_revenue_cr; the two FY fields are the last two fiscal years."""
+    metrics = await _financials_from(SCREENER_TTM_HTML)
+
+    assert metrics.trailing_revenue_cr == pytest.approx(160.0)
+    assert metrics.revenue_latest_fy_cr == pytest.approx(150.0)
+    # Regression: previously 150 (the FY *before* TTM), making YoY = TTM / FY26
+    assert metrics.revenue_1y_ago_cr == pytest.approx(125.0)
+
+
+@pytest.mark.asyncio
+async def test_ttm_column_does_not_collapse_growth_yoy():
+    """YoY must be FY26 / FY25 = +20%, not TTM / FY26 = +6.7% — the latter
+    falsely tripped HT-G1 revenue deceleration for every growth ticker."""
+    from src.agent.growth_pipeline import compute_growth_metrics
+    from src.models import AnalysisState
+
+    state = AnalysisState(ticker="TTMCO")
+    state.financials = await _financials_from(SCREENER_TTM_HTML)
+    compute_growth_metrics(state)
+
+    assert state.growth_metrics.revenue_cagr_1y == pytest.approx(20.0)
+
+
+@pytest.mark.asyncio
+async def test_ttm_column_keeps_net_profit_aligned_with_cfo_years():
+    """Cash flow has no TTM column, so NP must drop TTM to stay year-aligned.
+
+    Aligned: 9/10, 11/12, 14/15 → 91.7%.  Shifted by TTM it was 11/15, 14/16 … → ~78%.
+    """
+    metrics = await _financials_from(SCREENER_TTM_HTML)
+
+    assert metrics.cfo_net_profit_3y_avg == pytest.approx(91.7, abs=0.1)
+
+
+@pytest.mark.asyncio
+async def test_ttm_column_excluded_from_gross_margin_and_other_income():
+    metrics = await _financials_from(SCREENER_TTM_HTML)
+
+    # Three fiscal years at 40% margin; the TTM point (50%) is not part of the series
+    assert metrics.gross_profit_margin_series == [40.0, 40.0, 40.0]
+    # Latest FY: 6 / 150 = 4% (TTM would give 40 / 160 = 25%)
+    assert metrics.other_income_pct_revenue == pytest.approx(4.0)
+
+
+@pytest.mark.asyncio
+async def test_no_ttm_column_latest_fy_equals_trailing():
+    metrics = await _financials_from(SCREENER_HTML)
+
+    assert metrics.trailing_revenue_cr == pytest.approx(300000.0)
+    assert metrics.revenue_latest_fy_cr == pytest.approx(300000.0)
+    assert metrics.revenue_1y_ago_cr == pytest.approx(250000.0)

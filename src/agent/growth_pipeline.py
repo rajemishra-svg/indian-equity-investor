@@ -70,10 +70,13 @@ def compute_growth_metrics(state: AnalysisState) -> None:
                 "stable"
             )
 
-        # 1Y revenue CAGR from consecutive annual figures
-        if f.revenue_1y_ago_cr and f.trailing_revenue_cr and f.revenue_1y_ago_cr > 0:
+        # 1Y revenue growth from two consecutive fiscal years.  Deliberately not
+        # trailing_revenue_cr: that is TTM once Screener shows it, and TTM vs the
+        # prior FY overlap by 9 months.  Snapshots cached before
+        # revenue_latest_fy_cr existed leave this None (flagged downstream).
+        if f.revenue_1y_ago_cr and f.revenue_latest_fy_cr and f.revenue_1y_ago_cr > 0:
             gm.revenue_cagr_1y = round(
-                (f.trailing_revenue_cr / f.revenue_1y_ago_cr - 1) * 100, 1
+                (f.revenue_latest_fy_cr / f.revenue_1y_ago_cr - 1) * 100, 1
             )
 
         # Rule of 40: revenue CAGR 3Y + EBITDA margin

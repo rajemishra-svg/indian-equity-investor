@@ -16,6 +16,43 @@ from src.models import FinancialMetrics, GovernanceData
 _SCREENER_SEMAPHORE = asyncio.Semaphore(2)
 
 
+def _pl_rows(table) -> list[tuple[str, list[float], float | None]]:
+    """Split each P&L data-table row into (label, annual values, TTM value).
+
+    Once a company reports a quarter past its fiscal year-end, Screener appends
+    a "TTM" column to the P&L table (only — cash flow and balance sheet stay
+    annual).  Treating that column as the latest year compares TTM against a
+    fiscal year it overlaps by 9 months (collapsing YoY growth) and shifts
+    P&L rows one year out of step with cash-flow/balance-sheet rows.
+
+    Annual values are oldest → newest with non-numeric cells dropped; the TTM
+    value is None when the table has no TTM column.
+    """
+    header = table.find("tr")
+    heads = [c.get_text(strip=True).upper() for c in header.find_all(["th", "td"])] if header else []
+    ttm_col = heads.index("TTM") if "TTM" in heads else None
+
+    rows: list[tuple[str, list[float], float | None]] = []
+    for row in table.find_all("tr"):
+        cells = row.find_all("td")
+        if not cells:
+            continue
+        label = cells[0].get_text(strip=True).lower().replace("+", "").strip()
+        annual: list[float] = []
+        ttm: float | None = None
+        for col, c in enumerate(cells[1:], start=1):
+            try:
+                val = float(c.get_text(strip=True).replace(",", ""))
+            except ValueError:
+                continue
+            if col == ttm_col:
+                ttm = val
+            else:
+                annual.append(val)
+        rows.append((label, annual, ttm))
+    return rows
+
+
 class ScreenerClient(BaseHTTPClient):
     """Scraper for Screener.in consolidated financial data."""
 
@@ -257,6 +294,7 @@ class ScreenerClient(BaseHTTPClient):
             ebit_cr_latest=metrics.get("ebit_cr_latest"),
             gross_profit_margin_pct=metrics.get("gross_profit_margin_pct"),
             gross_profit_margin_series=metrics.get("gross_profit_margin_series", []),
+            revenue_latest_fy_cr=metrics.get("revenue_latest_fy_cr"),
             revenue_1y_ago_cr=metrics.get("revenue_1y_ago_cr"),
             cash_cr_latest=metrics.get("cash_cr_latest"),
             data_flags=flags,
@@ -343,34 +381,28 @@ class ScreenerClient(BaseHTTPClient):
         if not main_pl:
             return result
 
-        for row in main_pl.find_all("tr"):
-            cells = row.find_all("td")
-            if not cells:
-                continue
-            label = cells[0].get_text(strip=True).lower().replace("+", "").strip()
-            vals: list[float] = []
-            for c in cells[1:]:
-                try:
-                    vals.append(float(c.get_text(strip=True).replace(",", "")))
-                except ValueError:
-                    pass
+        sales_ttm: float | None = None
+        for label, vals, ttm in _pl_rows(main_pl):
             if not vals:
                 continue
-
             if label in ("sales", "revenue from operations", "net sales", "revenue"):
                 sales_vals = vals
+                sales_ttm = ttm
             elif "other income" in label:
                 other_income_vals = vals
 
         if sales_vals:
             result["_sales_vals"] = sales_vals  # consumed later in _parse_financials
-            # Expose latest annual revenue for P/S ratio computation
-            result["trailing_revenue_cr"] = sales_vals[-1]
-            # Prior-year revenue for 1Y CAGR (growth pipeline)
+            # Freshest revenue level for P/S and revenue projections: TTM when
+            # Screener shows it, else the latest fiscal year.
+            result["trailing_revenue_cr"] = sales_ttm if sales_ttm is not None else sales_vals[-1]
+            # Two consecutive *fiscal* years for 1Y growth (growth pipeline) —
+            # never TTM vs FY, which overlap by 9 months.
+            result["revenue_latest_fy_cr"] = sales_vals[-1]
             if len(sales_vals) >= 2:
                 result["revenue_1y_ago_cr"] = sales_vals[-2]
 
-        # Other income as % of revenue (latest year only)
+        # Other income as % of revenue (latest fiscal year)
         if other_income_vals and sales_vals and sales_vals[-1] > 0:
             result["other_income_pct_revenue"] = round(
                 abs(other_income_vals[-1]) / sales_vals[-1] * 100, 1
@@ -577,19 +609,12 @@ class ScreenerClient(BaseHTTPClient):
                             pass
 
         # Net Profit from P&L main data-table
+        # (annual columns only, so NP years line up with CFO years)
         main_pl = pl_section.find("table", class_="data-table")
         if main_pl:
-            for row in main_pl.find_all("tr"):
-                cells = row.find_all("td")
-                if not cells:
-                    continue
-                label = cells[0].get_text(strip=True).lower()
+            for label, vals, _ttm in _pl_rows(main_pl):
                 if "net profit" in label:
-                    for c in cells[1:]:
-                        try:
-                            np_vals.append(float(c.get_text(strip=True).replace(",", "")))
-                        except ValueError:
-                            pass
+                    np_vals.extend(vals)
 
         if cfo_vals and np_vals:
             count = min(3, len(cfo_vals), len(np_vals))
@@ -705,18 +730,7 @@ class ScreenerClient(BaseHTTPClient):
         sales_vals: list[float] = []
         cogs_vals: list[float] = []
 
-        for row in main_pl.find_all("tr"):
-            cells = row.find_all("td")
-            if not cells:
-                continue
-            label = cells[0].get_text(strip=True).lower().replace("+", "").strip()
-            vals: list[float] = []
-            for c in cells[1:]:
-                try:
-                    vals.append(float(c.get_text(strip=True).replace(",", "")))
-                except ValueError:
-                    pass
-
+        for label, vals, _ttm in _pl_rows(main_pl):
             if not vals:
                 continue
 
