@@ -505,3 +505,9 @@ def test_entering_joint_venture_stays_outside_group():
                                           "State-owned enterprise"])
 def test_government_related_psu_trade_excluded(relationship):
     assert is_counted_rpt(_r(relationship), set()) is False
+
+
+def test_benefit_trust_labelled_promoter_group_excluded():
+    row = _r("Promoter Group", "Any other transaction", "Contribution",
+             counterparty="Tata Elxsi (India) Ltd. Employees Provident Fund")
+    assert is_counted_rpt(row, set()) is False

@@ -78,6 +78,11 @@ _GOVERNMENT_RELATED = re.compile(
     r"|central\s+public\s+sector|state[\s-]*owned|public\s+sector\s+(undertaking|enterprise)",
     re.I,
 )
+_BENEFIT_TRUST_NAME = re.compile(
+    r"employees?'?\s*(provident|gratuity|superannuation|pension)|provident\s+fund|gratuity\s+(fund|trust)"
+    r"|superannuation\s+(fund|trust)",
+    re.I,
+)
 # Post-employment benefit plans (PF / gratuity / superannuation trusts) receive
 # statutory employee-benefit contributions, not business flows.
 _BENEFIT_PLAN = re.compile(
@@ -242,8 +247,11 @@ def is_counted_rpt(row: RPTRow, group_entities: set[str]) -> bool:
     """Whether an RPT row counts toward the RPT-%-of-revenue governance metric."""
     if _is_own_subsidiary(row.relationship or ""):
         return False
-    if _BENEFIT_PLAN.search(row.relationship or "") or _GOVERNMENT_RELATED.search(
-        row.relationship or ""
+    if _GOVERNMENT_RELATED.search(row.relationship or ""):
+        return False
+    # Benefit trusts are sometimes labelled "Promoter Group" — check the name too.
+    if _BENEFIT_PLAN.search(row.relationship or "") or _BENEFIT_TRUST_NAME.search(
+        row.counterparty or ""
     ):
         return False
     if _norm_name(row.counterparty) in group_entities:
