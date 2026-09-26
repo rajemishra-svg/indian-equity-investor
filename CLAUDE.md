@@ -76,7 +76,8 @@ CLI (src/main.py)
   │         │    └─ NSEClient → YFinanceClient (fallback) → NORMAL + [MODE UNCONFIRMED]
   │         ├─ _prefetch_data()  ← checks DataCache   src/api/cache.py
   │         │    ├─ NSEClient.get_stock_quote()        src/api/nse.py
-  │         │    │    └─ YFinanceClient (fallback if NSE 403)  src/api/yfinance_client.py
+  │         │    │    ├─ Breeze → YFinanceClient (fallback if NSE fails)  src/api/yfinance_client.py
+  │         │    │    └─ YFinanceClient.backfill_quote_history() — 200-DMA / liquidity / volume trend
   │         │    ├─ ScreenerClient.get_financials()    src/api/screener.py
   │         │    ├─ BSEClient.get_shareholding()       src/api/bse.py
   │         │    │    └─ ScreenerClient.get_shareholding() (fallback)
@@ -274,7 +275,7 @@ The scanner's two-phase design exists to control Claude API cost:
 
 All clients except `YFinanceClient` extend `BaseHTTPClient` which provides `httpx.AsyncClient` with tenacity retry (3 attempts, exponential backoff) on `TimeoutException` and `ConnectError`.
 
-**NSE quirk**: must visit the homepage first to establish session cookies — `_establish_session()` is called automatically on first API request. NSE aggressively blocks bots with 403s in non-browser environments.
+**NSEClient endpoints** (verified Sep 2026): quote = NextApi `/api/NextApi/apiClient/GetQuoteApi?functionName=getSymbolData` (the old `/api/quote-equity` is behind Akamai bot protection); constituents = NextApi `marketWatchApi?functionName=getIndicesData&symbol=<index>` (`/api/equity-stockIndices` is 404); shareholding = `/api/corporate-share-holdings-master` (holding/public trend) + each quarter's SHP XBRL for the promoter pledge % (same basis as BSE: pledged as % of promoter holding; unknown stays None, never 0.0); Nifty = `/api/allIndices`. The homepage cookie visit is best-effort (it often 403s while the APIs answer), and only gzip/deflate are advertised because httpx can't decode NSE's brotli without the optional package. NSE quotes carry the live price only — the pipeline and batch scanner call `YFinanceClient.backfill_quote_history()` to fill `dma_200`, `avg_daily_value_cr` and `volume_trend_down_days`.
 
 **BSEClient** (`src/api/bse.py`): three-endpoint chain, no session cookies needed (browser UA + Referer suffice) — `PeerSmartSearch/w` (scripcode lookup; JSON-encoded HTML, exact symbol match required), `SHPQNewFormat/w` (filing quarter list, newest first), `Corp_shpSec_SHPSUMMARY_ng/w` per quarter (latest 4 fetched concurrently for the pledging trend). The legacy `fetchCompanyCode`/`shareHoldingPattrn` endpoints are dead (they redirect to HTML pages). A **module-level circuit breaker** opens after `CIRCUIT_BREAKER_THRESHOLD` (10) consecutive infrastructure failures — one summary warning is logged, then `get_shareholding()` returns None instantly for the rest of the process so callers fall straight through to the Screener fallback. A clean "ticker not listed on BSE" does not count toward the breaker; any success resets the counter. `reset_circuit_breaker()` restores state (used in tests). ER-04 is added by the **pipeline only** when NSE, BSE *and* Screener all fail — individual client failures never tag it.
 

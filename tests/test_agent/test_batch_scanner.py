@@ -28,6 +28,7 @@ def _mock_yfinance_client(quote=None):
     mock.__aenter__ = AsyncMock(return_value=mock)
     mock.__aexit__ = AsyncMock(return_value=False)
     mock.get_stock_quote = AsyncMock(return_value=quote)
+    mock.backfill_quote_history = AsyncMock(side_effect=lambda q: q)
     return mock
 
 

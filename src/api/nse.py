@@ -1,17 +1,76 @@
-"""NSE India API client."""
+"""NSE India API client.
+
+Endpoint notes (verified Sep 2026):
+
+* ``/api/quote-equity`` is now behind Akamai bot protection (403 without a
+  browser-issued sensor cookie). The quote page itself uses the NextApi proxy
+  ``/api/NextApi/apiClient/GetQuoteApi?functionName=getSymbolData`` which
+  answers plain HTTP clients.
+* ``/api/equity-stockIndices`` and ``/api/corporate-shareholding-pattern`` were
+  retired (404). Replacements: NextApi ``marketWatchApi?functionName=getIndicesData``
+  and ``/api/corporate-share-holdings-master`` (one row per quarterly SHP filing,
+  each linking its XBRL, which carries the promoter pledge figures).
+* The homepage often returns 403 to non-browser clients; the APIs above don't
+  need its cookies, so the session visit is best-effort.
+* NSE serves brotli when offered; httpx can't decode it without the optional
+  ``brotli`` package, so only gzip/deflate are advertised.
+"""
 from __future__ import annotations
 
-import re
+import asyncio
 from datetime import UTC, datetime
 
 import httpx
+from lxml import etree
 
 from src.api.base import BaseHTTPClient
 from src.models import GovernanceData, StockQuote
 
+_ARCHIVE_PREFIX = "https://nsearchives.nseindia.com/"
+_TREND_QUARTERS = 4  # quarters of SHP XBRL fetched for the pledging trend (matches BSE)
+_XML_PARSER = etree.XMLParser(resolve_entities=False, no_network=True, huge_tree=False)
+
+
+def _to_float(value: object) -> float | None:
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_shp_pledge(xml: bytes) -> float | None:
+    """Promoter-group shares pledged, as % of the promoter group's own holding.
+
+    Same basis as BSE's ``Fld_PledgeEncumberedPercentage`` (SHP Table I column
+    "as a % of total shares held"). Returns 0.0 when the filing declares no
+    promoter pledge, None when the filing can't answer either way.
+    """
+    root = etree.fromstring(xml, parser=_XML_PARSER)
+    declared: bool | None = None
+    pledged_pct: float | None = None
+    for el in root:
+        if not isinstance(el.tag, str):
+            continue
+        name = el.tag.rsplit("}", 1)[-1]
+        text = (el.text or "").strip()
+        if name == "WhetherAnySharesHeldByPromotersAreEncumberedUnderPledgedForPromoterAndPromoterGroup":
+            declared = text.lower() == "true"
+        elif (
+            name == "EncumberedShareUnderPledgedAsPercentageOfTotalNumberOfShares"
+            and el.get("contextRef") == "ShareholdingOfPromoterAndPromoterGroup_ContextI"
+        ):
+            val = _to_float(text)
+            if val is not None:
+                pledged_pct = round(val * 100, 2)  # XBRL stores fractions (0.116 = 11.6%)
+    if pledged_pct is not None:
+        return pledged_pct
+    if declared is False:
+        return 0.0
+    return None
+
 
 class NSEClient(BaseHTTPClient):
-    """Client for NSE India. Requires session establishment first."""
+    """Client for NSE India public JSON APIs."""
 
     def __init__(self) -> None:
         super().__init__(base_url="https://www.nseindia.com")
@@ -23,18 +82,31 @@ class NSEClient(BaseHTTPClient):
             {
                 "Referer": "https://www.nseindia.com",
                 "X-Requested-With": "XMLHttpRequest",
+                "Accept-Encoding": "gzip, deflate",
             }
         )
         return headers
 
     async def _establish_session(self) -> None:
-        """Establish session cookies by visiting the main page."""
-        await self.get("/")
+        """Best-effort cookie visit to the homepage.
+
+        NSE frequently 403s the homepage for non-browser clients while its data
+        APIs still answer, so a failure here is logged and ignored rather than
+        aborting the real request.
+        """
         self._session_established = True
-        self.log.info("nse_session_established")
+        try:
+            await self.get("/")
+            self.log.info("nse_session_established")
+        except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+            self.log.debug("nse_session_warmup_failed", error=str(exc))
 
     async def get_stock_quote(self, symbol: str) -> StockQuote | None:
         """Fetch equity quote for a symbol from NSE.
+
+        Only live-price fields are populated; history-derived fields (200-DMA,
+        average traded value, volume trend) are left None for the caller to
+        backfill from a history source.
 
         Args:
             symbol: NSE ticker symbol, e.g. "RELIANCE".
@@ -47,32 +119,42 @@ class NSEClient(BaseHTTPClient):
 
         symbol = symbol.upper().strip()
         try:
-            resp = await self.get(f"/api/quote-equity?symbol={symbol}")
+            resp = await self.get(
+                "/api/NextApi/apiClient/GetQuoteApi",
+                params={
+                    "functionName": "getSymbolData",
+                    "marketType": "N",
+                    "series": "EQ",
+                    "symbol": symbol,
+                },
+            )
             data = resp.json()
-        except (httpx.HTTPStatusError, httpx.RequestError, ValueError) as exc:
+            row = (data.get("equityResponse") or [None])[0]
+        except (httpx.HTTPStatusError, httpx.RequestError, ValueError, AttributeError) as exc:
             self.log.warning("nse_quote_failed", symbol=symbol, error=str(exc), error_tag="ER-01")
             return None
 
-        price_info = data.get("priceInfo", {})
-        week_hl = price_info.get("weekHighLow", {})
-        trade_info = (
-            data.get("marketDeptOrderBook", {}).get("tradeInfo", {})
-        )
+        if not isinstance(row, dict):
+            self.log.warning("nse_quote_empty", symbol=symbol, error_tag="ER-01")
+            return None
 
-        raw_mc = trade_info.get("totalMarketCap", 0) or 0
-        market_cap_cr = raw_mc / 1e7  # convert rupees to crores
+        meta = row.get("metaData") or {}
+        trade = row.get("tradeInfo") or {}
+        price = row.get("priceInfo") or {}
+        cmp = _to_float(trade.get("lastPrice")) or _to_float(meta.get("closePrice"))
+        if not cmp:
+            self.log.warning("nse_quote_no_price", symbol=symbol, error_tag="ER-01")
+            return None
 
-        # NSE does not reliably expose 200DMA in the quote endpoint; fetched separately via get_200dma
-        dma_200: float | None = None
-
+        raw_mc = _to_float(trade.get("totalMarketCap")) or 0.0
         return StockQuote(
             ticker=symbol,
-            company_name=data.get("info", {}).get("companyName", symbol),
-            cmp=price_info.get("lastPrice", 0.0),
-            w52_high=week_hl.get("max", 0.0),
-            w52_low=week_hl.get("min", 0.0),
-            dma_200=dma_200,
-            market_cap_cr=market_cap_cr,
+            company_name=meta.get("companyName") or symbol,
+            cmp=cmp,
+            w52_high=_to_float(price.get("yearHigh")) or 0.0,
+            w52_low=_to_float(price.get("yearLow")) or 0.0,
+            dma_200=None,
+            market_cap_cr=raw_mc / 1e7,  # rupees → crores
             exchange="NSE",
             data_timestamp=datetime.now(UTC),
             is_stale=False,
@@ -116,22 +198,28 @@ class NSEClient(BaseHTTPClient):
         if not self._session_established:
             await self._establish_session()
 
-        resp = await self.get("/api/equity-stockIndices", params={"index": index})
-        data = resp.json()
+        resp = await self.get(
+            "/api/NextApi/apiClient/marketWatchApi",
+            params={"functionName": "getIndicesData", "symbol": index},
+        )
+        payload = resp.json().get("data") or {}
+        rows = payload.get("data", []) if isinstance(payload, dict) else []
         tickers = []
-        for item in data.get("data", []):
-            symbol = item.get("symbol", "").strip().upper()
-            # Skip the index row itself (e.g. "NIFTY 500") and blank entries
-            if symbol and " " not in symbol:
+        for item in rows:
+            symbol = str(item.get("symbol", "")).strip().upper()
+            # The first row is the index itself (no series); skip it and blanks
+            if symbol and item.get("series") and " " not in symbol:
                 tickers.append(symbol)
+        if not tickers:
+            raise ValueError(f"No constituents returned for index {index!r}")
         self.log.info("index_constituents_fetched", index=index, count=len(tickers))
         return tickers
 
     async def get_shareholding(self, symbol: str) -> GovernanceData | None:
-        """Fetch promoter holding and pledging from NSE shareholding pattern API.
+        """Fetch promoter holding and pledging from NSE shareholding-pattern filings.
 
-        Uses the existing NSE session (no extra cookie round-trip needed).
-        Fetches up to 8 recent quarterly data points to build the pledging trend.
+        Holding and public % come from the SHP master list (8 quarters); the
+        pledge % comes from each quarter's SHP XBRL (latest ``_TREND_QUARTERS``).
 
         Args:
             symbol: NSE ticker symbol.
@@ -143,14 +231,12 @@ class NSEClient(BaseHTTPClient):
             await self._establish_session()
 
         symbol = symbol.upper().strip()
-        flags: list[str] = []
-
         try:
             resp = await self.get(
-                "/api/corporate-shareholding-pattern",
-                params={"symbol": symbol},
+                "/api/corporate-share-holdings-master",
+                params={"index": "equities", "symbol": symbol},
             )
-            data = resp.json()
+            rows = resp.json()
         except (httpx.HTTPStatusError, httpx.RequestError, ValueError) as exc:
             self.log.warning(
                 # No ER-04 here — that tag means ALL shareholding sources failed;
@@ -159,75 +245,59 @@ class NSEClient(BaseHTTPClient):
             )
             return None
 
-        return self._parse_shareholding(data, symbol, flags)
-
-    def _parse_shareholding(
-        self, data: dict, symbol: str, flags: list[str]
-    ) -> GovernanceData | None:
-        """Parse NSE shareholding pattern JSON into GovernanceData.
-
-        NSE returns an array of quarterly snapshots. Each snapshot has categories
-        (Promoter, Public, etc.) and a separate pledged-shares figure. We take the
-        most-recent quarter for headline numbers and build a trend from all quarters.
-        """
-        promoter_holding: float | None = None
-        promoter_pledging: float | None = None
-        pledging_trend: list[float] = []
-
-        # NSE returns different shapes depending on endpoint version.
-        # Shape A: {"shareholdingPatterns": {"totalShareholdingPublic": [...], "data": [...]}}
-        # Shape B: {"data": [{"category": "...", "sharePercentage": ...}]}
-        # Shape C: flat list at top level
-        rows: list[dict] = []
-        if isinstance(data, list):
-            rows = data
-        elif isinstance(data, dict):
-            for key in ("shareholdingPatterns", "data", "shareHoldingList", "results"):
-                candidate = data.get(key)
-                if isinstance(candidate, list):
-                    rows = candidate
-                    break
-                elif isinstance(candidate, dict):
-                    # some endpoints nest one more level
-                    for inner_key in ("data", "shareholdingList"):
-                        inner = candidate.get(inner_key)
-                        if isinstance(inner, list):
-                            rows = inner
-                            break
-                    if rows:
-                        break
-
-        if not rows:
+        quarters = self._latest_filing_per_quarter(rows)
+        if not quarters:
             self.log.warning("nse_shareholding_empty_response", symbol=symbol)
             return None
 
+        pledges = await asyncio.gather(
+            *(self._fetch_pledge(q.get("xbrl")) for q in quarters[:_TREND_QUARTERS]),
+            return_exceptions=True,
+        )
+        return self._build_governance(symbol, quarters, pledges)
+
+    @staticmethod
+    def _latest_filing_per_quarter(rows: object) -> list[dict]:
+        """Newest-first, one filing per quarter (a revision supersedes the original)."""
+        if not isinstance(rows, list):
+            return []
+        by_quarter: dict[datetime, dict] = {}
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            category = str(
-                row.get("category", row.get("Category", row.get("holdingType", "")))
-            ).lower()
-            raw_pct = (
-                row.get("sharePercentage")
-                or row.get("SharePer")
-                or row.get("holdingPerc")
-                or row.get("percentHolding")
-                or 0
-            )
             try:
-                pct = float(raw_pct)
-            except (ValueError, TypeError):
+                qdate = datetime.strptime(str(row.get("date", "")).title(), "%d-%b-%Y")
+            except ValueError:
                 continue
+            if _to_float(row.get("pr_and_prgrp")) is None:
+                continue
+            prev = by_quarter.get(qdate)
+            if prev is None or str(row.get("broadcastDate", "")) > str(prev.get("broadcastDate", "")):
+                by_quarter[qdate] = row
+        return [by_quarter[d] for d in sorted(by_quarter, reverse=True)]
 
-            if "promoter" in category and "pledge" not in category:
-                if promoter_holding is None:
-                    promoter_holding = pct
-            elif "pledge" in category or "encumber" in category:
-                pledging_trend.append(pct)
-                if promoter_pledging is None:
-                    promoter_pledging = pct
+    async def _fetch_pledge(self, url: object) -> float | None:
+        if not isinstance(url, str) or not url.startswith(_ARCHIVE_PREFIX):
+            return None
+        try:
+            resp = await self.get(url)
+            return parse_shp_pledge(resp.content)
+        except (httpx.HTTPStatusError, httpx.RequestError, etree.XMLSyntaxError) as exc:
+            self.log.debug("nse_shp_xbrl_failed", url=url, error=str(exc))
+            return None
 
-        # Determine trend direction from collected quarterly pledge figures
+    def _build_governance(
+        self, symbol: str, quarters: list[dict], pledges: list[float | None | BaseException]
+    ) -> GovernanceData:
+        flags: list[str] = []
+        promoter_holding = _to_float(quarters[0].get("pr_and_prgrp"))
+        public_holding = _to_float(quarters[0].get("public_val"))
+
+        pledge_values = [None if isinstance(p, BaseException) else p for p in pledges]
+        promoter_pledging = pledge_values[0] if pledge_values else None
+
+        # Trend lists are chronological: oldest first, latest last.
+        pledging_trend = [p for p in reversed(pledge_values) if p is not None]
         trend_direction: str | None = None
         if len(pledging_trend) >= 2:
             if pledging_trend[-1] > pledging_trend[0]:
@@ -237,10 +307,17 @@ class NSEClient(BaseHTTPClient):
             else:
                 trend_direction = "stable"
 
-        if promoter_holding is None:
-            flags.append("[DATA UNVERIFIED: promoter_holding — NSE parse]")
+        recent = quarters[:8]
+        holding_trend = [
+            h for h in (_to_float(q.get("pr_and_prgrp")) for q in reversed(recent)) if h is not None
+        ]
+        public_trend = [
+            p for p in (_to_float(q.get("public_val")) for q in reversed(recent)) if p is not None
+        ]
+
         if promoter_pledging is None:
-            flags.append("[PLEDGING UNKNOWN — NSE parse]")
+            # Unknown ≠ zero: leave None so Step 1 flags it instead of scoring a clean 0%.
+            flags.append("[PLEDGING UNKNOWN — NSE SHP XBRL]")
 
         self.log.info(
             "nse_shareholding_parsed",
@@ -251,32 +328,11 @@ class NSEClient(BaseHTTPClient):
         )
         return GovernanceData(
             promoter_holding_pct=promoter_holding,
-            promoter_pledging_pct=promoter_pledging or 0.0,
-            promoter_pledging_trend=pledging_trend[-8:],  # keep last 8 quarters
+            promoter_pledging_pct=promoter_pledging,
+            promoter_pledging_trend=pledging_trend,
             pledging_trend_direction=trend_direction,
+            promoter_holding_trend=holding_trend,
+            public_holding_pct=public_holding,
+            public_holding_trend=public_trend,
             data_flags=flags,
         )
-
-    async def get_200dma(self, symbol: str) -> float | None:
-        """Fetch 200-day moving average for a symbol.
-
-        NSE provides historical price data which we use to compute DMA.
-        Returns None if data is unavailable.
-        """
-        if not self._session_established:
-            await self._establish_session()
-
-        symbol = symbol.upper().strip()
-        try:
-            resp = await self.get(f"/api/quote-equity?symbol={symbol}&section=trade_info")
-            data = resp.json()
-            # Some NSE endpoints provide a summary with DMA
-            summary = data.get("metadata", {})
-            dma_str = summary.get("pdSymbolPe", None)
-            if dma_str:
-                match = re.search(r"[\d.]+", str(dma_str))
-                if match:
-                    return float(match.group())
-        except Exception as exc:
-            self.log.debug("nse_200dma_failed", symbol=symbol, error=str(exc))
-        return None

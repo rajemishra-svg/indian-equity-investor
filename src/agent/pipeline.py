@@ -325,6 +325,10 @@ class InvestmentPipeline:
                     state.add_flag("[stock_quote via Yahoo Finance — ~15 min delayed]")
                 else:
                     state.add_flag("[DATA UNVERIFIED: stock_quote]")
+        if quote_result is not None and quote_source != "yfinance":
+            # NSE/Breeze give the live price; 200-DMA, liquidity and volume trend
+            # (Step 0 EC-11, Step 6 signals) come from Yahoo Finance history.
+            quote_result = await clients["yfinance"].backfill_quote_history(quote_result)
         if quote_result is not None:
             state.quote = quote_result
             state.company_name = quote_result.company_name
