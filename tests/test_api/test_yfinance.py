@@ -72,8 +72,8 @@ def test_safe_float_string_number():
 async def test_get_stock_quote_returns_stock_quote():
     fast_info = _mock_fast_info(
         lastPrice=3500.0,
-        fiftyTwoWeekHigh=3800.0,
-        fiftyTwoWeekLow=2900.0,
+        yearHigh=3800.0,
+        yearLow=2900.0,
         marketCap=9_60_00_00_00_000,  # ~96,000 Cr
         twoHundredDayAverage=3200.0,
     )

@@ -6,10 +6,11 @@ import anthropic
 from src.agent.steps.base import BaseStep
 from src.config import settings
 from src.models import AnalysisState, TechnicalData, TechnicalSignal
+from src.sector.profiles import get_sector_profile
 
 
 class Step6Technical(BaseStep):
-    """Technical entry signal — 4 signals, fully deterministic."""
+    """Technical entry signal — 5 signals, fully deterministic."""
 
     step_number = 6
     step_name = "Technical Entry Confirmation"
@@ -18,7 +19,7 @@ class Step6Technical(BaseStep):
         super().__init__(anthropic_client, clients)
 
     async def run(self, state: AnalysisState) -> AnalysisState:
-        """Score 4 technical signals and compute tranche entry prices."""
+        """Score 5 technical signals and compute tranche entry prices."""
         self.log.info(
             "step_start",
             step=self.step_number,
@@ -54,8 +55,13 @@ class Step6Technical(BaseStep):
 
         signal_details: dict[str, bool] = {}
 
-        # Signal 1: Within 15% of 52W low
-        s1 = td.pct_from_52w_low <= 15.0
+        # Signal 1: Within 15% of 52W low. A zero low means the source gave no
+        # range — treat as unverified rather than "0% above the low" (always true).
+        if td.w52_low and td.w52_low > 0:
+            s1 = td.pct_from_52w_low <= 15.0
+        else:
+            s1 = False
+            data_flags.append("[DATA UNVERIFIED: w52_low]")
         signal_details["within_15pct_52w_low"] = s1
 
         # Signal 2: RSI < 40
@@ -87,11 +93,12 @@ class Step6Technical(BaseStep):
 
         # Signal 5: Price >= 20% below 52W high (meaningful pullback from peak)
         # Buying near the 52W high is a timing risk even if fundamentals are strong.
-        pct_from_high = (
-            round((td.w52_high - td.cmp) / td.w52_high * 100, 2)
-            if td.w52_high and td.w52_high > 0 else 0.0
-        )
-        s5 = pct_from_high >= 20.0
+        if td.w52_high and td.w52_high > 0:
+            pct_from_high = round((td.w52_high - td.cmp) / td.w52_high * 100, 2)
+            s5 = pct_from_high >= 20.0
+        else:
+            s5 = False
+            data_flags.append("[DATA UNVERIFIED: w52_high]")
         signal_details["price_ge_20pct_below_52w_high"] = s5
 
         signals_met = sum([s1, s2, s3, s4, s5])
@@ -104,11 +111,36 @@ class Step6Technical(BaseStep):
         else:
             entry_guidance = "RED"
 
-        # Tranche prices
+        # Tranche prices — sector profile discounts win over the global defaults
+        # (e.g. commodities_cyclical uses 12%/22% instead of 8%/15%).
+        profile = get_sector_profile(state.sector_name)
+        t2_disc = (
+            profile.tranche_t2_discount
+            if profile.tranche_t2_discount is not None
+            else settings.tranche_t2_discount
+        )
+        t3_disc = (
+            profile.tranche_t3_discount
+            if profile.tranche_t3_discount is not None
+            else settings.tranche_t3_discount
+        )
         cmp = td.cmp
-        t1 = round(cmp, 2)
-        t2 = round(cmp * (1 - settings.tranche_t2_discount), 2)
-        t3 = round(cmp * (1 - settings.tranche_t3_discount), 2)
+        t2 = round(cmp * (1 - t2_disc), 2)
+        t3 = round(cmp * (1 - t3_disc), 2)
+
+        # RED = no entry signal at all (typically extended above the 200-DMA,
+        # near the 52W high, with no oversold reading). Don't buy T1 at CMP:
+        # wait for a pullback to the 200-DMA, but never deeper than T2.
+        entry_deferred = entry_guidance == "RED"
+        if entry_deferred:
+            dma = td.dma_200
+            t1 = round(max(dma, t2), 2) if dma is not None and dma < cmp else t2
+            data_flags.append(
+                f"[ENTRY DEFERRED: technical signals RED (0/5) — T1 waits for "
+                f"₹{t1} instead of entering at CMP ₹{cmp:.2f}]"
+            )
+        else:
+            t1 = round(cmp, 2)
 
         result = TechnicalSignal(
             signals_met=signals_met,
@@ -117,6 +149,7 @@ class Step6Technical(BaseStep):
             tranche_1_price=t1,
             tranche_2_price=t2,
             tranche_3_price=t3,
+            entry_deferred=entry_deferred,
             data_flags=data_flags,
         )
         state.technical = result
@@ -132,6 +165,7 @@ class Step6Technical(BaseStep):
             tranche_1=t1,
             tranche_2=t2,
             tranche_3=t3,
+            entry_deferred=entry_deferred,
             signal_details=signal_details,
         )
         return state
@@ -149,6 +183,7 @@ class Step6Technical(BaseStep):
             w52_low=low,
             pct_from_52w_low=pct_from_low,
             dma_200=q.dma_200,
+            rsi_14=getattr(q, "rsi_14", None),
             # P3-4: volume trend carried from StockQuote (populated by YFinanceClient)
             volume_trend_down_days=getattr(q, "volume_trend_down_days", None),
         )
