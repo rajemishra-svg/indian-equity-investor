@@ -156,7 +156,9 @@ Both `_call_claude` and `_agentic_loop` wrap `claude.messages.create` in a tenac
 
 Three steps terminate the pipeline on failure:
 - **Step 0**: Pre-screen score < 5/9
-- **Step 1**: Governance score < 9/15 OR any immediate trigger (pledging > 10%, SEBI fraud, RPT > 20%, going concern, mid-year auditor resign)
+- **Step 1**: Governance score < 9/15 OR any immediate trigger (pledging > 10%, SEBI fraud, unexplained RPT > 20%, RPT funding > 10% of net worth, going concern, mid-year auditor resign)
+
+**RPT rule (Step 1)**: `rpt_pct_revenue` is *operating* RPT with non-group related parties (% of revenue, 8/15/20% bands). Funding given to related parties (loans/ICDs/investments/guarantees) is separate — `rpt_funding_pct_networth` > 10% is an immediate REJECT. Operating RPT > 20% REJECTs only when *unexplained* (`_rpt_red_flags()`): rise > 5pp vs the comparison year, material approval breaches (excess over audit-committee approvals > 0.5% of revenue), > 50% of revenue sold to related parties, any audit qualification, no comparison year, or no exchange breakdown (web-research RPT → original hard rule). Otherwise it is *structural*: rpt sub-score 0, gate capped at PASS_CONDITIONAL, `[RPT STRUCTURAL: …]` flag. Comparison year = latest earlier FY with both halves in one filing format (FY2025 is skipped: some filers reported the full year in the first integrated Q4 disclosure).
 - **Step 3**: Any hard financial trigger (CFO/NP < 50%, D/E > 3, ICR < 3) OR score < 5/7
 
 On termination: `state.terminated_at_step` and `state.termination_reason` are set, `state.recommendation_type = "REJECT"`. Step 9 always runs to generate the REJECTION_LOG output.

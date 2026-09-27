@@ -32,14 +32,22 @@ listed entity *or its subsidiaries*. Governance rule "RPT > 20% of revenue
   gratuity / superannuation trusts), expense reimbursements, period-end
   balances (receivable/payable rows), and money coming back to the group
   (loan repayments, redemptions, guarantee releases).
-* **Counted**: every other row with an outside related party — sale/purchase
-  of goods, services and fixed assets, rent/royalty/brand/consultancy fees,
-  AND loans, inter-corporate deposits, investments and guarantees extended
-  to promoter-group entities (a classic siphoning route; over-counting a
-  benign loan is preferred to missing a fund diversion).
+* **Counted** — every other row with an outside related party, split in two:
 
-The numerator is compared with consolidated revenue from operations for the
-same fiscal year (Q2 disclosure = Apr–Sep, Q4 disclosure = Oct–Mar).
+  - *Operating*: sale/purchase of goods, services and fixed assets,
+    rent/royalty/brand/consultancy fees. Reported as % of consolidated
+    revenue from operations (``rpt_pct_revenue``) — the figure Step 1's
+    8/15/20% bands score.
+  - *Funding*: loans, inter-corporate deposits, investments, guarantees and
+    security given to related parties — the classic siphoning route. Reported
+    as % of consolidated net worth (``rpt_funding_pct_networth``), since these
+    are balance-sheet flows, not revenue-comparable.
+
+Both are summed over the fiscal year's two half-yearly disclosures (Q2 =
+Apr–Sep, Q4 = Oct–Mar). Halves before the integrated format (Sep 2024 and
+earlier) come from NSE's standalone Reg 23(9) RPT filings, which use the same
+row taxonomy — that is also how the prior-year figure (for the
+spike check in Step 1) is built.
 """
 from __future__ import annotations
 
@@ -145,6 +153,8 @@ class RPTRow:
     txn_type: str
     details: str
     amount_inr: float
+    # Audit-committee approved value for the transaction (None/0 = not stated)
+    approved_inr: float | None = None
 
 
 @dataclass
@@ -162,6 +172,11 @@ class FilingFacts:
     nature: str | None = None  # "Standalone" / "Consolidated"
     # RevenueFromOperations keyed by (period start, period end)
     revenue_by_period: dict[tuple[date, date], float] = field(default_factory=dict)
+    # Same facts keyed by context id ("OneD" = quarter, "FourD" = year-to-date) —
+    # legacy annual-results XBRL mis-dates FourD with the quarter's dates.
+    revenue_by_context: dict[str, float] = field(default_factory=dict)
+    # Equity attributable to owners (else total equity) keyed by balance-sheet date
+    equity_by_instant: dict[date, float] = field(default_factory=dict)
     rpt_rows: list[RPTRow] = field(default_factory=list)
 
 
@@ -175,12 +190,13 @@ def parse_integrated_filing(xml: bytes | str) -> FilingFacts:
         xml = xml.encode("utf-8")
     root = etree.fromstring(xml, parser=_PARSER)
 
-    # context id → (start, end) for duration contexts
+    # context id → (start, end) for duration contexts; → date for instants
     durations: dict[str, tuple[date, date]] = {}
+    instants: dict[str, date] = {}
     for ctx in root.iter():
         if not isinstance(ctx.tag, str) or _local(ctx.tag) != "context":
             continue
-        start = end = None
+        start = end = instant = None
         for el in ctx.iter():
             if not isinstance(el.tag, str):
                 continue
@@ -189,11 +205,16 @@ def parse_integrated_filing(xml: bytes | str) -> FilingFacts:
                 start = date.fromisoformat(el.text.strip())
             elif name == "endDate" and el.text:
                 end = date.fromisoformat(el.text.strip())
+            elif name == "instant" and el.text:
+                instant = date.fromisoformat(el.text.strip())
         if start and end:
             durations[ctx.get("id", "")] = (start, end)
+        elif instant:
+            instants[ctx.get("id", "")] = instant
 
     facts = FilingFacts()
     rpt: dict[str, dict[str, str]] = {}
+    total_equity: dict[date, float] = {}
 
     for el in root:
         if not isinstance(el.tag, str):
@@ -220,9 +241,21 @@ def parse_integrated_filing(xml: bytes | str) -> FilingFacts:
         elif name == "RevenueFromOperations" and ctx in durations:
             val = _to_float(text)
             if val is not None:
-                facts.revenue_by_period[durations[ctx]] = val
+                facts.revenue_by_period.setdefault(durations[ctx], val)
+                facts.revenue_by_context[ctx] = val
+        elif name == "EquityAttributableToOwnersOfParent" and ctx in instants:
+            val = _to_float(text)
+            if val is not None:
+                facts.equity_by_instant[instants[ctx]] = val
+        elif name == "Equity" and ctx in instants:
+            val = _to_float(text)
+            if val is not None:
+                total_equity[instants[ctx]] = val
         elif ctx.startswith("D_RelatedPartyTransaction") and "_PY" not in ctx:
             rpt.setdefault(ctx, {})[name] = text
+
+    for when, val in total_equity.items():
+        facts.equity_by_instant.setdefault(when, val)
 
     for row in rpt.values():
         amount = _to_float(row.get("AmountOfRelatedPartyTransactionDuringTheReportingPeriod"))
@@ -238,6 +271,9 @@ def parse_integrated_filing(xml: bytes | str) -> FilingFacts:
                 txn_type=row.get("TypeOfRelatedPartyTransaction", ""),
                 details=row.get("DetailsOfOtherRelatedPartyTransaction", ""),
                 amount_inr=abs(amount),
+                approved_inr=_to_float(
+                    row.get("ValueOfTheRelatedPartyTransactionAsApprovedByTheAuditCommittee")
+                ),
             )
         )
     return facts
@@ -286,10 +322,62 @@ def group_entities(rows: list[RPTRow], company_name: str | None) -> set[str]:
     return group
 
 
-def counted_rpt_total(facts: FilingFacts) -> float:
-    """Sum of counted RPT amounts (INR) for one half-yearly disclosure."""
+_FUNDING = re.compile(
+    r"loan|inter[\s-]*corporate|\bicd\b|deposit|investment|guarantee|security|advance"
+    r"|debenture|subscription|share\s+capital|preference\s+share|equity\s+share",
+    re.I,
+)
+_SALE = re.compile(r"^\s*sale\s+of\s+goods", re.I)
+
+
+def is_funding_rpt(row: RPTRow) -> bool:
+    """Loans / ICDs / investments / guarantees / security given — balance-sheet flows."""
+    return bool(_FUNDING.search(f"{row.txn_type} {row.details}"))
+
+
+@dataclass
+class RPTBreakdown:
+    """Counted RPT for one or more half-yearly disclosures (INR)."""
+
+    operating_inr: float = 0.0
+    funding_inr: float = 0.0
+    sales_inr: float = 0.0  # subset of operating: sale of goods/services to related parties
+    over_approval: int = 0  # counted rows whose amount exceeds the audit-committee approval
+    over_approval_excess_inr: float = 0.0  # sum of (amount − approved) on those rows
+
+    def __add__(self, other: RPTBreakdown) -> RPTBreakdown:
+        return RPTBreakdown(
+            self.operating_inr + other.operating_inr,
+            self.funding_inr + other.funding_inr,
+            self.sales_inr + other.sales_inr,
+            self.over_approval + other.over_approval,
+            self.over_approval_excess_inr + other.over_approval_excess_inr,
+        )
+
+
+def rpt_breakdown(facts: FilingFacts) -> RPTBreakdown:
+    """Split one disclosure's counted rows into operating vs funding flows."""
     group = group_entities(facts.rpt_rows, facts.company_name)
-    return sum(r.amount_inr for r in facts.rpt_rows if is_counted_rpt(r, group))
+    out = RPTBreakdown()
+    for r in facts.rpt_rows:
+        if not is_counted_rpt(r, group):
+            continue
+        if is_funding_rpt(r):
+            out.funding_inr += r.amount_inr
+        else:
+            out.operating_inr += r.amount_inr
+            if _SALE.search(r.txn_type or ""):
+                out.sales_inr += r.amount_inr
+        if r.approved_inr and r.amount_inr > r.approved_inr * 1.01:
+            out.over_approval += 1
+            out.over_approval_excess_inr += r.amount_inr - r.approved_inr
+    return out
+
+
+def counted_rpt_total(facts: FilingFacts) -> float:
+    """Sum of all counted RPT amounts (operating + funding, INR) for one disclosure."""
+    b = rpt_breakdown(facts)
+    return b.operating_inr + b.funding_inr
 
 
 def revenue_for(facts: FilingFacts, period_end: date, months: int) -> float | None:
@@ -321,8 +409,14 @@ class FilingGovernance:
 
     auditor_name: str | None = None
     modified_opinion: bool | None = None
-    rpt_pct_revenue: float | None = None
+    rpt_pct_revenue: float | None = None  # operating RPT, % of revenue
     rpt_fiscal_year: str | None = None  # e.g. "FY2026"
+    rpt_funding_pct_networth: float | None = None
+    rpt_sales_pct_revenue: float | None = None
+    rpt_prior_year_pct_revenue: float | None = None
+    rpt_prior_fiscal_year: str | None = None
+    rpt_over_approval_count: int | None = None
+    rpt_over_approval_pct_revenue: float | None = None  # excess over approvals, % of revenue
     data_flags: list[str] = field(default_factory=list)
 
 
@@ -407,6 +501,73 @@ class NSEFilingsClient(BaseHTTPClient):
             self.log.warning("nse_filing_xbrl_failed", url=ref.xbrl_url, error=str(exc))
             return None
 
+    async def _annual_revenue(
+        self, symbol: str, fy_end: date, consolidated: bool
+    ) -> float | None:
+        """FY revenue from NSE's pre-integration annual results XBRL."""
+        try:
+            resp = await self.get(
+                "/api/corporates-financial-results",
+                params={"index": "equities", "symbol": symbol, "period": "Annual"},
+            )
+            rows = resp.json()
+        except (httpx.HTTPStatusError, httpx.RequestError, ValueError) as exc:
+            self.log.info("nse_annual_results_listing_failed", symbol=symbol, error=str(exc))
+            return None
+        wanted = "consolidated" if consolidated else "non-consolidated"
+        candidates = []
+        for row in rows if isinstance(rows, list) else []:
+            try:
+                to_date = datetime.strptime(str(row.get("toDate", "")), "%d-%b-%Y").date()
+            except ValueError:
+                continue
+            url = str(row.get("xbrl") or "")
+            if to_date != fy_end or not url.startswith("https://nsearchives.nseindia.com/"):
+                continue
+            nature = str(row.get("consolidated", "")).lower()
+            candidates.append((nature == wanted, url))
+        # Prefer the matching basis; fall back to the other only if it's all there is.
+        for _, url in sorted(candidates, reverse=True):
+            facts = await self._fetch_facts(_FilingRef(fy_end, consolidated, "", url))
+            if facts is None:
+                continue
+            revenue = revenue_for(facts, fy_end, 12)
+            if revenue is None:
+                # Legacy Q4 XBRL: "FourD" holds the full year but carries the
+                # quarter's dates; accept it only if it exceeds the quarter figure.
+                ytd = facts.revenue_by_context.get("FourD")
+                quarter = facts.revenue_by_context.get("OneD")
+                if ytd and (quarter is None or ytd > quarter * 1.5):
+                    revenue = ytd
+            if revenue:
+                return revenue
+        return None
+
+    async def _legacy_rpt_listing(self, symbol: str) -> dict[date, str]:
+        """Half-year end → XBRL URL for pre-integration Reg 23(9) RPT filings."""
+        try:
+            resp = await self.get(
+                "/api/related-party-transactions-master",
+                params={"index": "equities", "symbol": symbol},
+            )
+            rows = resp.json().get("data", [])
+        except (httpx.HTTPStatusError, httpx.RequestError, ValueError, AttributeError) as exc:
+            self.log.info("nse_legacy_rpt_listing_failed", symbol=symbol, error=str(exc))
+            return {}
+        out: dict[date, tuple[str, str]] = {}
+        for row in rows if isinstance(rows, list) else []:
+            url = str(row.get("xbrlLink") or "")
+            if not url.startswith("https://nsearchives.nseindia.com/"):
+                continue
+            try:
+                end = datetime.strptime(str(row.get("periodEndDate", "")).title(), "%d-%b-%Y").date()
+            except ValueError:
+                continue
+            submitted = str(row.get("submissionDate", ""))
+            if end not in out or submitted > out[end][1]:
+                out[end] = (url, submitted)
+        return {end: url for end, (url, _) in out.items()}
+
     async def get_filing_governance(self, symbol: str) -> FilingGovernance | None:
         """Auditor, audit-opinion type and RPT % of revenue from NSE integrated filings.
 
@@ -418,7 +579,8 @@ class NSEFilingsClient(BaseHTTPClient):
         try:
             resp = await self.get(
                 "/api/integrated-filing-results",
-                params={"index": "equities", "symbol": symbol},
+                # The listing is paginated (20 rows by default) — ask for all of it.
+                params={"index": "equities", "symbol": symbol, "size": 100},
             )
             refs = _parse_listing(resp.json())
         except (httpx.HTTPStatusError, httpx.RequestError, ValueError) as exc:
@@ -443,6 +605,16 @@ class NSEFilingsClient(BaseHTTPClient):
                 None,
             )
 
+        # Companies with subsidiaries file consolidated results; the RPT numerator is
+        # consolidated-basis, so standalone revenue is only a valid denominator for
+        # companies that never file consolidated.
+        files_consolidated = any(r.consolidated for r in refs)
+
+        async def revenue_facts(period_end: date) -> FilingFacts | None:
+            if files_consolidated:
+                return await facts_for(find(period_end, True))
+            return await facts_for(find(period_end, False))
+
         result = FilingGovernance()
 
         # --- Auditor: the most recent filing names the current statutory auditor.
@@ -450,65 +622,143 @@ class NSEFilingsClient(BaseHTTPClient):
         if latest and latest.auditors:
             result.auditor_name = normalise_auditor_names(latest.auditors)
 
-        # --- RPT: half-yearly disclosures ride on the Q2 (Sep) and Q4 (Mar) filings.
-        q4_ends = sorted({r.period_end for r in refs if (r.period_end.month, r.period_end.day) == (3, 31)}, reverse=True)
-        q2_ends = sorted({r.period_end for r in refs if (r.period_end.month, r.period_end.day) == (9, 30)}, reverse=True)
+        # --- Audit opinion on the latest audited (Q4) results
+        q4_ends = sorted(
+            {r.period_end for r in refs if (r.period_end.month, r.period_end.day) == (3, 31)},
+            reverse=True,
+        )
+        q2_ends = sorted(
+            {r.period_end for r in refs if (r.period_end.month, r.period_end.day) == (9, 30)},
+            reverse=True,
+        )
+        if q4_ends:
+            for f in (await facts_for(find(q4_ends[0], True)), await facts_for(find(q4_ends[0], False))):
+                if f is None:
+                    continue
+                if f.modified_opinion:
+                    result.modified_opinion = True
+                elif f.modified_opinion is False and result.modified_opinion is None:
+                    result.modified_opinion = False
+                if not result.auditor_name and f.auditors:
+                    result.auditor_name = normalise_auditor_names(f.auditors)
 
-        async def rpt_half(period_end: date) -> tuple[FilingFacts | None, FilingFacts | None]:
-            """(facts carrying the RPT section, consolidated facts for revenue)."""
-            standalone = await facts_for(find(period_end, False))
-            consolidated = await facts_for(find(period_end, True))
-            for f in (standalone, consolidated):
+        # --- RPT: half-yearly disclosures (Q2 = Apr–Sep, Q4 = Oct–Mar)
+        legacy: dict[date, str] | None = None
+
+        async def legacy_rpt_urls() -> dict[date, str]:
+            nonlocal legacy
+            if legacy is None:
+                legacy = await self._legacy_rpt_listing(symbol)
+            return legacy
+
+        async def rpt_half(period_end: date) -> tuple[FilingFacts, str] | None:
+            """(disclosure carrying RPT rows for the half ending ``period_end``, format)."""
+            for consolidated in (False, True):
+                f = await facts_for(find(period_end, consolidated))
                 if f and (f.rpt_rows or f.rpt_declared is False):
-                    return f, consolidated or standalone
-            return None, consolidated or standalone
+                    return f, "integrated"
+            url = (await legacy_rpt_urls()).get(period_end)
+            if url:
+                f = await facts_for(_FilingRef(period_end, False, "", url))
+                if f is not None:
+                    return f, "legacy"
+            return None
+
+        async def fy_revenue_for(fy_end: date) -> float | None:
+            rev_facts = await revenue_facts(fy_end)
+            if rev_facts is not None:
+                return revenue_for(rev_facts, fy_end, 12)
+            # Before the integrated format: NSE's annual results XBRL.
+            return await self._annual_revenue(symbol, fy_end, files_consolidated)
+
+        async def fy_figures(
+            fy_end: date, *, require_both: bool = False
+        ) -> tuple[RPTBreakdown, float, bool] | None:
+            """(breakdown, revenue it compares to, estimated?) for one fiscal year.
+
+            A year whose halves come from different formats (the FY2025 switch
+            to integrated filing) is rejected with ``require_both``: some filers
+            reported the full year in that first integrated Q4 disclosure, so
+            adding the legacy H1 would double-count it.
+            """
+            fy_revenue = await fy_revenue_for(fy_end)
+            if not fy_revenue:
+                return None
+            h2 = await rpt_half(fy_end)
+            h1 = await rpt_half(date(fy_end.year - 1, 9, 30))
+            if h2 is not None and h1 is not None:
+                if h1[1] != h2[1]:
+                    return None
+                return rpt_breakdown(h1[0]) + rpt_breakdown(h2[0]), fy_revenue, False
+            if require_both:
+                return None
+            if h2 is not None or h1 is not None:
+                # One half on file: compare with half the year's revenue.
+                return rpt_breakdown((h2 or h1)[0]), fy_revenue / 2, True
+            return None
 
         if q4_ends:
             fy_end = q4_ends[0]
-            h2_rpt, fy_rev_facts = await rpt_half(fy_end)
-            if fy_rev_facts and fy_rev_facts.modified_opinion is not None:
-                result.modified_opinion = fy_rev_facts.modified_opinion
-            standalone_q4 = await facts_for(find(fy_end, False))  # cached by rpt_half
-            if standalone_q4 and standalone_q4.modified_opinion:
-                result.modified_opinion = True
-            if not result.auditor_name:
-                for f in (fy_rev_facts, standalone_q4):
-                    if f and f.auditors:
-                        result.auditor_name = normalise_auditor_names(f.auditors)
-                        break
-
-            fy_revenue = revenue_for(fy_rev_facts, fy_end, 12) if fy_rev_facts else None
-            if h2_rpt is not None and fy_revenue:
-                h1_end = date(fy_end.year - 1, 9, 30)
-                h1_rpt = (await rpt_half(h1_end))[0] if h1_end in q2_ends else None
-                label = f"FY{fy_end.year}"
-                if h1_rpt is not None:
-                    numerator = counted_rpt_total(h1_rpt) + counted_rpt_total(h2_rpt)
-                    result.rpt_pct_revenue = round(numerator / fy_revenue * 100, 2)
-                else:
-                    # Only the Oct–Mar disclosure is on file: compare with half the year.
-                    numerator = counted_rpt_total(h2_rpt)
-                    result.rpt_pct_revenue = round(numerator / (fy_revenue / 2) * 100, 2)
-                    label += " H2"
-                    result.data_flags.append(
-                        f"[ESTIMATE: rpt_pct_revenue — only the {label} RPT disclosure was "
-                        "available; compared against half of fiscal-year revenue]"
-                    )
+            current = await fy_figures(fy_end)
+            if current is not None:
+                breakdown, revenue, estimated = current
+                label = f"FY{fy_end.year}" + (" (one half)" if estimated else "")
                 result.rpt_fiscal_year = label
+                result.rpt_pct_revenue = round(breakdown.operating_inr / revenue * 100, 2)
+                result.rpt_sales_pct_revenue = round(breakdown.sales_inr / revenue * 100, 2)
+                result.rpt_over_approval_count = breakdown.over_approval
+                result.rpt_over_approval_pct_revenue = round(
+                    breakdown.over_approval_excess_inr / revenue * 100, 3
+                )
+                if estimated:
+                    result.data_flags.append(
+                        f"[ESTIMATE: rpt_pct_revenue — only one half-yearly RPT disclosure for "
+                        f"FY{fy_end.year} was available; compared against half of FY revenue]"
+                    )
+                bs = await revenue_facts(fy_end)
+                net_worth = bs.equity_by_instant.get(fy_end) if bs else None
+                if net_worth and net_worth > 0:
+                    funding = breakdown.funding_inr * (2 if estimated else 1)
+                    result.rpt_funding_pct_networth = round(funding / net_worth * 100, 2)
+            # Comparison year: the most recent earlier FY with both halves in one format.
+            for years_back in (1, 2):
+                prior_end = date(fy_end.year - years_back, 3, 31)
+                prior = await fy_figures(prior_end, require_both=True)
+                if prior is not None:
+                    p_breakdown, p_revenue, _ = prior
+                    result.rpt_prior_year_pct_revenue = round(
+                        p_breakdown.operating_inr / p_revenue * 100, 2
+                    )
+                    result.rpt_prior_fiscal_year = f"FY{prior_end.year}"
+                    break
         elif q2_ends:
             h1_end = q2_ends[0]
-            h1_rpt, rev_facts = await rpt_half(h1_end)
+            h1 = await rpt_half(h1_end)
+            rev_facts = await revenue_facts(h1_end)
             h1_revenue = revenue_for(rev_facts, h1_end, 6) if rev_facts else None
-            if h1_rpt is not None and h1_revenue:
-                result.rpt_pct_revenue = round(counted_rpt_total(h1_rpt) / h1_revenue * 100, 2)
+            if h1 is not None and h1_revenue:
+                b = rpt_breakdown(h1)
+                result.rpt_pct_revenue = round(b.operating_inr / h1_revenue * 100, 2)
+                result.rpt_sales_pct_revenue = round(b.sales_inr / h1_revenue * 100, 2)
+                result.rpt_over_approval_count = b.over_approval
+                result.rpt_over_approval_pct_revenue = round(
+                    b.over_approval_excess_inr / h1_revenue * 100, 3
+                )
                 result.rpt_fiscal_year = f"FY{h1_end.year + 1} H1"
 
         if result.rpt_pct_revenue is not None:
+            parts = [f"operating RPT {result.rpt_pct_revenue:.1f}% of revenue ({result.rpt_fiscal_year})"]
+            if result.rpt_sales_pct_revenue is not None:
+                parts.append(f"sales to related parties {result.rpt_sales_pct_revenue:.1f}% of revenue")
+            if result.rpt_funding_pct_networth is not None:
+                parts.append(f"funding to related parties {result.rpt_funding_pct_networth:.1f}% of net worth")
+            if result.rpt_prior_year_pct_revenue is not None:
+                parts.append(
+                    f"{result.rpt_prior_fiscal_year} operating RPT {result.rpt_prior_year_pct_revenue:.1f}%"
+                )
             result.data_flags.append(
-                f"[RPT {result.rpt_pct_revenue:.1f}% of revenue ({result.rpt_fiscal_year}) — "
-                "NSE integrated-filing RPT disclosure; counts non-group related-party "
-                "trade, asset and funding flows, excludes intra-group/interest/dividend/"
-                "remuneration]"
+                "[RPT: " + "; ".join(parts) + " — NSE RPT disclosures; excludes intra-group/"
+                "interest/dividend/remuneration]"
             )
 
         self.log.info(
