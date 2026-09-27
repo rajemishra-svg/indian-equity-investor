@@ -72,7 +72,7 @@ class Step9Output(BaseStep):
         # Build tranches
         self._build_tranches(state)
 
-        # Build exit strategy (ask Claude)
+        # Build exit strategy (deterministic)
         await self._build_exit_strategy(state)
 
         # Build investment thesis only for actionable outcomes.
@@ -393,11 +393,7 @@ class Step9Output(BaseStep):
             )
 
         # Stop-loss: cap-size adjusted from config — large caps mean-revert faster
-        sl_multiplier = {
-            "large_cap": settings.stop_loss_large_cap,
-            "mid_cap": settings.stop_loss_mid_cap,
-            "small_cap": settings.stop_loss_small_cap,
-        }.get(state.cap_size, settings.stop_loss_mid_cap)
+        sl_multiplier = settings.stop_loss_multiplier(state.cap_size)
         stop_loss = round(cmp * sl_multiplier, 2) if cmp else None
 
         # LTCG eligibility = 1 year from today (leap-safe: Feb 29 → Feb 28)
@@ -414,7 +410,10 @@ class Step9Output(BaseStep):
         state.exit_strategy = ExitStrategy(
             fundamental_trigger=fundamental_trigger,
             valuation_exit_price=exit_t2,   # mid-target as primary summary price
+            exit_trim_price=exit_t1,
+            exit_full_price=exit_t3,
             stop_loss_price=stop_loss,
+            stop_loss_multiplier=sl_multiplier,
             ltcg_eligible_after=ltcg_date.isoformat(),
         )
 
