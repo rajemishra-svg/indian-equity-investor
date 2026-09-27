@@ -511,12 +511,15 @@ async def _fetch_prescreen_data(state: AnalysisState, clients: dict) -> None:
         if cached_q is not None:
             return cached_q
         nse = clients.get("nse")
+        yf_client = clients.get("yfinance")
         result = await nse.get_stock_quote(ticker) if nse is not None else None
         if result is None:
-            # NSE commonly returns 403 in non-browser environments; fall back to Yahoo Finance
-            yf_client = clients.get("yfinance")
+            # NSE unavailable — fall back to Yahoo Finance
             if yf_client is not None:
                 result = await yf_client.get_stock_quote(ticker)
+        elif yf_client is not None:
+            # NSE quote has the live price only; EC-11 liquidity needs history
+            result = await yf_client.backfill_quote_history(result)
         if result is not None:
             data_cache.set(data_cache.quote_key(ticker), result, settings.cache_ttl_quote)
         return result

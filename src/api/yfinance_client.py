@@ -225,6 +225,26 @@ class YFinanceClient:
             log.warning("yfinance_quote_failed", ticker=ticker, error=str(exc))
             return None
 
+    async def backfill_quote_history(self, quote: StockQuote) -> StockQuote:
+        """Fill history-derived fields a live-price quote (NSE) doesn't carry.
+
+        Keeps the caller's live price; only ``dma_200``, ``avg_daily_value_cr``
+        and ``volume_trend_down_days`` are copied, and only where missing.
+        Returns the original quote unchanged if Yahoo Finance fails.
+        """
+        fields = ("dma_200", "avg_daily_value_cr", "volume_trend_down_days")
+        if all(getattr(quote, f) is not None for f in fields):
+            return quote
+        history = await self.get_stock_quote(quote.ticker)
+        if history is None:
+            return quote
+        updates = {
+            f: getattr(history, f)
+            for f in fields
+            if getattr(quote, f) is None and getattr(history, f) is not None
+        }
+        return quote.model_copy(update=updates) if updates else quote
+
     async def get_nifty50(self) -> tuple[float, float]:
         """Fetch Nifty 50 current level and 52-week high via Yahoo Finance.
 

@@ -145,6 +145,7 @@ def mock_pipeline_env():
     mock_yfinance.__aexit__ = AsyncMock(return_value=None)
     mock_yfinance.get_stock_quote = AsyncMock(return_value=None)
     mock_yfinance.get_valuation_data = AsyncMock(return_value=None)
+    mock_yfinance.backfill_quote_history = AsyncMock(side_effect=lambda q: q)
 
     mock_breeze = AsyncMock()
     mock_breeze.__aenter__ = AsyncMock(return_value=mock_breeze)
