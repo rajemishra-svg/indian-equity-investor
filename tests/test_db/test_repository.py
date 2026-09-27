@@ -606,3 +606,18 @@ async def test_exit_plan_columns_null_without_exit_strategy(db_path):
     row = await get_latest_analysis(db_path, "RELIANCE")
     assert row["exit_full_price"] is None
     assert row["stop_loss_multiplier"] is None
+
+
+@pytest.mark.asyncio
+async def test_entry_plan_returns_persisted_review_level_and_exit(db_path):
+    from src.db.repository import get_entry_plan
+    from src.models import ExitStrategy
+
+    state = _make_minimal_state()
+    state.exit_strategy = ExitStrategy(
+        fundamental_trigger="ROCE < 12%", valuation_exit_price=4500.0, stop_loss_price=2337.0
+    )
+    await save_analysis(db_path, state)
+
+    plan = await get_entry_plan(db_path, "RELIANCE")
+    assert (plan["stop_loss"], plan["exit_target"]) == (2337.0, 4500.0)

@@ -18,6 +18,20 @@ from src.models import (
 from src.sector.profiles import get_sector_profile
 
 
+def _review_level_line(ex: ExitStrategy) -> str:
+    """Exit-strategy line for the cap-size fall level (``stop_loss_price``).
+
+    Long-term tool: a fall to this level means re-run the analysis, not
+    sell — the same meaning ``investor holdings-alerts`` gives it.
+    """
+    if not ex.stop_loss_price:
+        return "  Review Level        : [NOT AVAILABLE]"
+    return (
+        f"  Review Level        : ₹{ex.stop_loss_price}  "
+        "(re-analyse the thesis if price falls below — not a sell signal)"
+    )
+
+
 class Step9Output(BaseStep):
     """Format the final structured investment report."""
 
@@ -392,7 +406,8 @@ class Step9Output(BaseStep):
                 f"T3-full ₹{exit_t3} ({profile.exit_mult_3x:.2f}× DCF)]"
             )
 
-        # Stop-loss: cap-size adjusted from config — large caps mean-revert faster
+        # Review level (stored as stop_loss_price): cap-size adjusted from config.
+        # A fall below it prompts a thesis re-analysis — it is not a sell signal.
         sl_multiplier = settings.stop_loss_multiplier(state.cap_size)
         stop_loss = round(cmp * sl_multiplier, 2) if cmp else None
 
@@ -610,8 +625,7 @@ class Step9Output(BaseStep):
                     f"  Fundamental Trigger : {ex.fundamental_trigger}",
                     f"  Valuation Exit      : ₹{ex.valuation_exit_price} [ESTIMATE]"
                     if ex.valuation_exit_price else "  Valuation Exit      : [NOT AVAILABLE]",
-                    f"  Stop-Loss           : ₹{ex.stop_loss_price}"
-                    if ex.stop_loss_price else "  Stop-Loss           : [NOT AVAILABLE]",
+                    _review_level_line(ex),
                     f"  LTCG Eligible After : {ex.ltcg_eligible_after}",
                 ]
 
@@ -854,7 +868,7 @@ class Step9Output(BaseStep):
                 "EXIT STRATEGY",
                 f"  Fundamental Trigger : {ex.fundamental_trigger}",
                 "  Valuation Exit      : Growth plateau (rev CAGR < 15% for 2 years) OR re-rating complete",
-                f"  Stop-Loss           : ₹{ex.stop_loss_price}" if ex.stop_loss_price else "  Stop-Loss           : [NOT AVAILABLE]",
+                _review_level_line(ex),
                 f"  LTCG Eligible After : {ex.ltcg_eligible_after}",
             ]
 

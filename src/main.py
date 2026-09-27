@@ -1409,9 +1409,12 @@ def db_entry_plan(ticker: str) -> None:
     # Risk Management
     table.add_row("[bold]Risk Management[/bold]", "")
     sl = result.get("stop_loss")
-    table.add_row("Stop-Loss", f"₹{sl:.2f}" if sl else "[dim]Extract from report[/dim]")
+    table.add_row(
+        "Review Level (re-analyse)",
+        f"₹{sl:.2f}" if sl else "[dim]Re-run analysis to populate[/dim]",
+    )
     et = result.get("exit_target")
-    table.add_row("Exit Target", f"₹{et:.2f}" if et else "[dim]Extract from report[/dim]")
+    table.add_row("Exit Target", f"₹{et:.2f}" if et else "[dim]Re-run analysis to populate[/dim]")
 
     console.print(table)
     console.print(
