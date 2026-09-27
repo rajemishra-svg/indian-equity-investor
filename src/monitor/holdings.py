@@ -31,6 +31,19 @@ BROKEN_THESIS = {"REJECT", "PEER_SWITCH", "GROWTH_REJECT"}
 
 LTCG_WAIT_WINDOW_DAYS = 60  # mention LTCG timing when eligibility is this close
 
+# Growth-mode DCFs saved before the forward-revenue DCF unit fix (PR #8, merged
+# at this UTC time) overstate per-share value 17-248x and must not drive exits
+# or entries. Compared against analyses.created_at (SQLite datetime('now'), UTC).
+GROWTH_DCF_FIXED_AT_UTC = "2026-09-26 00:58:45"
+
+
+def growth_dcf_trusted(analysis: dict) -> bool:
+    """False only for growth-mode rows saved before the growth DCF fix."""
+    if analysis.get("analysis_mode") != "growth":
+        return True
+    created = analysis.get("created_at")
+    return bool(created) and str(created) >= GROWTH_DCF_FIXED_AT_UTC
+
 _SEVERITY_RANK = {"HIGH": 3, "MEDIUM": 2, "LOW": 1, "OK": 0}
 
 
@@ -78,10 +91,10 @@ def exit_levels(position: HoldingPosition, analysis: dict | None) -> ExitLevels:
     )
     if not analysis:
         return levels
-    if analysis.get("analysis_mode") == "growth":
-        # The growth-mode forward-revenue DCF overstates per-share value by an
-        # order of magnitude; exits on it would never fire. Stop-loss only.
-        levels.note = "Growth-mode DCF unreliable — exit ladder skipped"
+    if not growth_dcf_trusted(analysis):
+        levels.note = (
+            "Growth-mode DCF predates the valuation fix — re-analyse for an exit ladder"
+        )
         return levels
 
     levels.dcf = analysis.get("dcf_intrinsic_weighted")

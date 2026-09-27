@@ -193,13 +193,34 @@ def test_sort_alerts_most_urgent_first():
     ]
 
 
-def test_growth_mode_analysis_skips_exit_ladder():
-    a = evaluate_holding(_pos(), _analysis(analysis_mode="growth", dcf_intrinsic_weighted=50_000.0),
-                         1100.0, TODAY)
+def test_pre_fix_growth_analysis_skips_exit_ladder():
+    a = evaluate_holding(
+        _pos(),
+        _analysis(analysis_mode="growth", dcf_intrinsic_weighted=50_000.0,
+                  created_at="2026-07-27 10:00:00"),
+        1100.0, TODAY,
+    )
     assert a.levels.trim is a.levels.full is None
     assert a.levels.review_price == 820.0
     assert a.severity == "OK"
-    assert any("Growth-mode DCF" in r for r in a.reasons)
+    assert any("predates the valuation fix" in r for r in a.reasons)
+
+
+def test_post_fix_growth_analysis_gets_exit_ladder():
+    a = evaluate_holding(
+        _pos(),
+        _analysis(analysis_mode="growth", created_at="2026-09-26 01:44:20"),
+        2500.0, TODAY,
+    )
+    assert a.levels.full == 2400.0
+    assert a.action == "FULL EXIT"
+
+
+def test_growth_row_without_created_at_is_untrusted():
+    from src.monitor.holdings import growth_dcf_trusted
+
+    assert growth_dcf_trusted({"analysis_mode": "growth"}) is False
+    assert growth_dcf_trusted({"analysis_mode": "value"}) is True
 
 
 def test_exit_reason_shows_dcf_multiple():
