@@ -81,6 +81,8 @@ CLI (src/main.py)
   │         │    ├─ ScreenerClient.get_financials()    src/api/screener.py
   │         │    ├─ BSEClient.get_shareholding()       src/api/bse.py
   │         │    │    └─ ScreenerClient.get_shareholding() (fallback)
+  │         │    ├─ NSEFilingsClient.get_filing_governance()  src/api/nse_filings.py
+  │         │    │    └─ auditor name + modified-opinion + RPT % of revenue (NSE integrated-filing XBRL)
   │         │    └─ TrendlyneClient.get_valuation_data() src/api/trendlyne.py
   │         │         └─ YFinanceClient (fallback if Trendlyne blocked)
   │         │    └─ classify_sector_with_confidence() → state.sector_name, sector_confidence  src/sector/classifier.py
@@ -155,7 +157,9 @@ Both `_call_claude` and `_agentic_loop` wrap `claude.messages.create` in a tenac
 
 Three steps terminate the pipeline on failure:
 - **Step 0**: Pre-screen score < 5/9
-- **Step 1**: Governance score < 9/15 OR any immediate trigger (pledging > 10%, SEBI fraud, RPT > 20%, going concern, mid-year auditor resign)
+- **Step 1**: Governance score < 9/15 OR any immediate trigger (pledging > 10%, SEBI fraud, unexplained RPT > 20%, RPT funding > 10% of net worth, going concern, mid-year auditor resign)
+
+**RPT rule (Step 1)**: `rpt_pct_revenue` is *operating* RPT with non-group related parties (% of revenue, 8/15/20% bands). Funding given to related parties (loans/ICDs/investments/guarantees) is separate — `rpt_funding_pct_networth` > 10% is an immediate REJECT. Operating RPT > 20% REJECTs only when *unexplained* (`_rpt_red_flags()`): rise > 5pp vs the comparison year, material approval breaches (excess over audit-committee approvals > 0.5% of revenue), > 50% of revenue sold to related parties, any audit qualification, no comparison year, or no exchange breakdown (web-research RPT → original hard rule). Otherwise it is *structural*: rpt sub-score 0, gate capped at PASS_CONDITIONAL, `[RPT STRUCTURAL: …]` flag. Comparison year = latest earlier FY with both halves in one filing format (FY2025 is skipped: some filers reported the full year in the first integrated Q4 disclosure).
 - **Step 3**: Any hard financial trigger (CFO/NP < 50%, D/E > 3, ICR < 3) OR score < 5/7
 
 On termination: `state.terminated_at_step` and `state.termination_reason` are set, `state.recommendation_type = "REJECT"`. Step 9 always runs to generate the REJECTION_LOG output.
@@ -286,6 +290,8 @@ All clients except `YFinanceClient` extend `BaseHTTPClient` which provides `http
 **Security**: Web content fetched via `tools.py` is always sanitized before being sent to Claude: BeautifulSoup strips all HTML tags (including `<script>`, `<style>`, `<noscript>`), and a regex pass removes prompt-injection patterns ("ignore all previous instructions", "act as", "system prompt:", etc.). Raw HTML is never forwarded to the LLM. All web_fetch/web_search output is additionally wrapped in `<untrusted_web_content>` delimiters (escaped copies of the tag inside page text are redacted so a page cannot close the region early), and the Step 2 system prompt instructs Claude that content inside those tags is data, never instructions.
 
 **SSRF guard** (`tools.py`): before every `web_fetch` request the URL scheme must be http/https and the host is DNS-resolved and rejected if any resolved address is non-global (loopback, RFC1918, link-local/metadata, CGN, `0.0.0.0`, IPv6 loopback, decimal-encoded IPs, unresolvable hosts). Redirects are followed manually (max 5 hops) with the same validation per hop, so a public page cannot bounce the agent onto an internal endpoint. Known limitation: resolve-then-fetch is not atomic (DNS rebinding with a fast TTL could race the check).
+
+**NSEFilingsClient** (`src/api/nse_filings.py`): sources Step 1's auditor and RPT inputs from NSE "Integrated Filing — Financials" XBRL (`/api/integrated-filing-results` → `nsearchives.nseindia.com` XBRL; only archive URLs are fetched; XML parsed with entity resolution and network access disabled). Auditor = `AuditorsFirmName` of the latest filing (joint auditors `; `-joined); a "statement on impact of audit qualification" in the FY results adds an audit qualification. RPT % = (H1 Q2 disclosure + H2 Q4 disclosure) of the latest FY ÷ consolidated FY revenue. Counted: outside-group related parties' trade, asset, fee and funding flows (loans/ICDs/investments/guarantees). Excluded: intra-group (own subsidiaries by label, entering entities, the listed company), interest, dividends, remuneration, reimbursements, benefit-plan contributions, period-end balances, repayments/redemptions/releases, and CPSE counterparties related only via government control. H2-only → `[ESTIMATE]` vs half FY revenue. Banks (different taxonomy) and pre-Dec-2024 filers get None, so Step 1's web enrichment and `[DATA UNVERIFIED]` flags still apply. Separate from `NSEClient` because NSE serves brotli (only gzip/deflate advertised here) and the homepage cookie visit often 403s while the API still answers. Fetched concurrently in `_prefetch_data` and merged fill-only by `_merge_filing_governance()` before the Trendlyne auditor fallback.
 
 **YFinanceClient** (`src/api/yfinance_client.py`): wraps the synchronous `yfinance` library in `run_in_executor()` calls. Provides `get_stock_quote()` (with `avg_daily_value_cr` and `volume_trend_down_days`), `get_valuation_data()` (with `pe_10y_percentile` via `_compute_pe_percentile()`), and `get_nifty50()`. NSE tickers map to Yahoo Finance by appending `.NS`. Data is ~15–20 min delayed — marked `is_stale=True`. Has a no-op async context manager.
 
