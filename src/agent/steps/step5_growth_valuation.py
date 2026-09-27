@@ -152,6 +152,9 @@ class Step5GrowthValuation(BaseStep):
 
         result = ValuationResult(gate=GateResult.NOT_RUN)
         result.max_methods = 5
+        # Persist the MoS this step actually tests the forward DCF against
+        # (the model default of 35% is a value-mode figure).
+        result.required_mos_pct = dcf_mos_buy_threshold
 
         # ==================================================================
         # Method G5-1 — PEG ratio
