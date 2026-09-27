@@ -1,6 +1,8 @@
 """Step 1 — Governance & Management Gate (deterministic + Claude for narrative)."""
 from __future__ import annotations
 
+import re
+
 import anthropic
 
 from src.agent.steps.base import BaseStep
@@ -44,6 +46,33 @@ IMMEDIATE_TRIGGER_CHECKS = [
         lambda g: any("going concern" in q.lower() for q in g.audit_qualifications),
     ),
 ]
+
+
+# Big 4 global + their Indian affiliates + top-tier reputed Indian firms.
+# Matched on a punctuation/space-free form so exchange-filed spellings
+# ("B S R & Co. LLP", "S.R. Batliboi & Associates LLP", "M/s. Walker Chandiok")
+# match regardless of formatting.
+_REPUTED_AUDITOR_KEYS = (
+    # Big 4 global & Indian affiliates
+    "pricewaterhouse", "deloitte", "kpmg", "ernstyoung",
+    "bsrco", "bsrassociates", "srbatliboi", "srbc",
+    # Grant Thornton India (Walker Chandiok)
+    "walkerchandiok", "grantthornton",
+    # BDO India
+    "bdo", "mska",
+    # Other well-regarded Indian firms
+    "haribhakti", "sharptannan", "nanubhai",
+    "sskothari", "kotharico", "chaturvedi", "lodha",
+)
+
+
+def _is_reputed_auditor(name: str) -> bool:
+    """True when any auditor in ``name`` (joint auditors are '; '-joined) is reputed."""
+    squashed = re.sub(r"[^a-z0-9]", "", name.lower())
+    if any(key in squashed for key in _REPUTED_AUDITOR_KEYS):
+        return True
+    # EY's Indian name is spelt out elsewhere; bare "EY" only as a whole word.
+    return bool(re.search(r"\bey\b", name, re.I))
 
 
 class Step1Governance(BaseStep):
@@ -268,6 +297,8 @@ class Step1Governance(BaseStep):
             return
 
         needs_auditor = g.auditor_name is None
+        # Auditor churn and qualification text aren't in the structured filings —
+        # always research them when the loop runs, even if the name was prefetched.
         needs_rpt = g.rpt_pct_revenue is None
         # sebi_record_clean now defaults to False — enrichment is needed when
         # sebi_orders is empty AND the flag has not been affirmatively confirmed clean
@@ -283,7 +314,8 @@ class Step1Governance(BaseStep):
         company = state.company_name or ticker
         missing = []
         if needs_auditor:
-            missing.append("auditor_name, auditor_changed_3y, audit_qualifications")
+            missing.append("auditor_name")
+        missing.append("auditor_changed_3y, audit_qualifications")
         if needs_rpt:
             missing.append("rpt_pct_revenue (related party transactions as % of revenue)")
         if needs_sebi:
@@ -351,14 +383,18 @@ class Step1Governance(BaseStep):
             return
 
         # Merge enriched fields into existing GovernanceData (only fill missing)
-        if needs_auditor:
-            if enriched.get("auditor_name"):
-                g.auditor_name = str(enriched["auditor_name"])
-            if enriched.get("auditor_changed_3y") is not None:
-                g.auditor_changed_3y = bool(enriched["auditor_changed_3y"])
-            quals = enriched.get("audit_qualifications")
-            if isinstance(quals, list) and quals:
-                g.audit_qualifications = [str(q) for q in quals]
+        if needs_auditor and enriched.get("auditor_name"):
+            g.auditor_name = str(enriched["auditor_name"])
+        if enriched.get("auditor_changed_3y") is not None:
+            # Never clear a change already recorded from another source
+            g.auditor_changed_3y = g.auditor_changed_3y or bool(enriched["auditor_changed_3y"])
+        quals = enriched.get("audit_qualifications")
+        if isinstance(quals, list):
+            # Extend, don't replace — prefetch may already have recorded a
+            # modified opinion from the exchange filing.
+            for q in quals:
+                if str(q) not in g.audit_qualifications:
+                    g.audit_qualifications.append(str(q))
 
         if needs_rpt and enriched.get("rpt_pct_revenue") is not None:
             try:
@@ -456,23 +492,10 @@ class Step1Governance(BaseStep):
             flags.append("[DATA UNVERIFIED: auditor]")
             return 0
 
-        # Big 4 global + their Indian affiliates + top-tier reputed Indian firms
-        reputed_auditors = {
-            # Big 4 global & Indian affiliates
-            "price waterhouse", "deloitte", "kpmg", "ernst & young", "ey",
-            "bsr", "srbc", "s r b c", "s.r.b.c",
-            # Grant Thornton India (Walker Chandiok)
-            "walker chandiok", "grant thornton",
-            # BDO India
-            "bdo", "mska",
-            # Other well-regarded Indian firms
-            "haribhakti", "sharp & tannan", "nanubhai",
-            "s.s. kothari", "kothari & co", "chaturvedi", "lodha",
-        }
-        auditor_name = (g.auditor_name or "").lower()
+        auditor_name = g.auditor_name or ""
         score = 0
 
-        if any(b in auditor_name for b in reputed_auditors):
+        if _is_reputed_auditor(auditor_name):
             score += 3
         elif auditor_name:
             score += 1

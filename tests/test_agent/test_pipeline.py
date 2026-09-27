@@ -151,6 +151,11 @@ def mock_pipeline_env():
     mock_breeze.__aexit__ = AsyncMock(return_value=None)
     mock_breeze.get_stock_quote = AsyncMock(return_value=None)
 
+    mock_nse_filings = AsyncMock()
+    mock_nse_filings.__aenter__ = AsyncMock(return_value=mock_nse_filings)
+    mock_nse_filings.__aexit__ = AsyncMock(return_value=None)
+    mock_nse_filings.get_filing_governance = AsyncMock(return_value=None)
+
     return {
         "claude": mock_claude,
         "nse": mock_nse,
@@ -159,6 +164,7 @@ def mock_pipeline_env():
         "trendlyne": mock_trendlyne,
         "yfinance": mock_yfinance,
         "breeze": mock_breeze,
+        "nse_filings": mock_nse_filings,
     }
 
 
@@ -174,6 +180,7 @@ async def test_happy_path_buy_recommendation(mock_pipeline_env):
     pipeline.trendlyne = env["trendlyne"]
     pipeline.yfinance = env["yfinance"]
     pipeline.breeze = env["breeze"]
+    pipeline.nse_filings = env["nse_filings"]
     from src.logging_config import get_logger
     pipeline.log = get_logger("pipeline_test")
 
@@ -204,6 +211,7 @@ async def test_governance_snapshot_resaved_after_step1(mock_pipeline_env):
     pipeline.trendlyne = env["trendlyne"]
     pipeline.yfinance = env["yfinance"]
     pipeline.breeze = env["breeze"]
+    pipeline.nse_filings = env["nse_filings"]
     from src.logging_config import get_logger
     pipeline.log = get_logger("pipeline_test")
 
@@ -241,6 +249,7 @@ async def test_step1_governance_fail_terminates_with_rejection(mock_pipeline_env
     pipeline.trendlyne = env["trendlyne"]
     pipeline.yfinance = env["yfinance"]
     pipeline.breeze = env["breeze"]
+    pipeline.nse_filings = env["nse_filings"]
     from src.logging_config import get_logger
     pipeline.log = get_logger("pipeline_test")
 
@@ -284,6 +293,7 @@ async def test_step3_financials_fail_terminates(mock_pipeline_env):
     pipeline.trendlyne = env["trendlyne"]
     pipeline.yfinance = env["yfinance"]
     pipeline.breeze = env["breeze"]
+    pipeline.nse_filings = env["nse_filings"]
     from src.logging_config import get_logger
     pipeline.log = get_logger("pipeline_test")
 
@@ -323,6 +333,7 @@ async def test_mode_detection_sets_market_mode(mock_pipeline_env):
     pipeline.trendlyne = env["trendlyne"]
     pipeline.yfinance = env["yfinance"]
     pipeline.breeze = env["breeze"]
+    pipeline.nse_filings = env["nse_filings"]
     from src.logging_config import get_logger
     pipeline.log = get_logger("pipeline_test")
 
@@ -337,3 +348,106 @@ def test_pipeline_accepts_shared_claude_client():
     sentinel = object()
     pipeline = InvestmentPipeline(claude=sentinel)  # type: ignore[arg-type]
     assert pipeline.claude is sentinel
+
+
+# ---------------------------------------------------------------------------
+# NSE integrated-filing governance merge (auditor + RPT)
+# ---------------------------------------------------------------------------
+
+
+def _bare_pipeline() -> InvestmentPipeline:
+    from src.logging_config import get_logger
+
+    pipeline = InvestmentPipeline.__new__(InvestmentPipeline)
+    pipeline.log = get_logger("pipeline_test")
+    return pipeline
+
+
+def test_merge_filing_governance_fills_missing_fields():
+    from src.api.nse_filings import FilingGovernance
+    from src.models import AnalysisState, GovernanceData
+
+    state = AnalysisState(ticker="ACME")
+    state.governance_data = GovernanceData(promoter_holding_pct=55.0)
+    filing = FilingGovernance(
+        auditor_name="B S R & Co. LLP",
+        modified_opinion=True,
+        rpt_pct_revenue=23.4,
+        rpt_fiscal_year="FY2026",
+        data_flags=["[RPT 23.4% of revenue (FY2026) — NSE integrated-filing RPT disclosure]"],
+    )
+    _bare_pipeline()._merge_filing_governance("ACME", state, filing)
+
+    g = state.governance_data
+    assert g.auditor_name == "B S R & Co. LLP"
+    assert g.rpt_pct_revenue == 23.4
+    assert len(g.audit_qualifications) == 1
+    assert "modified audit opinion" in g.audit_qualifications[0].lower()
+    # Must not accidentally trip the going-concern / resignation immediate triggers
+    assert "going concern" not in g.audit_qualifications[0].lower()
+    assert "resign" not in g.audit_qualifications[0].lower()
+    assert any(f.startswith("[RPT 23.4%") for f in g.data_flags)
+
+
+def test_merge_filing_governance_does_not_overwrite_existing_values():
+    from src.api.nse_filings import FilingGovernance
+    from src.models import AnalysisState, GovernanceData
+
+    state = AnalysisState(ticker="ACME")
+    state.governance_data = GovernanceData(auditor_name="Deloitte Haskins & Sells LLP", rpt_pct_revenue=4.0)
+    _bare_pipeline()._merge_filing_governance(
+        "ACME", state, FilingGovernance(auditor_name="Other & Co", rpt_pct_revenue=30.0)
+    )
+    assert state.governance_data.auditor_name == "Deloitte Haskins & Sells LLP"
+    assert state.governance_data.rpt_pct_revenue == 4.0
+
+
+@pytest.mark.parametrize("filing", [None, RuntimeError("NSE down")])
+def test_merge_filing_governance_tolerates_missing_or_failed_fetch(filing):
+    from src.models import AnalysisState, GovernanceData
+
+    state = AnalysisState(ticker="ACME")
+    state.governance_data = GovernanceData(promoter_holding_pct=55.0)
+    _bare_pipeline()._merge_filing_governance("ACME", state, filing)
+    assert state.governance_data.auditor_name is None
+    assert state.governance_data.rpt_pct_revenue is None
+
+
+@pytest.mark.asyncio
+async def test_prefetch_merges_filing_governance_and_skips_trendlyne(mock_pipeline_env, monkeypatch):
+    """Filing auditor/RPT land on state before Step 1; Trendlyne isn't needed for the auditor."""
+    from src.api.cache import data_cache
+    from src.api.nse_filings import FilingGovernance
+    from src.models import AnalysisState, GovernanceData
+
+    env = mock_pipeline_env
+    ticker = "FILINGMERGE"
+    for key in (data_cache.quote_key(ticker), data_cache.financials_key(ticker),
+                data_cache.shareholding_key(ticker), data_cache.valuation_key(ticker)):
+        data_cache.invalidate(key)
+    env["nse"].get_shareholding = AsyncMock(
+        return_value=GovernanceData(promoter_holding_pct=60.0, promoter_pledging_pct=0.0)
+    )
+    env["nse_filings"].get_filing_governance = AsyncMock(
+        return_value=FilingGovernance(auditor_name="S R B C & CO LLP", rpt_pct_revenue=6.5,
+                                      rpt_fiscal_year="FY2026")
+    )
+
+    async def _no_save(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr("src.db.repository.save_snapshot", _no_save)
+
+    pipeline = _bare_pipeline()
+    clients = {
+        "nse": env["nse"], "nse_filings": env["nse_filings"], "screener": env["screener"],
+        "bse": env["bse"], "trendlyne": env["trendlyne"], "breeze": env["breeze"],
+        "yfinance": env["yfinance"],
+    }
+    state = AnalysisState(ticker=ticker)
+    await pipeline._prefetch_data(state, clients)
+
+    assert state.governance_data.auditor_name == "S R B C & CO LLP"
+    assert state.governance_data.rpt_pct_revenue == 6.5
+    env["nse_filings"].get_filing_governance.assert_awaited_once_with(ticker)
+    env["trendlyne"].get_governance_data.assert_not_awaited()

@@ -679,3 +679,115 @@ async def test_reputed_indian_auditor_scores_3():
     state = await step.run(state)
 
     assert state.governance.sub_scores["audit"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Auditor / RPT sourced from exchange filings
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name,reputed",
+    [
+        ("B S R & Co. LLP", True),                 # KPMG affiliate, exchange spelling
+        ("BSR & Associates LLP", True),
+        ("S.R. Batliboi & Associates LLP", True),  # EY affiliate
+        ("S R B C & CO LLP", True),
+        ("M/s. Walker Chandiok & Co LLP", True),
+        ("Price Waterhouse Chartered Accountants LLP", True),
+        ("Deloitte Haskins & Sells LLP; Chaturvedi & Shah LLP", True),  # joint audit
+        ("Batliboi & Purohit", False),             # not S.R. Batliboi
+        ("S.N. Dhawan & Co LLP", False),
+        ("Kirtane & Pandit LLP", False),
+    ],
+)
+def test_reputed_auditor_matching_is_formatting_insensitive(name, reputed):
+    from src.agent.steps.step1_governance import _is_reputed_auditor
+
+    assert _is_reputed_auditor(name) is reputed
+
+
+@pytest.mark.asyncio
+async def test_rpt_from_filings_above_20_pct_is_immediate_reject():
+    gov = GovernanceData(
+        promoter_holding_pct=55.0,
+        promoter_pledging_pct=0.0,
+        auditor_name="B S R & Co. LLP",
+        rpt_pct_revenue=21.5,
+        sebi_record_clean=True,
+        sebi_record_checked=True,
+        insider_net_buying_3m="NEUTRAL",
+    )
+    state = AnalysisState(ticker="RPTTEST")
+    state.quote = SAMPLE_QUOTE
+    state.governance_data = gov
+
+    state = await make_step().run(state)
+
+    assert state.governance.gate == GateResult.FAIL
+    assert state.terminated_at_step == 1
+    assert any("rpt" in t.lower() for t in state.governance.immediate_triggers)
+    assert state.governance.sub_scores["rpt"] == 0
+
+
+@pytest.mark.asyncio
+async def test_enrichment_researches_audit_history_even_when_auditor_known():
+    """A prefetched auditor name must not stop auditor-change / qualification research."""
+    gov = GovernanceData(
+        promoter_holding_pct=55.0,
+        promoter_pledging_pct=0.0,
+        auditor_name="B S R & Co. LLP",
+        audit_qualifications=["Modified audit opinion — from exchange filing"],
+        rpt_pct_revenue=5.0,
+    )
+    state = AnalysisState(ticker="HISTTEST")
+    state.quote = SAMPLE_QUOTE
+    state.governance_data = gov
+
+    step = make_step()
+    step._agentic_loop = AsyncMock(return_value=json.dumps({
+        "auditor_name": "Someone Else & Co",
+        "auditor_changed_3y": True,
+        "audit_qualifications": ["Emphasis of matter on inventory valuation"],
+        "rpt_pct_revenue": 99.0,
+        "sebi_record_clean": True,
+        "sebi_orders": [],
+        "insider_net_buying_3m": None,
+    }))
+    await step._enrich_governance_data(state)
+
+    initial_message = step._agentic_loop.call_args.kwargs["initial_message"]
+    assert "auditor_changed_3y" in initial_message
+    assert "auditor_name" not in initial_message.split("Missing fields needed:")[1].split(".")[0]
+    g = state.governance_data
+    assert g.auditor_name == "B S R & Co. LLP"   # filing value kept
+    assert g.rpt_pct_revenue == 5.0              # filing value kept
+    assert g.auditor_changed_3y is True
+    assert g.audit_qualifications == [
+        "Modified audit opinion — from exchange filing",
+        "Emphasis of matter on inventory valuation",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_missing_rpt_keeps_unverified_flag_and_default():
+    gov = GovernanceData(
+        promoter_holding_pct=55.0,
+        promoter_pledging_pct=0.0,
+        auditor_name="B S R & Co. LLP",
+        rpt_pct_revenue=None,
+        sebi_record_clean=True,
+        sebi_record_checked=True,
+        insider_net_buying_3m="NEUTRAL",
+    )
+    state = AnalysisState(ticker="NORPT")
+    state.quote = SAMPLE_QUOTE
+    state.governance_data = gov
+    step = make_step()
+    step._agentic_loop = AsyncMock(return_value=json.dumps({"rpt_pct_revenue": None}))
+
+    state = await step.run(state)
+
+    assert state.governance.sub_scores["rpt"] == 1
+    assert state.governance.sub_scores["audit"] == 3
+    assert any("rpt_pct_revenue" in f for f in state.all_data_flags)
