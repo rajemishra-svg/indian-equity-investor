@@ -416,6 +416,21 @@ async def test_all_tracked_tickers_excludes_ticker_superseded_by_reject(db_path)
 
 
 @pytest.mark.asyncio
+async def test_growth_watchlist_saves_target_buy_price(db_path):
+    state = _make_minimal_state("DIXON")
+    state.recommendation_type = "GROWTH_WATCHLIST"
+    state.analysis_mode = "growth"
+    state.valuation = ValuationResult(
+        gate=GateResult.FAIL, dcf_intrinsic_weighted=1000.0, required_mos_pct=20.0
+    )
+    await save_analysis(db_path, state)
+
+    rows = await get_watchlist_with_targets(db_path)
+    assert rows[0]["target_buy_price"] == 800.0
+    assert rows[0]["created_at"]
+
+
+@pytest.mark.asyncio
 async def test_growth_outcomes_are_tracked_and_watchlisted(db_path):
     """Growth-mode buy/watchlist outcomes must reach the monitoring commands."""
     import aiosqlite

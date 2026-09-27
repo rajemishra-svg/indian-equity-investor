@@ -557,7 +557,8 @@ def _print_watchlist_table(title: str, rows_by_ticker: dict, prices: dict, statu
     untargeted = [st.ticker for st in statuses if st.status == "NO TARGET"]
     if untargeted:
         console.print(
-            f"[dim]  No entry target (growth mode or missing DCF): {', '.join(untargeted)}[/dim]"
+            f"[dim]  No entry target (missing DCF, or growth DCF from before the fix): "
+            f"{', '.join(untargeted)}[/dim]"
         )
 
 
@@ -575,8 +576,9 @@ def _print_watchlist_summary(statuses: list) -> None:
     if not enter and not near:
         console.print("\n[dim]No watchlist names near their entry targets.[/dim]")
     console.print(
-        "[dim]Prices in ₹ via Yahoo Finance (~15-20 min delayed). Targets = latest DCF × "
-        "(1 − required MoS for the current market mode).[/dim]"
+        "[dim]Prices in ₹ via Yahoo Finance (~15-20 min delayed). Value targets = latest DCF × "
+        "(1 − required MoS for the current market mode); growth targets use the growth "
+        "step's fixed 20%/30% MoS.[/dim]"
     )
 
 

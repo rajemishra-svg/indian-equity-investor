@@ -146,7 +146,7 @@ async def save_analysis(db_path: str, state: AnalysisState) -> None:
     # live CMP without re-running the full pipeline.
     target_buy_price: float | None = None
     if (
-        state.recommendation_type == "WATCHLIST"
+        state.recommendation_type in ("WATCHLIST", "GROWTH_WATCHLIST")
         and state.valuation
         and state.valuation.dcf_intrinsic_weighted
         and state.valuation.required_mos_pct
@@ -508,7 +508,8 @@ async def get_watchlist_with_targets(db_path: str) -> list[dict]:
                 termination_reason,
                 recommendation,
                 market_mode,
-                analysis_mode
+                analysis_mode,
+                created_at
             FROM analyses
             WHERE id IN (
                 SELECT MAX(id) FROM analyses
@@ -548,7 +549,7 @@ async def get_all_tracked_tickers(db_path: str) -> list[dict]:
                 watchlist_tier, target_buy_price, cmp AS cmp_at_analysis,
                 dcf_intrinsic_weighted, required_mos_pct, mos_pct,
                 governance_score, financial_score, sector_name, conviction,
-                market_mode, analysis_mode
+                market_mode, analysis_mode, created_at
             FROM analyses
             WHERE id IN (
                 SELECT MAX(id) FROM analyses

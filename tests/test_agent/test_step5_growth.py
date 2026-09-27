@@ -77,6 +77,17 @@ async def test_recently_listed_sector_raises_mos_threshold():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    [({}, 20.0), ({"sector_name": "recently_listed"}, 30.0), ({"listing_years": 0.5}, 30.0)],
+)
+async def test_valuation_stores_the_mos_actually_tested(kwargs, expected):
+    """required_mos_pct must be the growth threshold, not the 35% model default."""
+    state = await make_step().run(make_state(rev_3y=40.0, **kwargs))
+    assert state.valuation.required_mos_pct == expected
+
+
+@pytest.mark.asyncio
 async def test_listing_years_below_1_raises_mos_threshold():
     """listing_years = 0.5 (< 1 year) → EC-G2 flag raised."""
     state = make_state(listing_years=0.5)

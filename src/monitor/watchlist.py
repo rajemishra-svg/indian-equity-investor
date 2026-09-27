@@ -8,17 +8,27 @@ the stored target is too strict and entries are flagged late — exactly when
 good companies get cheap.  ``mode_adjusted_target`` re-prices the target for
 the *current* market mode from the stored DCF value.
 
-Growth-mode rows carry no target: their forward-revenue DCF is not trusted
-for entry prices (see ``src/monitor/holdings.py``).
+Growth-mode rows are priced off the growth step's own forward-DCF MoS
+(20%, or 30% when recently listed), which does not vary with market mode.
+Growth rows saved before the growth-DCF unit fix carry no target
+(``growth_dcf_trusted`` in ``src/monitor/holdings.py``).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 from src.models import MarketMode
+from src.monitor.holdings import growth_dcf_trusted
 
 WATCHLIST_RECS = ("WATCHLIST", "GROWTH_WATCHLIST")
 APPROACHING_PCT = 10.0  # within this % above target → "approaching"
+
+# Growth-mode forward-DCF MoS (Step 5G): mode-independent.
+GROWTH_MOS_PCT = 20.0
+GROWTH_MOS_RECENTLY_LISTED_PCT = 30.0
+# Growth rows saved before Step 5G persisted its threshold carry this
+# ValuationResult default instead of the MoS actually tested.
+_LEGACY_DEFAULT_MOS_PCT = 35.0
 
 # MoS concession (pp) granted per market mode — mirrors AnalysisState.required_mos_pct
 _MODE_MOS_CONCESSION = {
@@ -60,15 +70,38 @@ def mode_adjusted_target(
     return round(dcf * (1 - required / 100), 2), required
 
 
+def growth_target(row: dict) -> tuple[float | None, float | None]:
+    """(target, MoS %) for a growth-mode row — no market-mode adjustment."""
+    dcf = row.get("dcf_intrinsic_weighted")
+    required = row.get("required_mos_pct")
+    if required is None or required == _LEGACY_DEFAULT_MOS_PCT:
+        required = (
+            GROWTH_MOS_RECENTLY_LISTED_PCT
+            if row.get("sector_name") == "recently_listed"
+            else GROWTH_MOS_PCT
+        )
+    if not dcf or dcf <= 0:
+        return None, required
+    return round(dcf * (1 - required / 100), 2), required
+
+
+def _is_growth(row: dict) -> bool:
+    return row.get("analysis_mode") == "growth" or row.get("recommendation") == "GROWTH_WATCHLIST"
+
+
 def evaluate_watchlist_row(
     row: dict, live_cmp: float | None, current_mode: MarketMode | None
 ) -> WatchlistStatus:
     ticker = row.get("ticker", "")
-    if row.get("analysis_mode") == "growth" or row.get("recommendation") == "GROWTH_WATCHLIST":
-        return WatchlistStatus(
-            ticker, "NO TARGET", note="Growth-mode DCF not used for entry targets"
-        )
-    target, required = mode_adjusted_target(row, current_mode)
+    growth = _is_growth(row)
+    if growth:
+        if not growth_dcf_trusted({**row, "analysis_mode": "growth"}):
+            return WatchlistStatus(
+                ticker, "NO TARGET", note="Growth DCF predates the valuation fix — re-analyse"
+            )
+        target, required = growth_target(row)
+    else:
+        target, required = mode_adjusted_target(row, current_mode)
     if not target:
         return WatchlistStatus(ticker, "NO TARGET", note="No DCF value in the latest analysis")
     if live_cmp is None:
@@ -84,7 +117,9 @@ def evaluate_watchlist_row(
 
     note = None
     stored = row.get("target_buy_price")
-    if stored and abs(stored - target) > 0.005:
+    if growth:
+        note = f"Growth forward-DCF target (MoS {required:.0f}%, not mode-adjusted)"
+    elif stored and abs(stored - target) > 0.005:
         note = (
             f"Target re-priced for {current_mode.value} market "
             f"(MoS {required:.0f}%; stored ₹{stored:,.2f})"

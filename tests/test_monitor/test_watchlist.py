@@ -98,3 +98,42 @@ def test_sort_in_zone_first_then_closest():
     ]
     statuses.append(evaluate_watchlist_row(_row(ticker="GROW", analysis_mode="growth"), 1.0, None))
     assert [s.ticker for s in sort_statuses(statuses)] == ["IN", "NEAR", "FAR", "GROW"]
+
+
+# ---------------------------------------------------------------------------
+# Growth-mode targets
+# ---------------------------------------------------------------------------
+
+_POST_FIX = "2026-09-26 01:44:20"
+
+
+def _growth_row(**overrides) -> dict:
+    fields = {
+        "recommendation": "GROWTH_WATCHLIST", "analysis_mode": "growth",
+        "created_at": _POST_FIX, "required_mos_pct": 20.0, "target_buy_price": None,
+    }
+    return _row(**{**fields, **overrides})
+
+
+def test_trusted_growth_row_gets_fixed_mos_target_ignoring_mode():
+    st = evaluate_watchlist_row(_growth_row(), 790.0, MarketMode.MAXIMUM_OPPORTUNITY)
+    assert (st.status, st.target, st.required_mos_pct) == ("ENTER ZONE", 800.0, 20.0)
+    assert "not mode-adjusted" in st.note
+
+
+@pytest.mark.parametrize(
+    ("sector", "expected_target"), [(None, 800.0), ("recently_listed", 700.0)]
+)
+def test_legacy_35pct_default_is_replaced_by_growth_threshold(sector, expected_target):
+    st = evaluate_watchlist_row(
+        _growth_row(required_mos_pct=35.0, sector_name=sector), 900.0, MarketMode.NORMAL
+    )
+    assert st.target == expected_target
+
+
+def test_pre_fix_growth_row_has_no_target():
+    st = evaluate_watchlist_row(
+        _growth_row(created_at="2026-07-27 10:00:00"), 100.0, MarketMode.NORMAL
+    )
+    assert st.status == "NO TARGET"
+    assert "predates the valuation fix" in st.note
