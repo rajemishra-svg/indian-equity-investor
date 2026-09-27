@@ -361,7 +361,8 @@ class InvestmentPipeline:
 
         # Shareholding / Governance — 3-layer fallback: NSE → BSE → Screener
         shareholding_result = results[2]
-        shareholding_source = "bse"  # NSE/BSE (historical snapshot label)
+        # Snapshot label: which source actually supplied the shareholding data
+        shareholding_source = "nse" if cached_shareholding is None else "cached"
         if isinstance(shareholding_result, Exception) or shareholding_result is None:
             if isinstance(shareholding_result, Exception):
                 self.log.warning(
@@ -373,6 +374,7 @@ class InvestmentPipeline:
             # Layer 2: BSE
             self.log.info("shareholding_fallback_bse", ticker=ticker)
             shareholding_result = await clients["bse"].get_shareholding(ticker)
+            shareholding_source = "bse"
 
         if shareholding_result is None:
             # Layer 3: Screener.in (same page as financials — cheap re-fetch, usually cached)
