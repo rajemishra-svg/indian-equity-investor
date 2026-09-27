@@ -355,7 +355,13 @@ class BatchScanner:
         summaries = await self.prescreen_universe(tickers, growth=growth)
 
         candidates = sorted(
-            [s for s in summaries if s.score >= prescreen_min_score and not s.error],
+            [
+                s
+                for s in summaries
+                if s.score >= prescreen_min_score
+                and not s.error
+                and s.gate != GateResult.FAIL
+            ],
             key=sort_key,
         )
         _prescreen_elapsed = round(time.monotonic() - _t_prescreen, 1)

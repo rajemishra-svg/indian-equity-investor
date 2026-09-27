@@ -46,12 +46,12 @@ class Step0GrowthPreScreen(BaseStep):
         failed_metrics: list[str] = []
         data_flags: list[str] = []
         conditional_exceptions: list[str] = []
+        hard_triggers: list[str] = []
 
         # ------------------------------------------------------------------
         # G1 — Revenue momentum: YoY must be ≥ 80% of 3Y CAGR (or ≥ 20% abs)
         # Growth stories should not be decelerating sharply. A drop below 80%
-        # of the 3Y CAGR signals the growth engine is stalling. We fail
-        # outright here to avoid wasting Steps 1-8 on a broken story.
+        # of the 3Y CAGR signals the growth engine is stalling.
         # ------------------------------------------------------------------
         rev_1y = gm.revenue_cagr_1y
         rev_3y = f.revenue_cagr_3y if f else None
@@ -66,8 +66,19 @@ class Step0GrowthPreScreen(BaseStep):
                 data_flags.append(
                     f"[HT-G0: REVENUE DECELERATION AT PRESCREEN — "
                     f"YoY {rev_1y:.1f}% < momentum threshold {momentum_threshold:.1f}% "
-                    f"(80% of 3Y CAGR {rev_3y:.1f}%, Δ {decel_pp:.1f}pp); "
-                    "growth story may be breaking — full analysis skipped]"
+                    f"(80% of 3Y CAGR {rev_3y:.1f}%, Δ {decel_pp:.1f}pp)]"
+                )
+
+            # HT-G1 — same hard-trigger condition Step 3G uses to terminate
+            # the pipeline (decel > 15pp AND absolute YoY growth < 15%).
+            # Firing it here, before Steps 1-8 run, avoids paying for a full
+            # governance + moat + valuation pass on a story Step 3G would
+            # reject anyway on identical numbers.
+            if decel_pp > 15 and rev_1y < 15:
+                hard_triggers.append(
+                    f"[HT-G1: REVENUE DECELERATION — 3Y CAGR {rev_3y:.1f}% vs "
+                    f"latest YoY {rev_1y:.1f}% (Δ {decel_pp:.1f}pp); growth story "
+                    "may be breaking — full analysis skipped]"
                 )
         elif rev_3y is not None:
             passed_g1 = rev_3y >= 25.0
@@ -283,7 +294,11 @@ class Step0GrowthPreScreen(BaseStep):
 
         # Gate: 8+ green = PASS_GREEN, 7 = PASS_CONDITIONAL, <7 = FAIL
         # Max score is now 10 (added ev_revenue_cap gate)
-        if score >= 8:
+        # A hard trigger overrides the score-based gate entirely, mirroring
+        # how Step 1's IMMEDIATE_TRIGGER_CHECKS override its governance score.
+        if hard_triggers:
+            gate = GateResult.FAIL
+        elif score >= 8:
             gate = GateResult.PASS_GREEN
         elif score >= 7:
             gate = GateResult.PASS_CONDITIONAL
@@ -302,6 +317,7 @@ class Step0GrowthPreScreen(BaseStep):
             failed_metrics=failed_metrics,
             conditional_exceptions=conditional_exceptions,
             data_flags=data_flags,
+            hard_triggers=hard_triggers,
         )
         state.pre_screen = result
 
@@ -315,14 +331,20 @@ class Step0GrowthPreScreen(BaseStep):
             max_score=10,
             sector=state.sector_name,
             failed_metrics=failed_metrics,
+            hard_triggers=hard_triggers,
         )
 
         if gate == GateResult.FAIL:
             state.terminated_at_step = self.step_number
-            state.termination_reason = (
-                f"Growth pre-screen FAILED: score {score}/10, "
-                f"failed: {', '.join(failed_metrics)}"
-            )
+            if hard_triggers:
+                state.termination_reason = (
+                    f"Growth pre-screen FAILED: hard trigger — {'; '.join(hard_triggers)}"
+                )
+            else:
+                state.termination_reason = (
+                    f"Growth pre-screen FAILED: score {score}/10, "
+                    f"failed: {', '.join(failed_metrics)}"
+                )
             state.recommendation_type = "GROWTH_REJECT"
             self.log.info(
                 "pipeline_terminated",
