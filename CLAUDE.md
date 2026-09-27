@@ -346,7 +346,7 @@ wacc_terminal_growth = 6.0    # %
 tranche_t2_discount  = 0.08   # 8% below CMP
 tranche_t3_discount  = 0.15   # 15% below CMP
 
-# Stop-loss levels (used by Step 9 exit strategy)
+# Review levels (Step 9 "Review Level" + holdings-alerts SHARP FALL; not a sell signal)
 stop_loss_large_cap  = 0.82   # 18% below buy price
 stop_loss_mid_cap    = 0.75   # 25% below buy price
 stop_loss_small_cap  = 0.70   # 30% below buy price
@@ -385,7 +385,7 @@ If Nifty data unavailable, defaults to Normal + adds `[MODE UNCONFIRMED]` flag.
 
 **Position sizing**: conviction sets the base allocation (HIGH 5% / MEDIUM 3% / LOW 2%), then Step 9 risk-adjusts BUYs by realized volatility: `allocation × clamp(sizing_target_vol_pct / annualized_vol, sizing_min_factor, 1.0)`, rounded to 0.5%, floored at 1%. Volatility comes from 1Y daily returns via yfinance (`get_annualized_volatility`); when unavailable the allocation is left unchanged and flagged `[DATA UNVERIFIED: realized volatility]`. EC-01 pre-profit cap (≤4%) applies before scaling.
 
-**Tranche plan** (always in BUY output): T1 40% @ CMP, T2 35% @ CMP×(1−tranche_t2_discount), T3 25% @ CMP×(1−tranche_t3_discount). Default discounts: 8%/15%. Sector profiles (e.g., `commodities_cyclical`) override these (applied in Step 6). When Step 6 guidance is RED (0/5 signals), T1 is deferred to a pullback: the 200-DMA if below CMP, never deeper than T2 (`TechnicalSignal.entry_deferred`, `[ENTRY DEFERRED]` flag). Stop-loss thresholds: large-cap 18%, mid-cap 25%, small-cap 30% — all configurable via settings.
+**Tranche plan** (always in BUY output): T1 40% @ CMP, T2 35% @ CMP×(1−tranche_t2_discount), T3 25% @ CMP×(1−tranche_t3_discount). Default discounts: 8%/15%. Sector profiles (e.g., `commodities_cyclical`) override these (applied in Step 6). When Step 6 guidance is RED (0/5 signals), T1 is deferred to a pullback: the 200-DMA if below CMP, never deeper than T2 (`TechnicalSignal.entry_deferred`, `[ENTRY DEFERRED]` flag). Review levels (the `stop_loss_*` settings): large-cap 18%, mid-cap 25%, small-cap 30% below price — shown as "Review Level" in the Step 9 report and used by `holdings-alerts`; a fall below one prompts a thesis re-analysis, never a sell. All configurable via settings.
 
 **Tax**: LTCG 12.5% on gains > ₹1.25L after 1 year; STCG 20% under 1 year. After any trade, update all four files in `portfolio/`.
 

@@ -602,13 +602,13 @@ async def get_summary(db_path: str) -> list[dict]:
 
 
 async def get_entry_plan(db_path: str, ticker: str) -> dict | None:
-    """Extract entry prices, stop-loss, and exit targets from the latest analysis.
+    """Extract entry prices, review level, and exit targets from the latest analysis.
 
     Returns a dict with:
       - ticker, company_name, analysis_date, recommendation, conviction, cap_size, cmp
       - entry_price (current price at time of analysis)
-      - stop_loss (if available from Step 9)
-      - exit_target (if available from Step 9)
+      - stop_loss (review level from Step 9 — re-analyse below it, not a sell signal)
+      - exit_target (Step 9 "reduce" exit target)
       - tranche_1, tranche_2, tranche_3 (entry price levels)
       - allocation_pct (position sizing)
     """
@@ -619,7 +619,8 @@ async def get_entry_plan(db_path: str, ticker: str) -> dict | None:
             """
             SELECT
                 ticker, company_name, analysis_date, recommendation, conviction,
-                cap_size, cmp, allocation_pct, mos_pct
+                cap_size, cmp, allocation_pct, mos_pct,
+                stop_loss_price, exit_reduce_price
             FROM analyses
             WHERE ticker = ?
             ORDER BY analysis_date DESC
@@ -637,9 +638,10 @@ async def get_entry_plan(db_path: str, ticker: str) -> dict | None:
     result['allocation_pct'] = result.get('allocation_pct')
     result['mos_pct'] = result.get('mos_pct')
 
-    # TODO: Extract stop_loss and exit_target from analysis_data JSON when Step 9 output is structured
-    result['stop_loss'] = None
-    result['exit_target'] = None
+    # Persisted by Step 9 since the exit plan columns were added (older rows: None).
+    # stop_loss is the review level — a re-analyse prompt, not a sell signal.
+    result['stop_loss'] = result.pop('stop_loss_price', None)
+    result['exit_target'] = result.pop('exit_reduce_price', None)
     result['tranche_1'] = None
     result['tranche_2'] = None
     result['tranche_3'] = None

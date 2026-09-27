@@ -83,7 +83,9 @@ class Settings(BaseSettings):
     tranche_t2_discount: float = 0.08   # 8% below CMP
     tranche_t3_discount: float = 0.15   # 15% below CMP
 
-    # --- Stop-loss multipliers by cap size ---
+    # --- Review-level multipliers by cap size (historically "stop-loss") ---
+    # A fall below price × multiplier prompts a thesis re-analysis (Step 9
+    # "Review Level", holdings-alerts SHARP FALL). Never a sell signal.
     stop_loss_large_cap: float = 0.82
     stop_loss_mid_cap: float = 0.75
     stop_loss_small_cap: float = 0.70

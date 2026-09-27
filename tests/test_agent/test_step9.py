@@ -330,3 +330,19 @@ async def test_exit_strategy_has_full_ladder_and_stop_multiplier():
     assert (ex.exit_trim_price, ex.valuation_exit_price, ex.exit_full_price) == (230.0, 300.0, 400.0)
     assert ex.stop_loss_multiplier == 0.70
     assert ex.stop_loss_price == 70.0
+
+
+# ---------------------------------------------------------------------------
+# Review level wording (long-term tool: re-analyse, never "stop-loss")
+# ---------------------------------------------------------------------------
+
+
+def test_review_level_line_is_not_a_stop_loss():
+    from src.agent.steps.step9_output import _review_level_line
+    from src.models import ExitStrategy
+
+    line = _review_level_line(ExitStrategy(fundamental_trigger="x", stop_loss_price=70.0))
+    assert line.startswith("  Review Level        : ₹70.0")
+    assert "re-analyse the thesis" in line and "not a sell signal" in line
+    assert "Stop-Loss" not in line
+    assert _review_level_line(ExitStrategy(fundamental_trigger="x")).endswith("[NOT AVAILABLE]")

@@ -118,7 +118,8 @@ RISK ANALYSIS (PREMORTEM)                                               [REQUIRE
 EXIT STRATEGY                                                           [REQUIRED]
   Fundamental Exit: [Specific trigger — e.g., "ROE falls below 14% for 2 years"]
   Valuation Exit  : ₹[X] (approx 85th–90th P/E percentile = Xx)
-  Stop-Loss       : ₹[X]  (Large Cap: 18% below CMP | Mid Cap: 25% | Small Cap: 30%)
+  Review Level    : ₹[X]  (Large Cap: 18% below CMP | Mid Cap: 25% | Small Cap: 30%)
+                    Re-analyse the thesis if price falls below — not a sell signal
   LTCG Note       : Purchased [date] → LTCG eligible after [date]
 ──────────────────────────────────────────────────────────────────────────
 DATA QUALITY                                                            [REQUIRED]
